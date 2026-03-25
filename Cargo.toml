@@ -31,7 +31,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ratatui = "0.30"
 crossterm = "0.29"
 urlencoding = "2"
-toml = "0.8"
+toml = "1.1"
 rand = "0.8"
 chrono = { version = "0.4", features = ["clock"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
