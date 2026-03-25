@@ -1,17 +1,17 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::DefaultTerminal;
+use tokio::sync::Semaphore;
 
 use crate::auth;
 use crate::jwt::AccountInfo;
 use crate::profile::{
     cmd_delete, list_profiles, profile_auth_path, read_current, rename_profile, switch_profile,
 };
-use crate::usage::{fetch_usage_retried, UsageInfo};
-
-const CACHE_TTL_SECS: u64 = 60;
+use crate::usage::{UsageInfo, fetch_usage_retried, fetch_usage_retried_force};
 
 #[derive(Debug, Clone)]
 pub struct AccountEntry {
@@ -25,7 +25,7 @@ pub struct AccountEntry {
 pub enum UsageStatus {
     Idle,
     Loading,
-    Loaded(UsageInfo, Instant),
+    Loaded(UsageInfo),
     Error(String),
 }
 
@@ -48,6 +48,7 @@ pub struct App {
     pub result_sender: tokio::sync::mpsc::Sender<(usize, Result<UsageInfo, String>)>,
     pub confirm: Option<ConfirmAction>,
     pub rename: Option<RenameState>,
+    pub usage_limiter: Arc<Semaphore>,
 }
 
 impl App {
@@ -62,6 +63,7 @@ impl App {
             result_sender: tx,
             confirm: None,
             rename: None,
+            usage_limiter: Arc::new(Semaphore::new(crate::config::get().network.max_concurrent)),
         }
     }
 
@@ -74,7 +76,12 @@ impl App {
                 let path = profile_auth_path(&alias);
                 let info = auth::read_account_info(&path);
                 let is_current = alias == current;
-                AccountEntry { alias, info, usage: UsageStatus::Idle, is_current }
+                AccountEntry {
+                    alias,
+                    info,
+                    usage: UsageStatus::Idle,
+                    is_current,
+                }
             })
             .collect();
         if let Some(idx) = self.accounts.iter().position(|a| a.is_current) {
@@ -83,10 +90,13 @@ impl App {
     }
 
     pub fn loading_count(&self) -> usize {
-        self.accounts.iter().filter(|a| matches!(a.usage, UsageStatus::Loading)).count()
+        self.accounts
+            .iter()
+            .filter(|a| matches!(a.usage, UsageStatus::Loading))
+            .count()
     }
 
-    pub fn fetch_usage_for(&mut self, idx: usize) {
+    fn fetch_usage_for(&mut self, idx: usize, force: bool) {
         let entry = match self.accounts.get(idx) {
             Some(e) => e,
             None => return,
@@ -94,37 +104,45 @@ impl App {
         if matches!(entry.usage, UsageStatus::Loading) {
             return;
         }
-        if let UsageStatus::Loaded(_, fetched_at) = &entry.usage {
-            if fetched_at.elapsed().as_secs() < CACHE_TTL_SECS {
-                return;
-            }
+        if !force && matches!(entry.usage, UsageStatus::Loaded(_)) {
+            return;
         }
 
         let alias = entry.alias.clone();
         let path = profile_auth_path(&alias);
         let current = read_current();
+        let limiter = self.usage_limiter.clone();
 
         self.accounts[idx].usage = UsageStatus::Loading;
 
         let tx = self.result_sender.clone();
         tokio::spawn(async move {
-            let result = fetch_usage_retried(&alias, &path, &current).await;
+            let _permit = limiter.acquire().await;
+            let result = if force {
+                fetch_usage_retried_force(&alias, &path, &current).await
+            } else {
+                fetch_usage_retried(&alias, &path, &current).await
+            };
             let _ = tx.send((idx, result)).await;
         });
     }
 
-    pub fn refresh_all(&mut self) {
+    /// Fetch all accounts. If `force` is true, bypass disk cache.
+    pub fn refresh_all(&mut self, force: bool) {
         for entry in &mut self.accounts {
             match &entry.usage {
-                UsageStatus::Error(_) | UsageStatus::Loaded(_, _) => {
-                    entry.usage = UsageStatus::Idle;
-                }
+                UsageStatus::Error(_) => entry.usage = UsageStatus::Idle,
+                UsageStatus::Loaded(_) if force => entry.usage = UsageStatus::Idle,
                 _ => {}
+            }
+
+            if !force && let Some(cached) = crate::cache::get(&entry.alias) {
+                entry.usage = UsageStatus::Loaded(cached);
             }
         }
         let count = self.accounts.len();
         for i in 0..count {
-            self.fetch_usage_for(i);
+            self.fetch_usage_for(i, force);
         }
     }
 
@@ -132,7 +150,7 @@ impl App {
         while let Ok((idx, result)) = self.pending_results.try_recv() {
             if let Some(entry) = self.accounts.get_mut(idx) {
                 entry.usage = match result {
-                    Ok(u) => UsageStatus::Loaded(u, Instant::now()),
+                    Ok(u) => UsageStatus::Loaded(u),
                     Err(e) => UsageStatus::Error(e),
                 };
             }
@@ -178,7 +196,7 @@ impl App {
                     if self.selected >= self.accounts.len() && !self.accounts.is_empty() {
                         self.selected = self.accounts.len() - 1;
                     }
-                    self.refresh_all();
+                    self.refresh_all(true);
                 }
                 Err(e) => self.set_status(format!("Delete failed: {e}"), 5),
             },
@@ -193,7 +211,11 @@ impl App {
         if let Some(entry) = self.accounts.get(self.selected) {
             let old = entry.alias.clone();
             let len = old.len();
-            self.rename = Some(RenameState { old_alias: old.clone(), input: old, cursor: len });
+            self.rename = Some(RenameState {
+                old_alias: old.clone(),
+                input: old,
+                cursor: len,
+            });
         }
     }
 
@@ -203,13 +225,21 @@ impl App {
             None => return false,
         };
         match code {
-            KeyCode::Esc => { self.rename = None; return false; }
+            KeyCode::Esc => {
+                self.rename = None;
+                return false;
+            }
             KeyCode::Enter => {
                 let old = state.old_alias.clone();
                 let new = state.input.trim().to_string();
                 self.rename = None;
-                if new.is_empty() || new == old { return false; }
-                if !new.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                if new.is_empty() || new == old {
+                    return false;
+                }
+                if !new
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                {
                     self.set_status("Invalid alias (use letters, digits, - or _)".to_string(), 3);
                     return false;
                 }
@@ -220,7 +250,7 @@ impl App {
                         if let Some(idx) = self.accounts.iter().position(|a| a.alias == new) {
                             self.selected = idx;
                         }
-                        self.refresh_all();
+                        self.refresh_all(true);
                     }
                     Err(e) => self.set_status(format!("Rename failed: {e}"), 5),
                 }
@@ -240,13 +270,23 @@ impl App {
                     state.input.remove(byte_pos);
                 }
             }
-            KeyCode::Left => { if state.cursor > 0 { state.cursor -= 1; } }
+            KeyCode::Left => {
+                if state.cursor > 0 {
+                    state.cursor -= 1;
+                }
+            }
             KeyCode::Right => {
                 let char_count = state.input.chars().count();
-                if state.cursor < char_count { state.cursor += 1; }
+                if state.cursor < char_count {
+                    state.cursor += 1;
+                }
             }
-            KeyCode::Home => { state.cursor = 0; }
-            KeyCode::End => { state.cursor = state.input.chars().count(); }
+            KeyCode::Home => {
+                state.cursor = 0;
+            }
+            KeyCode::End => {
+                state.cursor = state.input.chars().count();
+            }
             KeyCode::Char(c) => {
                 let byte_pos = char_to_byte(&state.input, state.cursor);
                 state.input.insert(byte_pos, c);
@@ -263,16 +303,25 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        if let Some(expiry) = self.status_expiry {
-            if Instant::now() >= expiry {
-                self.status_msg = None;
-                self.status_expiry = None;
-            }
+        if let Some(expiry) = self.status_expiry
+            && Instant::now() >= expiry
+        {
+            self.status_msg = None;
+            self.status_expiry = None;
         }
     }
 }
 
 pub async fn run() -> Result<()> {
+    crate::profile::auto_track_current();
+
+    // Ensure terminal is restored even on panic
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        original_hook(info);
+    }));
+
     let mut terminal = ratatui::init();
     let result = run_app(&mut terminal).await;
     ratatui::restore();
@@ -280,8 +329,6 @@ pub async fn run() -> Result<()> {
 }
 
 async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
-    crate::profile::auto_track_current();
-
     let mut app = App::new();
     app.load_profiles();
 
@@ -291,7 +338,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
         return Ok(());
     }
 
-    app.refresh_all();
+    app.refresh_all(false);
 
     loop {
         app.poll_results();
@@ -299,37 +346,43 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
 
         terminal.draw(|f| super::ui::render(f, &app))?;
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press { continue; }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
 
-                if app.rename.is_some() {
-                    app.handle_rename_key(key.code);
-                    continue;
-                }
+            if app.rename.is_some() {
+                app.handle_rename_key(key.code);
+                continue;
+            }
 
-                if app.confirm.is_some() {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_action(),
-                        _ => app.cancel_confirm(),
-                    }
-                    continue;
-                }
-
+            if app.confirm.is_some() {
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if app.selected + 1 < app.accounts.len() { app.selected += 1; }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if app.selected > 0 { app.selected -= 1; }
-                    }
-                    KeyCode::Enter => app.switch_selected(),
-                    KeyCode::Char('r') => app.refresh_all(),
-                    KeyCode::Char('d') => app.request_delete(),
-                    KeyCode::Char('n') => app.start_rename(),
-                    _ => {}
+                    KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_action(),
+                    _ => app.cancel_confirm(),
                 }
+                continue;
+            }
+
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if app.selected + 1 < app.accounts.len() {
+                        app.selected += 1;
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if app.selected > 0 {
+                        app.selected -= 1;
+                    }
+                }
+                KeyCode::Enter => app.switch_selected(),
+                KeyCode::Char('r') => app.refresh_all(true),
+                KeyCode::Char('d') => app.request_delete(),
+                KeyCode::Char('n') => app.start_rename(),
+                _ => {}
             }
         }
     }

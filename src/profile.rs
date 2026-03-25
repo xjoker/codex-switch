@@ -8,6 +8,7 @@ use crate::auth::{
 };
 use crate::error::CsError;
 use crate::jwt::parse_account_info;
+use crate::output::{user_print, user_println};
 
 pub fn profile_auth_path(alias: &str) -> PathBuf {
     profiles_dir().join(alias).join("auth.json")
@@ -82,18 +83,17 @@ pub fn find_profile_by_identity(identity: &AccountIdentity) -> Option<String> {
         };
         let existing = extract_identity(&val);
 
-        if let (Some(a), Some(b)) = (&identity.account_id, &existing.account_id) {
-            if a == b {
-                return Some(alias);
-            }
+        if let (Some(a), Some(b)) = (&identity.account_id, &existing.account_id)
+            && a == b
+        {
+            return Some(alias);
         }
 
-        if email_match.is_none() {
-            if let (Some(a), Some(b)) = (&identity.email, &existing.email) {
-                if a == b {
-                    email_match = Some(alias);
-                }
-            }
+        if email_match.is_none()
+            && let (Some(a), Some(b)) = (&identity.email, &existing.email)
+            && a == b
+        {
+            email_match = Some(alias);
         }
     }
 
@@ -103,7 +103,13 @@ pub fn find_profile_by_identity(identity: &AccountIdentity) -> Option<String> {
 pub fn alias_from_email(email: &str) -> String {
     let base = email.split('@').next().unwrap_or(email);
     base.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string()
@@ -114,6 +120,43 @@ pub fn alias_from_email(email: &str) -> String {
 pub enum SaveAction {
     Created(String),
     Updated(String),
+}
+
+impl SaveAction {
+    pub fn alias(&self) -> &str {
+        match self {
+            SaveAction::Created(alias) | SaveAction::Updated(alias) => alias,
+        }
+    }
+
+    pub fn action(&self) -> &'static str {
+        match self {
+            SaveAction::Created(_) => "created",
+            SaveAction::Updated(_) => "updated",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ImportSuccess {
+    pub source: PathBuf,
+    pub alias: String,
+    pub action: &'static str,
+    pub account: crate::jwt::AccountInfo,
+    pub usage: crate::usage::UsageInfo,
+}
+
+#[derive(Debug)]
+pub struct ImportFailure {
+    pub source: PathBuf,
+    pub stage: &'static str,
+    pub error: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ImportReport {
+    pub imported: Vec<ImportSuccess>,
+    pub skipped: Vec<ImportFailure>,
 }
 
 // ── Auto-track ────────────────────────────────────────────
@@ -130,11 +173,11 @@ pub fn auto_track_current() -> bool {
         Err(_) => return false,
     };
     let identity = extract_identity(&val);
-    if find_profile_by_identity(&identity).is_none() {
-        if let Ok(SaveAction::Created(a)) = cmd_save(None) {
-            println!("Auto-saved current account as profile: {a}");
-            return true;
-        }
+    if find_profile_by_identity(&identity).is_none()
+        && let Ok(SaveAction::Created(a)) = cmd_save(None)
+    {
+        user_println(&format!("Auto-saved current account as profile: {a}"));
+        return true;
     }
     false
 }
@@ -159,7 +202,7 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
                 let dst = profile_auth_path(existing_alias);
                 write_auth(&dst, &val)?;
                 write_current(existing_alias)?;
-                println!("Updated profile: {existing_alias}");
+                user_println(&format!("Updated profile: {existing_alias}"));
                 return Ok(SaveAction::Updated(existing_alias.clone()));
             }
             identity
@@ -170,18 +213,20 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
         }
     };
 
-    if alias.is_some() {
-        if let Some(existing_alias) = existing {
-            let dst = profile_auth_path(&existing_alias);
-            write_auth(&dst, &val)?;
-            write_current(&existing_alias)?;
-            if existing_alias != resolved_alias {
-                println!("Duplicate account detected — updated existing profile: {existing_alias} (not creating {resolved_alias})");
-            } else {
-                println!("Updated profile: {existing_alias}");
-            }
-            return Ok(SaveAction::Updated(existing_alias));
+    if alias.is_some()
+        && let Some(existing_alias) = existing
+    {
+        let dst = profile_auth_path(&existing_alias);
+        write_auth(&dst, &val)?;
+        write_current(&existing_alias)?;
+        if existing_alias != resolved_alias {
+            user_println(&format!(
+                "Duplicate account detected — updated existing profile: {existing_alias} (not creating {resolved_alias})"
+            ));
+        } else {
+            user_println(&format!("Updated profile: {existing_alias}"));
         }
+        return Ok(SaveAction::Updated(existing_alias));
     }
 
     // New profile
@@ -190,13 +235,15 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
         let unique = make_unique_alias(&resolved_alias);
         write_auth(&profile_auth_path(&unique), &val)?;
         write_current(&unique)?;
-        println!("Saved profile: {unique} (alias '{resolved_alias}' already taken)");
+        user_println(&format!(
+            "Saved profile: {unique} (alias '{resolved_alias}' already taken)"
+        ));
         return Ok(SaveAction::Created(unique));
     }
 
     write_auth(&dst, &val)?;
     write_current(&resolved_alias)?;
-    println!("Saved profile: {resolved_alias}");
+    user_println(&format!("Saved profile: {resolved_alias}"));
     Ok(SaveAction::Created(resolved_alias))
 }
 
@@ -220,8 +267,11 @@ pub fn cmd_use(alias: &str) -> Result<()> {
     let dst = codex_auth_path();
 
     if dst.exists() && find_matching_profile(&dst).is_none() {
-        print!("Current auth.json does not belong to any saved profile — switching will overwrite it. Continue? [y/N] ");
+        user_print(
+            "Current auth.json does not belong to any saved profile — switching will overwrite it. Continue? [y/N] ",
+        );
         io::stdout().flush()?;
+        io::stderr().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
@@ -234,7 +284,7 @@ pub fn cmd_use(alias: &str) -> Result<()> {
     write_auth(&dst, &val)?;
     write_current(alias)?;
 
-    println!("Switched to profile: {alias}");
+    user_println(&format!("Switched to profile: {alias}"));
     Ok(())
 }
 
@@ -256,55 +306,72 @@ pub fn cmd_delete(alias: &str) -> Result<()> {
     if !dir.exists() {
         return Err(CsError::NotFound(alias.to_string()).into());
     }
-    std::fs::remove_dir_all(&dir)?;
-
     if read_current() == alias {
-        let _ = std::fs::write(current_file(), "");
+        return Err(CsError::ActiveProfileDelete(alias.to_string()).into());
     }
-
-    println!("Deleted profile: {alias}");
+    std::fs::remove_dir_all(&dir)?;
+    user_println(&format!("Deleted profile: {alias}"));
     Ok(())
 }
 
-pub fn cmd_list() -> Result<()> {
-    let profiles = list_profiles()?;
-    if profiles.is_empty() {
-        println!("(no saved profiles)");
-        return Ok(());
+pub fn collect_import_files(path: &Path) -> Result<Vec<PathBuf>> {
+    if !path.exists() {
+        return Err(CsError::NoAuthFile(path.display().to_string()).into());
     }
-    let current = read_current();
-    for alias in &profiles {
-        let mark = if alias == &current { "*" } else { " " };
-        println!("{mark} {alias}");
+
+    if path.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+
+    let mut files = vec![];
+    collect_import_files_recursive(path, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_import_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_import_files_recursive(&path, files)?;
+            continue;
+        }
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        {
+            files.push(path);
+        }
     }
     Ok(())
 }
 
-pub fn cmd_import(file: &str, alias: &str) -> Result<SaveAction> {
-    let src = std::path::PathBuf::from(file);
-    if !src.exists() {
-        return Err(CsError::NoAuthFile(src.display().to_string()).into());
-    }
-    let val = read_auth(&src)?;
+pub fn save_imported_auth_value(
+    val: serde_json::Value,
+    hint_alias: Option<&str>,
+) -> Result<SaveAction> {
     let identity = extract_identity(&val);
 
     if let Some(existing) = find_profile_by_identity(&identity) {
         let dst = profile_auth_path(&existing);
         write_auth(&dst, &val)?;
-        println!("Duplicate account detected — updated profile: {existing}");
         return Ok(SaveAction::Updated(existing));
     }
 
-    let final_alias = if profile_auth_path(alias).exists() {
-        let unique = make_unique_alias(alias);
-        println!("Alias '{alias}' already taken — using '{unique}' instead");
-        unique
+    let alias = hint_alias
+        .map(|s| s.to_string())
+        .or_else(|| identity.email.as_deref().map(alias_from_email))
+        .unwrap_or_else(|| "account".to_string());
+    let alias = if profile_auth_path(&alias).exists() {
+        make_unique_alias(&alias)
     } else {
-        alias.to_string()
+        alias
     };
-    write_auth(&profile_auth_path(&final_alias), &val)?;
-    println!("Imported {file} → profile: {final_alias}");
-    Ok(SaveAction::Created(final_alias))
+
+    write_auth(&profile_auth_path(&alias), &val)?;
+    Ok(SaveAction::Created(alias))
 }
 
 pub fn rename_profile(old_alias: &str, new_alias: &str) -> Result<()> {
@@ -320,7 +387,7 @@ pub fn rename_profile(old_alias: &str, new_alias: &str) -> Result<()> {
     if read_current() == old_alias {
         write_current(new_alias)?;
     }
-    println!("Renamed profile: {old_alias} → {new_alias}");
+    user_println(&format!("Renamed profile: {old_alias} → {new_alias}"));
     Ok(())
 }
 

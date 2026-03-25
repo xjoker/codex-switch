@@ -1,3 +1,6 @@
+use std::io::{self, IsTerminal, Write};
+use std::sync::OnceLock;
+
 use chrono::{DateTime, Local, TimeZone, Utc};
 use serde::Serialize;
 
@@ -35,25 +38,11 @@ pub enum JsonUsage {
 }
 
 #[derive(Serialize)]
-pub struct JsonProfile {
-    pub alias: String,
-    pub is_current: bool,
-    pub account: JsonAccount,
-}
-
-#[derive(Serialize)]
 pub struct JsonProfileWithUsage {
     pub alias: String,
     pub is_current: bool,
     pub account: JsonAccount,
     pub usage: JsonUsage,
-}
-
-#[derive(Serialize)]
-pub struct JsonList {
-    pub current: Option<String>,
-    pub count: usize,
-    pub profiles: Vec<JsonProfile>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +71,39 @@ pub struct JsonError {
     pub error: String,
 }
 
+#[derive(Serialize)]
+pub struct JsonImportEntry {
+    pub source: String,
+    pub alias: String,
+    pub action: String,
+    pub account: JsonAccount,
+    pub usage: JsonUsage,
+}
+
+#[derive(Serialize)]
+pub struct JsonImportFailure {
+    pub source: String,
+    pub stage: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct JsonImportReport {
+    pub imported: Vec<JsonImportEntry>,
+    pub skipped: Vec<JsonImportFailure>,
+}
+
+#[derive(Serialize)]
+pub struct JsonSelfUpdate {
+    pub ok: bool,
+    pub current_version: String,
+    pub latest_version: String,
+    pub update_available: bool,
+    pub updated: bool,
+    pub install_source: String,
+    pub action: String,
+}
+
 // ── Conversion helpers ───────────────────────────────────
 
 pub fn account_to_json(info: &AccountInfo) -> JsonAccount {
@@ -108,9 +130,12 @@ pub fn usage_to_json(result: Result<&UsageInfo, &str>) -> JsonUsage {
             error: e.to_string(),
         },
         Ok(u) => {
-            let now_iso = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            let fetched_at = u
+                .fetched_at
+                .map(format_iso8601)
+                .unwrap_or_else(|| Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
             JsonUsage::Ok {
-                fetched_at: now_iso,
+                fetched_at,
                 primary: u.primary.as_ref().map(|w| window_to_json(w, "5h")),
                 secondary: u.secondary.as_ref().map(|w| window_to_json(w, "7d")),
             }
@@ -169,12 +194,44 @@ pub fn format_reset_short(ts: i64) -> String {
 
 // ── Output ───────────────────────────────────────────────
 
-pub fn print_json<T: serde::Serialize>(val: &T) {
-    println!(
-        "{}",
+static JSON_PRETTY: OnceLock<bool> = OnceLock::new();
+static MESSAGE_MODE: OnceLock<MessageMode> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy)]
+pub enum MessageMode {
+    Stdout,
+    Stderr,
+    Silent,
+}
+
+/// Set JSON output mode. Call once at startup.
+pub fn set_json_pretty(pretty: bool) {
+    let _ = JSON_PRETTY.set(pretty);
+}
+
+pub fn set_message_mode(mode: MessageMode) {
+    let _ = MESSAGE_MODE.set(mode);
+}
+
+fn is_pretty() -> bool {
+    *JSON_PRETTY.get().unwrap_or(&false)
+}
+
+fn message_mode() -> MessageMode {
+    *MESSAGE_MODE.get().unwrap_or(&MessageMode::Stdout)
+}
+
+fn serialize<T: serde::Serialize>(val: &T) -> String {
+    if is_pretty() {
         serde_json::to_string_pretty(val)
-            .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
-    );
+    } else {
+        serde_json::to_string(val)
+    }
+    .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+}
+
+pub fn print_json<T: serde::Serialize>(val: &T) {
+    println!("{}", serialize(val));
 }
 
 pub fn print_error(msg: &str) {
@@ -182,5 +239,100 @@ pub fn print_error(msg: &str) {
         ok: false,
         error: msg.to_string(),
     };
-    println!("{}", serde_json::to_string_pretty(&e).unwrap());
+    println!("{}", serialize(&e));
+}
+
+pub fn user_print(msg: &str) {
+    match message_mode() {
+        MessageMode::Stdout => {
+            print!("{msg}");
+            let _ = io::stdout().flush();
+        }
+        MessageMode::Stderr => {
+            eprint!("{msg}");
+            let _ = io::stderr().flush();
+        }
+        MessageMode::Silent => {}
+    }
+}
+
+pub fn user_println(msg: &str) {
+    match message_mode() {
+        MessageMode::Stdout => println!("{msg}"),
+        MessageMode::Stderr => eprintln!("{msg}"),
+        MessageMode::Silent => {}
+    }
+}
+
+pub struct ProgressReporter {
+    enabled: bool,
+    label: String,
+    total: usize,
+    last_width: usize,
+}
+
+impl ProgressReporter {
+    pub fn new(label: &str, total: usize) -> Self {
+        let enabled = progress_enabled() && total > 0;
+        let mut reporter = Self {
+            enabled,
+            label: label.to_string(),
+            total,
+            last_width: 0,
+        };
+        if reporter.enabled {
+            reporter.advance(0);
+        }
+        reporter
+    }
+
+    pub fn advance(&mut self, completed: usize) {
+        if !self.enabled {
+            return;
+        }
+
+        let line = render_progress_line(&self.label, completed.min(self.total), self.total);
+        self.last_width = line.chars().count();
+        eprint!("\r{line}");
+        let _ = io::stderr().flush();
+    }
+
+    pub fn finish(&mut self) {
+        if !self.enabled {
+            return;
+        }
+
+        eprint!("\r{}\r", " ".repeat(self.last_width.max(1)));
+        let _ = io::stderr().flush();
+        self.enabled = false;
+    }
+}
+
+impl Drop for ProgressReporter {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+pub fn render_progress_line(label: &str, completed: usize, total: usize) -> String {
+    let total = total.max(1);
+    let completed = completed.min(total);
+    let width = 24usize;
+    let filled = completed.saturating_mul(width) / total;
+    let bar = format!(
+        "{}{}",
+        "#".repeat(filled),
+        "-".repeat(width.saturating_sub(filled))
+    );
+    format!("{label} [{bar}] {completed}/{total}")
+}
+
+fn progress_enabled() -> bool {
+    if matches!(message_mode(), MessageMode::Silent) {
+        return false;
+    }
+    if std::env::var("CS_PROGRESS_FORCE").ok().as_deref() == Some("1") {
+        return true;
+    }
+    io::stderr().is_terminal()
 }

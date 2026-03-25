@@ -6,16 +6,17 @@
 /// - Browser completes authorization and redirects back
 use std::time::Duration;
 
-use anyhow::{bail, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use anyhow::{Result, bail};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::auth::{CLIENT_ID, ISSUER};
+use crate::output::user_println;
 
 const ORIGINATOR: &str = "codex_cli_rs";
 const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
@@ -52,7 +53,10 @@ fn generate_pkce() -> Pkce {
     let code_verifier = URL_SAFE_NO_PAD.encode(bytes);
     let digest = Sha256::digest(code_verifier.as_bytes());
     let code_challenge = URL_SAFE_NO_PAD.encode(digest);
-    Pkce { code_verifier, code_challenge }
+    Pkce {
+        code_verifier,
+        code_challenge,
+    }
 }
 
 fn generate_state() -> String {
@@ -74,23 +78,34 @@ pub async fn run_device_auth() -> Result<LoginTokens> {
         .await
         .map_err(|e| anyhow::anyhow!("Cannot bind port 1455 (already in use?): {e}"))?;
 
-    println!();
-    println!("Opening browser for Codex login…");
-    println!("If the browser does not open, visit:");
-    println!("{authorize_url}");
-    println!();
-    println!("Waiting for authorization callback ({CALLBACK_TIMEOUT_SECS}s timeout)…");
+    user_println("");
+    user_println("Opening browser for Codex login…");
+    user_println("If the browser does not open, visit:");
+    user_println(&authorize_url);
+    user_println("");
+    user_println(&format!(
+        "Waiting for authorization callback ({CALLBACK_TIMEOUT_SECS}s timeout)…"
+    ));
 
     open_browser(&authorize_url);
 
-    let callback_result = tokio::time::timeout(
-        Duration::from_secs(CALLBACK_TIMEOUT_SECS),
-        wait_for_callback(listener, &state),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("Login timed out ({CALLBACK_TIMEOUT_SECS}s). Please try again."))??;
+    let callback_result: CallbackResult = tokio::select! {
+        result = tokio::time::timeout(
+            Duration::from_secs(CALLBACK_TIMEOUT_SECS),
+            wait_for_callback(listener, &state),
+        ) => {
+            result.map_err(|_| anyhow::anyhow!("Login timed out ({CALLBACK_TIMEOUT_SECS}s). Please try again."))??
+        }
+        _ = tokio::signal::ctrl_c() => {
+            user_println("");
+            bail!("Cancelled by user.");
+        }
+    };
 
-    info!("OAuth callback received, code length={}", callback_result.code.len());
+    info!(
+        "OAuth callback received, code length={}",
+        callback_result.code.len()
+    );
 
     let tokens = exchange_code(&callback_result.code, &pkce.code_verifier).await?;
     Ok(tokens)
@@ -135,7 +150,9 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
     let mut total = 0;
     loop {
         let n = stream.read(&mut buf[total..]).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         total += n;
         // Stop once we see the end of the HTTP request line
         if buf[..total].windows(4).any(|w| w == b"\r\n\r\n")
@@ -143,7 +160,9 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
         {
             break;
         }
-        if total >= buf.len() { break; }
+        if total >= buf.len() {
+            break;
+        }
     }
     let request = String::from_utf8_lossy(&buf[..total]);
 
@@ -193,15 +212,25 @@ Connection: close
 // ── Token exchange ────────────────────────────────────────
 
 async fn exchange_code(code: &str, code_verifier: &str) -> Result<LoginTokens> {
+    exchange_code_with_redirect(code, code_verifier, REDIRECT_URI).await
+}
+
+async fn exchange_code_with_redirect(
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Result<LoginTokens> {
     let client = crate::auth::build_http_client()?;
 
     let body = format!(
         "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
         urlencoding::encode(code),
-        urlencoding::encode(REDIRECT_URI),
+        urlencoding::encode(redirect_uri),
         urlencoding::encode(CLIENT_ID),
         urlencoding::encode(code_verifier),
     );
+
+    debug!("Token exchange: POST {ISSUER}/oauth/token redirect_uri={redirect_uri}");
 
     let resp = client
         .post(format!("{ISSUER}/oauth/token"))
@@ -211,6 +240,7 @@ async fn exchange_code(code: &str, code_verifier: &str) -> Result<LoginTokens> {
         .await?;
 
     let status = resp.status();
+    debug!("Token exchange: HTTP {status}");
     let token_resp: TokenResponse = resp.json().await?;
 
     if let Some(e) = token_resp.error {
@@ -218,12 +248,217 @@ async fn exchange_code(code: &str, code_verifier: &str) -> Result<LoginTokens> {
         bail!("Token exchange failed (HTTP {status}): {e} — {desc}");
     }
 
-    match (token_resp.id_token, token_resp.access_token, token_resp.refresh_token) {
+    match (
+        token_resp.id_token,
+        token_resp.access_token,
+        token_resp.refresh_token,
+    ) {
         (Some(id), Some(access), Some(refresh)) => {
             info!("Token exchange succeeded");
-            Ok(LoginTokens { id_token: id, access_token: access, refresh_token: refresh })
+            Ok(LoginTokens {
+                id_token: id,
+                access_token: access,
+                refresh_token: refresh,
+            })
         }
         _ => bail!("Token response missing required fields (HTTP {status})"),
+    }
+}
+
+// ── Device Code Flow (RFC 8628) ──────────────────────────
+
+const DEVICE_USERCODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+const DEVICE_VERIFICATION_URI: &str = "https://auth.openai.com/codex/device";
+const DEVICE_POLL_INTERVAL_SECS: u64 = 5;
+const DEVICE_TIMEOUT_SECS: u64 = 900; // 15 minutes
+
+#[derive(Debug, Deserialize)]
+struct DeviceCodeResponse {
+    device_auth_id: Option<String>,
+    user_code: Option<String>,
+    #[serde(default)]
+    interval: Option<String>,
+    error: Option<serde_json::Value>,
+}
+
+/// Device token poll response — returns an authorization_code, NOT tokens directly.
+/// We then exchange the code for actual tokens via /oauth/token.
+#[derive(Debug, Deserialize)]
+struct DeviceTokenResponse {
+    authorization_code: Option<String>,
+    code_verifier: Option<String>,
+    status: Option<String>,
+}
+
+/// Run Device Code Flow: request code → display to user → poll for token
+pub async fn run_device_code_auth() -> Result<LoginTokens> {
+    let client = crate::auth::build_http_client()?;
+
+    // Step 1: Request device code
+    info!("Requesting device code from {DEVICE_USERCODE_URL}");
+    let resp = client
+        .post(DEVICE_USERCODE_URL)
+        .json(&serde_json::json!({
+            "client_id": CLIENT_ID,
+            "scope": SCOPE,
+            "originator": ORIGINATOR,
+        }))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to request device code: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        bail!("Device code request failed (HTTP {status}): {body}");
+    }
+
+    let dc: DeviceCodeResponse = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse device code response: {e}"))?;
+
+    if let Some(e) = dc.error {
+        bail!("Device code error: {e}");
+    }
+
+    let device_auth_id = dc
+        .device_auth_id
+        .ok_or_else(|| anyhow::anyhow!("No device_auth_id in response"))?;
+    let user_code = dc
+        .user_code
+        .ok_or_else(|| anyhow::anyhow!("No user_code in response"))?;
+    let mut interval_secs: u64 = dc
+        .interval
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEVICE_POLL_INTERVAL_SECS);
+    let timeout = DEVICE_TIMEOUT_SECS;
+
+    // Step 2: Display instructions
+    user_println("");
+    user_println(&format!("  To sign in, visit:  {DEVICE_VERIFICATION_URI}"));
+    user_println(&format!("  Enter code:         {user_code}"));
+    user_println("");
+    user_println(&format!(
+        "  Waiting for authorization (polling every {interval_secs}s)…"
+    ));
+
+    // Step 3: Poll for token (Ctrl+C safe)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+    let mut poll_count = 0u32;
+
+    loop {
+        // Sleep with Ctrl+C support
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(interval_secs)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                user_println("");
+                bail!("Cancelled by user.");
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            bail!("Device authorization timed out. Please try again.");
+        }
+
+        poll_count += 1;
+        eprint!("\r  Polling… ({poll_count})    ");
+
+        let poll_resp = match client
+            .post(DEVICE_TOKEN_URL)
+            .json(&serde_json::json!({
+                "device_auth_id": device_auth_id,
+                "user_code": user_code,
+                "client_id": CLIENT_ID,
+            }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                info!("Device poll network error (retrying): {e}");
+                continue;
+            }
+        };
+
+        let body: serde_json::Value = match poll_resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                info!("Device poll parse error (retrying): {e}");
+                continue;
+            }
+        };
+
+        debug!(
+            "Device poll response: {}",
+            serde_json::to_string(&body).unwrap_or_default()
+        );
+
+        // Check for error response
+        if let Some(err) = body.get("error") {
+            let code = err.get("code").and_then(|c| c.as_str()).unwrap_or("");
+            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
+
+            match code {
+                "deviceauth_authorization_unknown" | "authorization_pending" => continue,
+                "slow_down" => {
+                    interval_secs = interval_secs.saturating_add(5);
+                    continue;
+                }
+                "expired_token" | "deviceauth_expired" => {
+                    user_println("");
+                    bail!("Device code expired. Please try again.");
+                }
+                "access_denied" => {
+                    user_println("");
+                    bail!("Authorization was denied by the user.");
+                }
+                _ => {
+                    user_println("");
+                    bail!("Device token error: {msg}");
+                }
+            }
+        }
+
+        // Success — got authorization_code, need to exchange for tokens
+        let dt: DeviceTokenResponse = match serde_json::from_value(body) {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Device poll parse into DeviceTokenResponse failed: {e}");
+                continue;
+            }
+        };
+
+        if dt.status.as_deref() != Some("success") {
+            debug!("Device poll status: {:?}", dt.status);
+            continue;
+        }
+
+        let auth_code = match dt.authorization_code {
+            Some(c) => c,
+            None => {
+                debug!("No authorization_code in success response");
+                continue;
+            }
+        };
+        let verifier = match dt.code_verifier {
+            Some(v) => v,
+            None => {
+                debug!("No code_verifier in success response");
+                continue;
+            }
+        };
+
+        eprint!("\r                          \r");
+        info!("Device authorization successful, exchanging code for tokens");
+        user_println("  Authorization successful, exchanging tokens…");
+
+        // Use the standard /oauth/token endpoint with the returned code + verifier
+        // The redirect_uri for device flow is the OpenAI deviceauth callback
+        let device_redirect = format!("{ISSUER}/deviceauth/callback");
+        let tokens = exchange_code_with_redirect(&auth_code, &verifier, &device_redirect).await?;
+        return Ok(tokens);
     }
 }
 

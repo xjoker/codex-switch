@@ -1,6 +1,6 @@
 [package]
 name = "cs"
-version = "0.0.1"
+version = "0.0.3"
 edition = "2024"
 rust-version = "1.88"
 description = "Codex account switcher — multi-profile manager with usage dashboard"
@@ -23,9 +23,13 @@ dirs = "6"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+flate2 = "1"
+semver = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "socks"], default-features = false }
+self-replace = "1"
+tempfile = "3"
 webbrowser = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ratatui = "0.30"
@@ -37,6 +41,8 @@ chrono = { version = "0.4", features = ["clock"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 supports-color = "3"
 owo-colors = "4"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 strip = true

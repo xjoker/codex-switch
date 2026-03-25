@@ -13,14 +13,19 @@ pub enum ColorMode {
 #[derive(Parser)]
 #[command(
     name = "codex-switch",
-    version,
-    about = "Codex account switcher — multi-profile manager with usage dashboard",
-    long_about = None
+    version = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_REPOSITORY")),
+    about = "Codex account switcher — multi-profile manager with usage dashboard\nhttps://github.com/xjoker/codex-switch",
+    long_about = None,
+    after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output result as JSON (suitable for scripts/pipes)
+    /// Output as compact JSON (supported by list, use, delete, login, import, self-update)
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Output as pretty-printed JSON
+    #[arg(long, global = true)]
+    pub json_pretty: bool,
 
     /// Proxy URL (overrides CS_PROXY / HTTP_PROXY / HTTPS_PROXY / ALL_PROXY env vars)
     ///
@@ -37,6 +42,10 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "auto", env = "CS_COLOR")]
     pub color: ColorMode,
 
+    /// Enable debug logging (shows HTTP requests, API responses, cache status)
+    #[arg(long, global = true)]
+    pub debug: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -48,26 +57,44 @@ pub enum Commands {
         /// Profile alias (omit to auto-select by remaining quota)
         alias: Option<String>,
     },
-    /// List all saved profiles (auto-saves live auth.json if not yet tracked)
-    List,
+    /// List all profiles with account info, usage, and availability
+    List {
+        /// Force refresh, bypass cache
+        #[arg(long, short)]
+        force: bool,
+    },
     /// Delete a profile
     Delete {
         /// Profile alias
         alias: String,
     },
-    /// Show all profiles with account info and usage
-    Status,
-    /// Log in to a new account, or re-authorize an existing profile if alias is given
+    /// Log in via browser or --device code flow; re-authorizes if alias already exists
     Login {
         /// Profile alias — if it already exists, re-authorizes it; otherwise creates a new profile
         alias: Option<String>,
+
+        /// Use device code flow (for headless servers without a browser)
+        #[arg(long)]
+        device: bool,
     },
-    /// Import an auth.json file and save it as a profile
+    /// Import an auth.json file, or recursively scan a directory for JSON files to validate and import
     Import {
-        /// Path to auth.json file
-        file: String,
-        /// Profile alias
-        alias: String,
+        /// Path to an auth.json file or a directory containing JSON files
+        path: String,
+        /// Optional profile alias (single-file import only; directories auto-assign aliases)
+        alias: Option<String>,
+    },
+    /// Manually check GitHub Releases (`--check`) or update this binary
+    #[command(
+        after_help = "Examples:\n  codex-switch self-update --check\n  codex-switch self-update\n  codex-switch self-update --version 0.0.3\n\nUpdate checks are manual only. The app never checks automatically on startup.\nDowngrades are not supported; `--version` only accepts the current version or a newer release."
+    )]
+    SelfUpdate {
+        /// Check whether a newer version is available without installing it
+        #[arg(long)]
+        check: bool,
+        /// Install a specific newer version instead of the latest release
+        #[arg(long)]
+        version: Option<String>,
     },
     /// Launch the interactive TUI
     Tui,

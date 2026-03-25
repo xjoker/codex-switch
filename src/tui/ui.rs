@@ -29,7 +29,9 @@ pub fn render(f: &mut Frame, app: &App) {
 }
 
 fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
-    let hdr = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let hdr = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
         Cell::from(" ").style(Style::default().fg(Color::DarkGray)),
         Cell::from("Alias").style(hdr),
@@ -50,14 +52,18 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         .map(|(i, entry)| {
             let marker = if entry.is_current { "●" } else { " " };
             let marker_style = if entry.is_current {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
 
             let is_selected = i == app.selected;
             let row_style = if is_selected {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             };
@@ -66,24 +72,60 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             let plan_label = entry.info.plan_label();
             let plan_style = plan_color(entry.info.plan_type.as_deref(), is_selected);
 
-            let (status_text, status_color, pct_5h, pct_7d, reset_5h, reset_7d): (String, Color, String, String, String, String) = match &entry.usage {
-                UsageStatus::Idle => ("—".into(), Color::DarkGray, "—".into(), "—".into(), "—".into(), "—".into()),
-                UsageStatus::Loading => ("…".into(), Color::Yellow, "…".into(), "…".into(), "loading".into(), "loading".into()),
-                UsageStatus::Error(_) => ("Error".into(), Color::Red, "Err".into(), "Err".into(), "—".into(), "—".into()),
-                UsageStatus::Loaded(u, _) => {
-                    let p5 = u.primary.as_ref()
+            let (status_text, status_color, pct_5h, pct_7d, reset_5h, reset_7d): (
+                String,
+                Color,
+                String,
+                String,
+                String,
+                String,
+            ) = match &entry.usage {
+                UsageStatus::Idle => (
+                    "—".into(),
+                    Color::DarkGray,
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                    "—".into(),
+                ),
+                UsageStatus::Loading => (
+                    "…".into(),
+                    Color::Yellow,
+                    "…".into(),
+                    "…".into(),
+                    "loading".into(),
+                    "loading".into(),
+                ),
+                UsageStatus::Error(_) => (
+                    "Error".into(),
+                    Color::Red,
+                    "Err".into(),
+                    "Err".into(),
+                    "—".into(),
+                    "—".into(),
+                ),
+                UsageStatus::Loaded(u) => {
+                    let p5 = u
+                        .primary
+                        .as_ref()
                         .and_then(|w| w.used_percent)
                         .map(|p| format!("{:.0}%", p.min(100.0)))
                         .unwrap_or_else(|| "—".into());
-                    let p7 = u.secondary.as_ref()
+                    let p7 = u
+                        .secondary
+                        .as_ref()
                         .and_then(|w| w.used_percent)
                         .map(|p| format!("{:.0}%", p.min(100.0)))
                         .unwrap_or_else(|| "—".into());
-                    let r5 = u.primary.as_ref()
+                    let r5 = u
+                        .primary
+                        .as_ref()
                         .and_then(|w| w.resets_at)
                         .map(format_reset_short)
                         .unwrap_or_else(|| "—".into());
-                    let r7 = u.secondary.as_ref()
+                    let r7 = u
+                        .secondary
+                        .as_ref()
                         .and_then(|w| w.resets_at)
                         .map(format_reset_short)
                         .unwrap_or_else(|| "—".into());
@@ -95,14 +137,24 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 }
             };
 
-            let dim = if is_selected { Color::White } else { Color::DarkGray };
+            let dim = if is_selected {
+                Color::White
+            } else {
+                Color::DarkGray
+            };
 
             Row::new(vec![
                 Cell::from(Span::styled(marker, marker_style)),
                 Cell::from(entry.alias.clone()).style(row_style),
                 Cell::from(email).style(row_style),
                 Cell::from(plan_label).style(plan_style),
-                Cell::from(status_text).style(Style::default().fg(status_color).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
+                Cell::from(status_text).style(Style::default().fg(status_color).add_modifier(
+                    if is_selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    },
+                )),
                 Cell::from(pct_5h.clone()).style(usage_pct_style(&pct_5h, is_selected)),
                 Cell::from(pct_7d.clone()).style(usage_pct_style(&pct_7d, is_selected)),
                 Cell::from(reset_5h).style(Style::default().fg(dim)),
@@ -114,7 +166,11 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
 
     let loading_count = app.loading_count();
     let title = if loading_count > 0 {
-        format!(" Accounts ({}) — fetching {}… ", app.accounts.len(), loading_count)
+        format!(
+            " Accounts ({}) — fetching {}… ",
+            app.accounts.len(),
+            loading_count
+        )
     } else {
         format!(" Accounts ({}) ", app.accounts.len())
     };
@@ -142,7 +198,11 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue)),
     )
-    .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
 
     f.render_stateful_widget(table, area, &mut table_state);
 }
@@ -191,11 +251,18 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(email, Style::default().fg(Color::White)),
         Span::raw("  "),
         Span::styled("Plan ", Style::default().fg(Color::DarkGray)),
-        Span::styled(&plan_label, plan_color(entry.info.plan_type.as_deref(), true)),
+        Span::styled(
+            &plan_label,
+            plan_color(entry.info.plan_type.as_deref(), true),
+        ),
         Span::raw("  "),
         Span::styled("ID ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            if acct_id.len() > 20 { &acct_id[..20] } else { acct_id },
+            if acct_id.len() > 20 {
+                &acct_id[..20]
+            } else {
+                acct_id
+            },
             Style::default().fg(Color::DarkGray),
         ),
     ]);
@@ -209,8 +276,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Loading => {
-            let p = Paragraph::new("Fetching usage…")
-                .style(Style::default().fg(Color::Yellow));
+            let p = Paragraph::new("Fetching usage…").style(Style::default().fg(Color::Yellow));
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Error(e) => {
@@ -218,7 +284,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
                 .style(Style::default().fg(Color::Red));
             f.render_widget(p, layout[2]);
         }
-        UsageStatus::Loaded(u, _) => {
+        UsageStatus::Loaded(u) => {
             render_usage_gauges(f, u, layout[2]);
         }
     }
@@ -245,7 +311,10 @@ fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
 
     if let Some(w) = &u.primary {
         let pct = w.used_percent.unwrap_or(0.0).min(100.0) as u16;
-        let reset_str = w.resets_at.map(format_reset_time).unwrap_or_else(|| "—".into());
+        let reset_str = w
+            .resets_at
+            .map(format_reset_time)
+            .unwrap_or_else(|| "—".into());
         let label = format!("5h  {pct}% used  resets: {reset_str}");
         let gauge = Gauge::default()
             .block(Block::default())
@@ -258,7 +327,10 @@ fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
 
     if let Some(w) = &u.secondary {
         let pct = w.used_percent.unwrap_or(0.0).min(100.0) as u16;
-        let reset_str = w.resets_at.map(format_reset_time).unwrap_or_else(|| "—".into());
+        let reset_str = w
+            .resets_at
+            .map(format_reset_time)
+            .unwrap_or_else(|| "—".into());
         let label = format!("7d  {pct}% used  resets: {reset_str}");
         let gauge = Gauge::default()
             .block(Block::default())
@@ -278,10 +350,23 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // Rename input takes top priority
     if let Some(rs) = &app.rename {
         let line = Line::from(vec![
-            Span::styled(" Rename: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(&rs.input, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Rename: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &rs.input,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(Color::Gray)),
-            Span::styled("  (Enter confirm / Esc cancel)", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  (Enter confirm / Esc cancel)",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
         f.render_widget(Paragraph::new(line), area);
         return;
@@ -294,7 +379,10 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 format!("Delete profile '{alias}'? (y/n)")
             }
         };
-        let line = Line::from(Span::styled(msg, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+        let line = Line::from(Span::styled(
+            msg,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
         f.render_widget(Paragraph::new(line), area);
         return;
     }
@@ -323,9 +411,13 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
 // ── Style helpers ─────────────────────────────────────────
 
 fn usage_color(pct: f64) -> Color {
-    if pct >= 90.0 { Color::Red }
-    else if pct >= 70.0 { Color::Yellow }
-    else { Color::Green }
+    if pct >= 90.0 {
+        Color::Red
+    } else if pct >= 70.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
 }
 
 fn gauge_style(pct: u16) -> Style {
@@ -340,7 +432,11 @@ fn plan_color(plan: Option<&str>, is_selected: bool) -> Style {
         _ => Color::DarkGray,
     };
     let s = Style::default().fg(fg);
-    if is_selected { s.add_modifier(Modifier::BOLD) } else { s }
+    if is_selected {
+        s.add_modifier(Modifier::BOLD)
+    } else {
+        s
+    }
 }
 
 fn usage_pct_style(pct_str: &str, is_selected: bool) -> Style {
@@ -349,6 +445,9 @@ fn usage_pct_style(pct_str: &str, is_selected: bool) -> Style {
         Err(_) => Color::DarkGray,
     };
     let s = Style::default().fg(fg);
-    if is_selected { s.add_modifier(Modifier::BOLD) } else { s }
+    if is_selected {
+        s.add_modifier(Modifier::BOLD)
+    } else {
+        s
+    }
 }
-

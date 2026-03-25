@@ -45,10 +45,10 @@ pub fn read_auth(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         return Err(CsError::NoAuthFile(path.display().to_string()).into());
     }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let val: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let val: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     Ok(val)
 }
 
@@ -93,6 +93,23 @@ pub fn update_tokens(
     write_auth(path, &val)
 }
 
+pub fn apply_tokens(
+    val: &mut serde_json::Value,
+    id_token: &str,
+    access_token: &str,
+    refresh_token: &str,
+) -> Result<()> {
+    let tokens = val
+        .get_mut("tokens")
+        .and_then(|t| t.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("auth.json missing tokens object"))?;
+
+    tokens.insert("id_token".into(), serde_json::json!(id_token));
+    tokens.insert("access_token".into(), serde_json::json!(access_token));
+    tokens.insert("refresh_token".into(), serde_json::json!(refresh_token));
+    Ok(())
+}
+
 /// Extract (access_token, refresh_token) from an auth.json Value.
 pub fn extract_tokens(val: &serde_json::Value) -> (Option<String>, Option<String>) {
     let at = val
@@ -121,6 +138,56 @@ pub fn read_account_info(path: &Path) -> crate::jwt::AccountInfo {
         .unwrap_or_default()
 }
 
+pub fn validate_auth_value(val: &serde_json::Value) -> Result<crate::jwt::AccountInfo> {
+    let tokens = val
+        .get("tokens")
+        .and_then(|t| t.as_object())
+        .ok_or_else(|| anyhow::anyhow!("auth.json missing tokens object"))?;
+
+    let id_token = tokens
+        .get("id_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("tokens.id_token is required"))?;
+
+    let has_access = tokens
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    let has_refresh = tokens
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+
+    if !has_access && !has_refresh {
+        return Err(anyhow::anyhow!(
+            "tokens.access_token or tokens.refresh_token is required"
+        ));
+    }
+
+    let payload = id_token
+        .split('.')
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("tokens.id_token is not a valid JWT"))?;
+    let decoded = {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|_| anyhow::anyhow!("tokens.id_token payload is not valid base64url"))?
+    };
+    let _: serde_json::Value = serde_json::from_slice(&decoded)
+        .map_err(|_| anyhow::anyhow!("tokens.id_token payload is not valid JSON"))?;
+
+    let info = crate::jwt::parse_account_info(val);
+    if info.email.is_none() && info.account_id.is_none() {
+        return Err(anyhow::anyhow!(
+            "id_token does not contain a usable email or account_id"
+        ));
+    }
+
+    Ok(info)
+}
+
 /// Build a shared reqwest client with standard user-agent and proxy support.
 pub fn build_http_client() -> Result<reqwest::Client> {
     let proxy_url = crate::config::resolve_proxy();
@@ -131,9 +198,11 @@ pub fn build_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::
     let mut builder = reqwest::Client::builder().user_agent(USER_AGENT);
 
     if let Some(url) = proxy_url {
+        tracing::debug!("Using proxy: {url}");
         let mut proxy = reqwest::Proxy::all(url)
             .map_err(|e| anyhow::anyhow!("invalid proxy URL '{url}': {e}"))?;
         if let Some(no_proxy) = crate::config::resolve_no_proxy() {
+            tracing::debug!("No-proxy list: {no_proxy}");
             proxy = proxy.no_proxy(reqwest::NoProxy::from_string(&no_proxy));
         }
         builder = builder.proxy(proxy);

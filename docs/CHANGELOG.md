@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+## v0.0.3 — 2026-03-26
+
+### Added
+
+- **Manual self-update** — New `codex-switch self-update` command for direct installs, plus `self-update --check` for on-demand release checks
+- **Checksum-verified updates** — Direct-install self-update validates the release `.sha256` before replacing the current executable
+- **Install-source awareness** — Homebrew installs are detected and redirected to `brew upgrade xjoker/tap/codex-switch`
+- **Recursive directory import** — `import <path>` now accepts directories, scans recursively for `.json` files, validates them, and reports imported vs skipped files
+- **Import stage reporting** — Directory import surfaces failures as `file_format`, `structure`, `usage_validation`, or `save`
+- **Progress reporting** — `use`, `list`, and bulk `import` show a single-line progress indicator for large batches
+- **Per-account cache timestamps** — Cached usage now preserves the original refresh time and exposes it as `usage.fetched_at` in JSON output
+- **Device Code Flow** — `login --device` for headless servers without a browser (RFC 8628, polls `deviceauth` endpoint)
+- **`--debug` flag** — Enable debug logging for HTTP requests, API responses, and cache status
+- **`--json-pretty` flag** — Pretty-printed JSON output in addition to existing `--json` compact mode
+
+### Changed
+
+- **Manual-only update checks** — No automatic update checks on startup, `use`, `list`, or TUI launch
+- **Cache scheduling** — `use`, `list`, and TUI now refresh only stale accounts by default; force-refresh paths still bypass cache
+- **JSON hygiene** — Human messages and progress output are routed away from stdout so `--json` stays machine-readable
+- **Network concurrency** — Configurable max concurrent usage requests (`[network] max_concurrent`, default 20) now applies across CLI and TUI refresh paths
+- **`list` replaces `status`** — `codex-switch list` now fetches live usage (previously only `status` did); `status` command removed
+
+### Fixed
+
+- **Active profile deletion** — CLI now rejects deleting the currently active profile, matching TUI behavior
+- **Zero-concurrency config** — Invalid `network.max_concurrent = 0` is normalized instead of hanging refresh paths
+- **TUI refresh behavior** — TUI preloads cache first, refreshes only stale entries, and no longer emits stray auto-track text into the UI
+- **Device flow polling** — OAuth device code flow now handles `slow_down` correctly and exits cleanly on Ctrl+C
+- **Import validation** — `auth.json` imports now require valid token structure and perform a real account usability check unless explicitly skipped in tests
+
+## v0.0.2 — 2026-03-25
+
+### Changed
+
+- **Homebrew release automation** — Homebrew formula updates now run inside the main release workflow instead of a separate post-release workflow
+- **Multi-platform formula generation** — Release automation now generates checksums and Homebrew formula entries for all supported macOS and Linux targets
+- **Dependency refresh** — Upgraded core crates including `dirs` 6.x, `toml` 1.x, and `rand` 0.9
+
+### Fixed
+
+- **Release packaging** — Replaced the single-URL Homebrew bump action with a custom multi-asset formula generator so `brew upgrade` tracks the correct archive for each platform
+- **Login RNG compatibility** — OAuth PKCE state/verifier generation now uses the current `rand` 0.9 API
+
 ## v0.0.1 — Initial Release
 
 ### Features
@@ -10,7 +56,7 @@
 - **Smart Auto-Switch** — `codex-switch use` without alias auto-selects the best account (7d limit checked first, then 5h remaining %)
 - **OAuth PKCE Login** — Browser-based login flow with local callback server on port 1455
 - **Token Auto-Refresh** — Automatic refresh_token flow on HTTP 401/403, persists new tokens
-- **Auto-Detection** — `list`, `status`, `tui` auto-discover and save untracked `~/.codex/auth.json`
+- **Auto-Detection** — `list`, `tui` auto-discover and save untracked `~/.codex/auth.json`
 - **Deduplication** — Login/import matches by account_id > email, updates existing profiles instead of creating duplicates
 - **TUI Rename** — Rename profiles in-place with `n` key
 - **TUI Delete** — Delete profiles with `d` key (confirmation required, cannot delete active profile)

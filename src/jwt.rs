@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::Value;
 
 /// Single organization/workspace entry
@@ -26,15 +26,15 @@ pub struct AccountInfo {
 impl AccountInfo {
     pub fn plan_label(&self) -> String {
         let base = self.plan_type.as_deref().unwrap_or("?").to_string();
-        if let Some(name) = &self.workspace_name {
-            if !name.is_empty() {
-                return format!("{base} · {name}");
-            }
+        if let Some(name) = &self.workspace_name
+            && !name.is_empty()
+        {
+            return format!("{base} · {name}");
         }
-        if let Some(org) = self.organizations.iter().find(|o| o.is_default) {
-            if !org.title.is_empty() {
-                return format!("{base} · {}", org.title);
-            }
+        if let Some(org) = self.organizations.iter().find(|o| o.is_default)
+            && !org.title.is_empty()
+        {
+            return format!("{base} · {}", org.title);
         }
         base
     }
@@ -100,7 +100,12 @@ pub fn parse_account_info(auth: &Value) -> AccountInfo {
 /// Extract workspace name from JWT claims (team/org accounts)
 fn extract_workspace_name(claims: &Value) -> Option<String> {
     // Top-level fields
-    for key in &["workspace_name", "organization_name", "org_name", "team_name"] {
+    for key in &[
+        "workspace_name",
+        "organization_name",
+        "org_name",
+        "team_name",
+    ] {
         if let Some(v) = claims.get(key).and_then(|v| v.as_str()) {
             let s = v.trim().to_string();
             if !s.is_empty() {
@@ -110,7 +115,12 @@ fn extract_workspace_name(claims: &Value) -> Option<String> {
     }
     // Nested under auth claims
     let auth = claims.get("https://api.openai.com/auth")?;
-    for key in &["workspace_name", "organization_name", "org_name", "team_name"] {
+    for key in &[
+        "workspace_name",
+        "organization_name",
+        "org_name",
+        "team_name",
+    ] {
         if let Some(v) = auth.get(key).and_then(|v| v.as_str()) {
             let s = v.trim().to_string();
             if !s.is_empty() {
@@ -120,11 +130,16 @@ fn extract_workspace_name(claims: &Value) -> Option<String> {
     }
     // Fallback: default org title from organizations array
     if let Some(orgs) = auth.get("organizations").and_then(|v| v.as_array()) {
-        let default = orgs
-            .iter()
-            .find(|o| o.get("is_default").and_then(|v| v.as_bool()).unwrap_or(false));
+        let default = orgs.iter().find(|o| {
+            o.get("is_default")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        });
         let candidate = default.or_else(|| orgs.first());
-        if let Some(title) = candidate.and_then(|o| o.get("title")).and_then(|v| v.as_str()) {
+        if let Some(title) = candidate
+            .and_then(|o| o.get("title"))
+            .and_then(|v| v.as_str())
+        {
             let s = title.trim().to_string();
             if !s.is_empty() {
                 return Some(s);
@@ -152,9 +167,22 @@ fn extract_organizations(claims: &Value) -> Vec<OrgInfo> {
             }
             Some(OrgInfo {
                 id,
-                title: o.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string(),
-                role: o.get("role").and_then(|v| v.as_str()).unwrap_or("").trim().to_string(),
-                is_default: o.get("is_default").and_then(|v| v.as_bool()).unwrap_or(false),
+                title: o
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                role: o
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                is_default: o
+                    .get("is_default")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             })
         })
         .collect()

@@ -37,50 +37,86 @@ pub fn enabled() -> bool {
 
 /// Green text for success
 pub fn success(s: &str) -> String {
-    if enabled() { format!("{}", s.green()) } else { s.to_string() }
+    if enabled() {
+        format!("{}", s.green())
+    } else {
+        s.to_string()
+    }
 }
 
 /// Red text for errors
 pub fn error(s: &str) -> String {
-    if enabled() { format!("{}", s.red()) } else { s.to_string() }
+    if enabled() {
+        format!("{}", s.red())
+    } else {
+        s.to_string()
+    }
 }
 
 /// Yellow text for warnings
 pub fn warn(s: &str) -> String {
-    if enabled() { format!("{}", s.yellow()) } else { s.to_string() }
+    if enabled() {
+        format!("{}", s.yellow())
+    } else {
+        s.to_string()
+    }
 }
 
 /// Cyan text for info/labels
 pub fn info(s: &str) -> String {
-    if enabled() { format!("{}", s.cyan()) } else { s.to_string() }
+    if enabled() {
+        format!("{}", s.cyan())
+    } else {
+        s.to_string()
+    }
 }
 
 /// Dim/gray text
 pub fn dim(s: &str) -> String {
-    if enabled() { format!("{}", s.dimmed()) } else { s.to_string() }
+    if enabled() {
+        format!("{}", s.dimmed())
+    } else {
+        s.to_string()
+    }
 }
 
 /// Bold text
 pub fn bold(s: &str) -> String {
-    if enabled() { format!("{}", s.bold()) } else { s.to_string() }
+    if enabled() {
+        format!("{}", s.bold())
+    } else {
+        s.to_string()
+    }
 }
 
 /// Green bold for active marker
 pub fn active(s: &str) -> String {
-    if enabled() { format!("{}", s.green().bold()) } else { s.to_string() }
+    if enabled() {
+        format!("{}", s.green().bold())
+    } else {
+        s.to_string()
+    }
 }
 
 /// Color a usage percentage: green < 70, yellow < 90, red >= 90
 pub fn usage_pct(s: &str, pct: f64) -> String {
-    if !enabled() { return s.to_string(); }
-    if pct >= 90.0 { format!("{}", s.red()) }
-    else if pct >= 70.0 { format!("{}", s.yellow()) }
-    else { format!("{}", s.green()) }
+    if !enabled() {
+        return s.to_string();
+    }
+    if pct >= 90.0 {
+        format!("{}", s.red())
+    } else if pct >= 70.0 {
+        format!("{}", s.yellow())
+    } else {
+        format!("{}", s.green())
+    }
 }
 
 /// Color a status tag: OK = green, Limited = red, Error = red
 pub fn status_tag(tag: &str) -> String {
-    if !enabled() { return format!("[{tag}]"); }
+    if !enabled() {
+        return format!("[{tag}]");
+    }
     match tag {
         "OK" => format!("[{}]", tag.green()),
         "Limited" | "Error" => format!("[{}]", tag.red()),
@@ -90,7 +126,9 @@ pub fn status_tag(tag: &str) -> String {
 
 /// Color a plan label by type
 pub fn plan(label: &str, plan_type: Option<&str>) -> String {
-    if !enabled() { return format!("[{label}]"); }
+    if !enabled() {
+        return format!("[{label}]");
+    }
     match plan_type {
         Some("pro") => format!("[{}]", label.yellow()),
         Some("plus") => format!("[{}]", label.cyan()),

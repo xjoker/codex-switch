@@ -11,6 +11,9 @@ pub enum CsError {
     #[error("operation aborted by user")]
     Aborted,
 
+    #[error("cannot delete the active profile '{0}'")]
+    ActiveProfileDelete(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

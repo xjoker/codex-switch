@@ -12,11 +12,15 @@
 
 - **账号管理** — 保存、切换、重命名、删除 Codex 账号
 - **自动探测** — 自动发现并追踪当前 `auth.json`
-- **用量仪表盘** — 实时监控配额（5 小时和 7 天窗口），状态指示
+- **用量仪表盘** — 实时监控配额（5 小时和 7 天窗口），包含每个账号自己的刷新时间
 - **智能切换** — `codex-switch use` 不带参数时自动选择剩余配额最多的账号
+- **仅刷新过期账号** — `use`、`list` 和 TUI 默认只刷新缓存已过期的账号
+- **进度展示** — 大批量 `use`、`list`、目录 `import` 统一显示单行跨平台进度条
 - **交互式 TUI** — 完整的终端界面，实时用量数据、颜色状态、键盘快捷键
 - **OAuth 登录** — 内置 PKCE 浏览器登录流程，无需手动复制 token
 - **Token 自动刷新** — 使用 refresh_token 自动刷新过期 token
+- **批量导入校验** — 支持单文件导入，也支持递归扫描目录、分阶段校验并自动分配不重复别名
+- **手动自更新** — `self-update --check` 按需检查 GitHub Releases，`self-update` 更新直装版本
 - **代理支持** — HTTP/HTTPS/SOCKS4/SOCKS5/SOCKS5H，支持鉴权
 - **跨平台** — macOS、Linux、Windows
 - **JSON 输出** — `--json` 参数支持脚本化和自动化
@@ -43,6 +47,16 @@ irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 
 brew install xjoker/tap/codex-switch
 ```
 
+### 安装指定版本
+
+```bash
+# macOS / Linux
+CS_VERSION=0.0.3 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+
+# Windows
+$env:CS_VERSION="0.0.3"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+```
+
 ### 手动下载
 
 从 [Releases](https://github.com/xjoker/codex-switch/releases) 下载对应平台的预编译二进制：
@@ -58,7 +72,7 @@ brew install xjoker/tap/codex-switch
 
 ### 从源码编译
 
-需要 [Rust](https://rustup.rs/) 1.85+：
+需要 [Rust](https://rustup.rs/) 1.88+：
 
 ```bash
 git clone https://github.com/xjoker/codex-switch.git
@@ -77,7 +91,7 @@ codex-switch login
 codex-switch login
 
 # 3. 查看所有账号及实时用量
-codex-switch status
+codex-switch list
 
 # 4. 切换到指定账号
 codex-switch use alice
@@ -87,6 +101,9 @@ codex-switch use
 
 # 6. 启动交互式 TUI
 codex-switch tui
+
+# 7. 手动检查新版本
+codex-switch self-update --check
 ```
 
 ## 命令列表
@@ -94,11 +111,11 @@ codex-switch tui
 | 命令 | 说明 |
 |------|------|
 | `codex-switch use [别名]` | 切换账号。不带别名则自动选择配额最优的账号 |
-| `codex-switch list` | 列出所有已保存的账号（自动探测当前 auth.json） |
-| `codex-switch status` | 显示所有账号信息、用量和可用状态 |
-| `codex-switch login [别名]` | OAuth 登录。若别名已存在则重新授权该账号 |
+| `codex-switch list [-f]` | 显示所有账号信息、用量和可用状态（`-f` 强制刷新，忽略缓存） |
+| `codex-switch login [--device] [别名]` | OAuth 登录（`--device` 用于无浏览器的服务器）。若别名已存在则重新授权 |
 | `codex-switch delete <别名>` | 删除账号 |
-| `codex-switch import <文件> <别名>` | 导入 auth.json 文件为账号 |
+| `codex-switch import <路径> [别名]` | 导入单个 auth.json，或递归扫描目录下所有 JSON 文件并校验后导入 |
+| `codex-switch self-update [--check] [--version <版本>]` | 手动检查 GitHub Releases，或更新当前直装版本 |
 | `codex-switch tui` | 启动交互式终端界面 |
 | `codex-switch open` | 在文件管理器中打开配置目录 |
 
@@ -106,9 +123,12 @@ codex-switch tui
 
 | 选项 | 说明 |
 |------|------|
-| `--json` | 以 JSON 格式输出（适合脚本/管道） |
+| `--json` | 以紧凑 JSON 格式输出（适合脚本/管道） |
+| `--json-pretty` | 以格式化 JSON 输出 |
 | `--proxy <URL>` | 设置代理（参见[代理支持](#代理支持)） |
 | `--color <auto\|always\|never>` | 颜色输出模式（默认: auto） |
+| `--debug` | 开启调试日志（显示 HTTP 请求、API 响应、缓存状态） |
+| `-V, --version` | 打印版本号 |
 
 ## TUI 快捷键
 
@@ -120,6 +140,25 @@ codex-switch tui
 | `n` | 重命名选中账号 |
 | `d` | 删除选中账号（需确认） |
 | `q` / `Esc` | 退出 |
+
+## 更新方式
+
+更新检查完全手动触发。`codex-switch` 不会在启动、`list`、`use` 或 TUI 打开时自动检查更新。
+
+```bash
+# 检查是否有新版本
+codex-switch self-update --check
+
+# 将直装版本更新到最新 release
+codex-switch self-update
+
+# 更新到指定的新版本
+codex-switch self-update --version 0.0.3
+```
+
+- Homebrew 安装不会被程序自行覆盖，请使用 `brew upgrade xjoker/tap/codex-switch`
+- 直装版本会先校验 release 对应的 `.sha256`，再替换当前二进制
+- 不支持降级；`--version` 只接受当前版本或更高版本的 release
 
 ## 代理支持
 
@@ -148,17 +187,23 @@ codex-switch tui
 [proxy]
 url = "socks5h://user:pass@127.0.0.1:1080"
 no_proxy = "localhost,127.0.0.1"
+
+[cache]
+ttl = 300  # 缓存有效期（秒，默认 300）
+
+[network]
+max_concurrent = 20  # 最大并发请求数（默认 20）
 ```
 
 ### 示例
 
 ```bash
 # 命令行参数
-codex-switch --proxy socks5h://127.0.0.1:1080 status
+codex-switch --proxy socks5h://127.0.0.1:1080 list
 
 # 环境变量
 export CS_PROXY="http://user:pass@proxy.corp.com:8080"
-codex-switch status
+codex-switch list
 ```
 
 ## 工作原理
@@ -174,15 +219,26 @@ codex-switch status
 
 ### 自动探测
 
-运行 `codex-switch list`、`codex-switch status` 或 `codex-switch tui` 时，工具会检查当前 `~/.codex/auth.json` 是否属于未追踪的账号。如果是，自动保存为新 profile（使用邮箱用户名作为别名）。
+运行 `codex-switch list` 或 `codex-switch tui` 时，工具会检查当前 `~/.codex/auth.json` 是否属于未追踪的账号。如果是，自动保存为新 profile（使用邮箱用户名作为别名）。
 
 ### 去重机制
 
 登录或导入时，工具通过 `account_id`（优先）或 `email`（备选）匹配账号。如果同一账号已以不同别名存在，会更新已有 profile 而非创建重复项。
 
+### 导入校验
+
+`codex-switch import` 会按阶段验证每个候选文件：
+
+1. 文件格式 — 必须是合法 JSON
+2. 结构校验 — 必须包含所需 `tokens` 字段，并且 `id_token` 可解码
+3. 用量校验 — 调用 token 刷新和 usage 接口确认账号可用（测试可显式跳过）
+4. 保存阶段 — 按身份去重，必要时自动分配不冲突别名
+
+如果输入路径是目录，命令会递归扫描所有 `.json` 文件，并分别报告导入成功与跳过原因。
+
 ### 智能切换（`codex-switch use`）
 
-不带别名调用时，`codex-switch use` 并发查询所有账号并评分：
+不带别名调用时，`codex-switch use` 会先复用仍然新鲜的缓存，再只刷新过期账号，并按以下规则评分：
 
 1. 7 天（周）限额达 100% → 极低分（账号不可用）
 2. 5 小时窗口有剩余配额 → 高分（1000 + 剩余百分比）
@@ -190,9 +246,37 @@ codex-switch status
 
 选择得分最高的账号并切换。
 
+### 缓存行为
+
+- 用量缓存按 profile alias 单独存储在 `~/.codex-switch/cache.json`
+- 每条缓存都带自己的刷新时间，JSON 输出会通过 `usage.fetched_at` 暴露出来
+- `list`、`use`、TUI 默认只刷新过期账号
+- `list -f` 和 TUI 中的 `r` 会强制所有账号绕过缓存
+- 目录导入会逐个文件验证，并显示整体进度
+
 ### Token 自动刷新
 
 当用量查询返回 HTTP 401/403 时，工具自动尝试使用存储的 `refresh_token` 刷新 token。刷新成功后，新 token 会写回 profile 文件和当前的 auth.json。
+
+### 安全说明
+
+- CLI 和 TUI 都不允许删除当前激活账号
+- JSON 模式保证 stdout 只输出机器可读内容，进度和人类提示会走 stderr
+
+## JSON 输出
+
+所有命令都支持 `--json`：
+
+```bash
+# 以 JSON 列出所有账号
+codex-switch --json list
+
+# 切换账号并返回结果
+codex-switch --json use alice
+
+# JSON 模式检查更新
+codex-switch --json self-update --check
+```
 
 ## 平台说明
 

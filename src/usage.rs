@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::auth::{self, CLIENT_ID, TOKEN_URL};
 
@@ -16,6 +16,7 @@ pub struct WindowUsage {
 
 #[derive(Debug, Default, Clone)]
 pub struct UsageInfo {
+    pub fetched_at: Option<i64>,
     pub primary: Option<WindowUsage>,   // 5h window
     pub secondary: Option<WindowUsage>, // 7d window
 }
@@ -39,13 +40,45 @@ pub struct RefreshedTokens {
     pub refresh_token: String,
 }
 
-/// High-level: fetch usage with retry (up to 3 attempts) and auto token refresh.
-/// Persists refreshed tokens back to profile and live auth.json if applicable.
+fn usage_url() -> String {
+    std::env::var("CS_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
+}
+
+/// High-level: fetch usage with retry, token refresh, and disk cache.
+/// Set `force` to true to bypass cache (e.g., manual refresh).
 pub async fn fetch_usage_retried(
     alias: &str,
     profile_path: &Path,
     current_alias: &str,
 ) -> std::result::Result<UsageInfo, String> {
+    fetch_usage_retried_inner(alias, profile_path, current_alias, false).await
+}
+
+/// Same as `fetch_usage_retried` but with explicit force flag.
+pub async fn fetch_usage_retried_force(
+    alias: &str,
+    profile_path: &Path,
+    current_alias: &str,
+) -> std::result::Result<UsageInfo, String> {
+    fetch_usage_retried_inner(alias, profile_path, current_alias, true).await
+}
+
+async fn fetch_usage_retried_inner(
+    alias: &str,
+    profile_path: &Path,
+    current_alias: &str,
+    force: bool,
+) -> std::result::Result<UsageInfo, String> {
+    if !force {
+        if let Some(cached) = crate::cache::get(alias) {
+            debug!("{alias}: cache hit");
+            return Ok(cached);
+        }
+        debug!("{alias}: cache miss, fetching from API");
+    } else {
+        debug!("{alias}: force refresh, bypassing cache");
+    }
+
     let val = auth::read_auth(profile_path).map_err(|e| e.to_string())?;
     let (access_token, refresh_token) = auth::extract_tokens(&val);
 
@@ -78,6 +111,7 @@ pub async fn fetch_usage_retried(
                         );
                     }
                 }
+                crate::cache::put(alias, &usage);
                 return Ok(usage);
             }
             Err(e) => last_err = e.to_string(),
@@ -92,52 +126,104 @@ pub async fn fetch_usage_with_refresh(
     refresh_token: Option<&str>,
 ) -> Result<(UsageInfo, Option<RefreshedTokens>)> {
     let client = auth::build_http_client()?;
+    let usage_url = usage_url();
 
     let resp = client
-        .get(USAGE_URL)
+        .get(&usage_url)
         .header("Authorization", format!("Bearer {access_token}"))
         .send()
         .await?;
 
     let status = resp.status();
+    debug!("Usage API: HTTP {status}");
     if status.is_success() {
         let body: Value = resp.json().await?;
         return Ok((parse_usage(&body), None));
     }
 
     // If 401/403 and we have a refresh_token, try to refresh
-    if let Some(rt) = refresh_token {
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
-            info!("Got HTTP {status}, attempting token refresh");
+    if let Some(rt) = refresh_token
+        && (status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN)
+    {
+        info!("Got HTTP {status}, attempting token refresh");
 
-            match do_refresh_token(&client, rt).await {
-                Ok(new_tokens) => {
-                    let resp2 = client
-                        .get(USAGE_URL)
-                        .header(
-                            "Authorization",
-                            format!("Bearer {}", new_tokens.access_token),
-                        )
-                        .send()
-                        .await?;
+        match do_refresh_token(&client, rt).await {
+            Ok(new_tokens) => {
+                let resp2 = client
+                    .get(&usage_url)
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", new_tokens.access_token),
+                    )
+                    .send()
+                    .await?;
 
-                    if resp2.status().is_success() {
-                        let body: Value = resp2.json().await?;
-                        return Ok((parse_usage(&body), Some(new_tokens)));
-                    }
-                    anyhow::bail!("HTTP {} (after token refresh)", resp2.status());
+                if resp2.status().is_success() {
+                    let body: Value = resp2.json().await?;
+                    return Ok((parse_usage(&body), Some(new_tokens)));
                 }
-                Err(e) => {
-                    info!("Token refresh failed: {e}");
-                    anyhow::bail!("HTTP {status} (token refresh failed: {e})");
-                }
+                anyhow::bail!("HTTP {} (after token refresh)", resp2.status());
+            }
+            Err(e) => {
+                info!("Token refresh failed: {e}");
+                anyhow::bail!("HTTP {status} (token refresh failed: {e})");
             }
         }
     }
 
     anyhow::bail!("HTTP {status}");
+}
+
+pub async fn validate_import_auth(
+    val: &mut serde_json::Value,
+) -> Result<(UsageInfo, Option<RefreshedTokens>)> {
+    if std::env::var("CS_IMPORT_SKIP_USAGE_VALIDATION")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return Ok((UsageInfo::default(), None));
+    }
+
+    let (access_token, refresh_token) = auth::extract_tokens(val);
+
+    match (access_token, refresh_token) {
+        (Some(at), rt) => {
+            let (usage, refreshed) = fetch_usage_with_refresh(&at, rt.as_deref()).await?;
+            if let Some(tokens) = &refreshed {
+                auth::apply_tokens(
+                    val,
+                    &tokens.id_token,
+                    &tokens.access_token,
+                    &tokens.refresh_token,
+                )?;
+            }
+            Ok((usage, refreshed))
+        }
+        (None, Some(rt)) => {
+            let client = auth::build_http_client()?;
+            let refreshed = do_refresh_token(&client, &rt).await?;
+            auth::apply_tokens(
+                val,
+                &refreshed.id_token,
+                &refreshed.access_token,
+                &refreshed.refresh_token,
+            )?;
+            let (usage, refreshed_again) =
+                fetch_usage_with_refresh(&refreshed.access_token, Some(&refreshed.refresh_token))
+                    .await?;
+            if let Some(tokens) = &refreshed_again {
+                auth::apply_tokens(
+                    val,
+                    &tokens.id_token,
+                    &tokens.access_token,
+                    &tokens.refresh_token,
+                )?;
+            }
+            Ok((usage, refreshed_again.or(Some(refreshed))))
+        }
+        (None, None) => anyhow::bail!("auth.json missing access_token and refresh_token"),
+    }
 }
 
 async fn do_refresh_token(
@@ -194,15 +280,15 @@ fn parse_window(val: &Value) -> Option<WindowUsage> {
 
 /// Whether an account is currently usable (both windows have remaining quota).
 pub fn is_available(u: &UsageInfo) -> bool {
-    if let Some(w) = &u.secondary {
-        if w.used_percent.unwrap_or(0.0) >= 100.0 {
-            return false;
-        }
+    if let Some(w) = &u.secondary
+        && w.used_percent.unwrap_or(0.0) >= 100.0
+    {
+        return false;
     }
-    if let Some(w) = &u.primary {
-        if w.used_percent.unwrap_or(0.0) >= 100.0 {
-            return false;
-        }
+    if let Some(w) = &u.primary
+        && w.used_percent.unwrap_or(0.0) >= 100.0
+    {
+        return false;
     }
     true
 }
@@ -264,5 +350,9 @@ pub fn parse_usage(body: &Value) -> UsageInfo {
         .and_then(|v| if v.is_null() { None } else { Some(v) })
         .and_then(parse_window);
 
-    UsageInfo { primary, secondary }
+    UsageInfo {
+        fetched_at: Some(auth::now_unix_secs()),
+        primary,
+        secondary,
+    }
 }
