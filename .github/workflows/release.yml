@@ -167,3 +167,22 @@ jobs:
             artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  homebrew:
+    needs: [meta, release]
+    if: needs.meta.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Homebrew formula
+        uses: mislav/bump-homebrew-formula-action@v4
+        with:
+          formula-name: codex-switch
+          homebrew-tap: xjoker/homebrew-tap
+          tag-name: v${{ needs.meta.outputs.version }}
+          download-url: https://github.com/xjoker/codex-switch/releases/download/v${{ needs.meta.outputs.version }}/cs-darwin-amd64.tar.gz
+          commit-message: |
+            codex-switch ${{ needs.meta.outputs.version }}
+
+            Created by https://github.com/mislav/bump-homebrew-formula-action
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
