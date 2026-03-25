@@ -173,16 +173,73 @@ jobs:
     if: needs.meta.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     steps:
-      - name: Update Homebrew formula
-        uses: mislav/bump-homebrew-formula-action@v4
-        with:
-          formula-name: codex-switch
-          homebrew-tap: xjoker/homebrew-tap
-          tag-name: v${{ needs.meta.outputs.version }}
-          download-url: https://github.com/xjoker/codex-switch/releases/download/v${{ needs.meta.outputs.version }}/cs-darwin-amd64.tar.gz
-          commit-message: |
-            codex-switch ${{ needs.meta.outputs.version }}
+      - name: Download sha256 files
+        run: |
+          VERSION="${{ needs.meta.outputs.version }}"
+          BASE="https://github.com/xjoker/codex-switch/releases/download/v${VERSION}"
+          for name in cs-darwin-arm64 cs-darwin-amd64 cs-linux-arm64 cs-linux-amd64; do
+            curl -fsSL "${BASE}/${name}.tar.gz.sha256" -o "${name}.sha256"
+          done
 
-            Created by https://github.com/mislav/bump-homebrew-formula-action
-        env:
-          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Extract sha256 values
+        id: sha
+        run: |
+          echo "darwin_arm64=$(awk '{print $1}' cs-darwin-arm64.sha256)" >> "$GITHUB_OUTPUT"
+          echo "darwin_amd64=$(awk '{print $1}' cs-darwin-amd64.sha256)" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(awk '{print $1}' cs-linux-arm64.sha256)" >> "$GITHUB_OUTPUT"
+          echo "linux_amd64=$(awk '{print $1}' cs-linux-amd64.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate formula
+        run: |
+          VERSION="${{ needs.meta.outputs.version }}"
+          BASE="https://github.com/xjoker/codex-switch/releases/download/v${VERSION}"
+          cat > codex-switch.rb << RUBY
+          class CodexSwitch < Formula
+            desc "Codex account switcher — multi-profile manager with usage dashboard"
+            homepage "https://github.com/xjoker/codex-switch"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "${BASE}/cs-darwin-arm64.tar.gz"
+                sha256 "${{ steps.sha.outputs.darwin_arm64 }}"
+              end
+              on_intel do
+                url "${BASE}/cs-darwin-amd64.tar.gz"
+                sha256 "${{ steps.sha.outputs.darwin_amd64 }}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "${BASE}/cs-linux-arm64.tar.gz"
+                sha256 "${{ steps.sha.outputs.linux_arm64 }}"
+              end
+              on_intel do
+                url "${BASE}/cs-linux-amd64.tar.gz"
+                sha256 "${{ steps.sha.outputs.linux_amd64 }}"
+              end
+            end
+
+            def install
+              bin.install "codex-switch"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/codex-switch --version")
+            end
+          end
+          RUBY
+
+      - name: Push formula to tap
+        run: |
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/xjoker/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          cp codex-switch.rb tap/Formula/codex-switch.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/codex-switch.rb
+          git commit -m "codex-switch ${{ needs.meta.outputs.version }}"
+          git push
