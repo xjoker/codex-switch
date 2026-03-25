@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+    steps:
+      - name: Parse tag
+        id: parse
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: cs-linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: cs-linux-arm64
+          # macOS
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: cs-darwin-amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: cs-darwin-arm64
+          # Windows
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: cs-windows-amd64
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            name: cs-windows-arm64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Inject version into Cargo.toml
+        shell: bash
+        run: |
+          VERSION="${{ needs.meta.outputs.version }}"
+          # Strip pre-release suffix for Cargo semver (e.g., 0.0.1-dev -> 0.0.1-dev is valid semver)
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          rm -f Cargo.toml.bak
+          echo "Building version: ${VERSION}"
+          grep '^version' Cargo.toml
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/codex-switch"
+          chmod +x "$BIN"
+          tar czf "${{ matrix.name }}.tar.gz" -C "target/${{ matrix.target }}/release" codex-switch
+          shasum -a 256 "${{ matrix.name }}.tar.gz" > "${{ matrix.name }}.tar.gz.sha256"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          7z a "${{ matrix.name }}.zip" "./target/${{ matrix.target }}/release/codex-switch.exe"
+          sha256sum "${{ matrix.name }}.zip" > "${{ matrix.name }}.zip.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.name }}.tar.gz
+            ${{ matrix.name }}.tar.gz.sha256
+            ${{ matrix.name }}.zip
+            ${{ matrix.name }}.zip.sha256
+          if-no-files-found: ignore
+
+  release:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Generate install script body
+        run: |
+          VERSION="${{ needs.meta.outputs.version }}"
+          cat > artifacts/INSTALL.md << 'HEREDOC'
+          ## Quick Install
+
+          ### macOS / Linux (one-liner)
+
+          ```bash
+          curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+          ```
+
+          ### Windows (PowerShell)
+
+          ```powershell
+          irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+          ```
+
+          ### Manual Download
+
+          Download the appropriate binary from the assets below and place it in your PATH.
+          HEREDOC
+
+      - name: Copy install scripts
+        run: |
+          cp scripts/install.sh artifacts/install.sh
+          cp scripts/install.ps1 artifacts/install.ps1
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.meta.outputs.version }}
+          name: v${{ needs.meta.outputs.version }}
+          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

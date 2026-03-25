@@ -1,0 +1,44 @@
+[package]
+name = "cs"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Codex account switcher — multi-profile manager with usage dashboard"
+license = "MIT"
+repository = "https://github.com/xjoker/codex-switch"
+keywords = ["codex", "openai", "account", "switcher", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "codex-switch"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "socks"], default-features = false }
+webbrowser = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ratatui = "0.29"
+crossterm = "0.28"
+urlencoding = "2"
+toml = "0.8"
+rand = "0.8"
+chrono = { version = "0.4", features = ["clock"] }
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+supports-color = "3"
+owo-colors = "4"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
