@@ -193,6 +193,8 @@ jobs:
         run: |
           VERSION="${{ needs.meta.outputs.version }}"
           BASE="https://github.com/xjoker/codex-switch/releases/download/v${VERSION}"
+
+          # Generate latest formula (codex-switch.rb)
           cat > codex-switch.rb << RUBY
           class CodexSwitch < Formula
             desc "Codex account switcher — multi-profile manager with usage dashboard"
@@ -232,14 +234,60 @@ jobs:
           end
           RUBY
 
+          # Generate versioned formula (codex-switch@X.Y.Z.rb)
+          # Homebrew requires unique class names: CodexSwitchATx_y_z
+          CLASS_SUFFIX=$(echo "${VERSION}" | tr '.' '_')
+          cat > "codex-switch@${VERSION}.rb" << RUBY
+          class CodexSwitchAT${CLASS_SUFFIX} < Formula
+            desc "Codex account switcher — multi-profile manager with usage dashboard"
+            homepage "https://github.com/xjoker/codex-switch"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "${BASE}/cs-darwin-arm64.tar.gz"
+                sha256 "${{ steps.sha.outputs.darwin_arm64 }}"
+              end
+              on_intel do
+                url "${BASE}/cs-darwin-amd64.tar.gz"
+                sha256 "${{ steps.sha.outputs.darwin_amd64 }}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "${BASE}/cs-linux-arm64.tar.gz"
+                sha256 "${{ steps.sha.outputs.linux_arm64 }}"
+              end
+              on_intel do
+                url "${BASE}/cs-linux-amd64.tar.gz"
+                sha256 "${{ steps.sha.outputs.linux_amd64 }}"
+              end
+            end
+
+            keg_only :versioned_formula
+
+            def install
+              bin.install "codex-switch"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/codex-switch --version")
+            end
+          end
+          RUBY
+
       - name: Push formula to tap
         run: |
+          VERSION="${{ needs.meta.outputs.version }}"
           git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/xjoker/homebrew-tap.git tap
           mkdir -p tap/Formula
           cp codex-switch.rb tap/Formula/codex-switch.rb
+          cp "codex-switch@${VERSION}.rb" "tap/Formula/codex-switch@${VERSION}.rb"
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/codex-switch.rb
-          git commit -m "codex-switch ${{ needs.meta.outputs.version }}"
+          git add Formula/
+          git commit -m "codex-switch ${VERSION} (latest + versioned formula)"
           git push
