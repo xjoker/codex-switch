@@ -151,7 +151,7 @@ fn json_use_keeps_stdout_machine_readable() {
     fs::create_dir_all(home.join(".codex-switch")).unwrap();
     fs::write(home.join(".codex-switch/current"), "alice").unwrap();
 
-    let output = run(&home, &["--json", "use", "alice"]);
+    let output = run(&home, &["--json", "use", "--force", "alice"]);
     assert!(output.status.success());
     assert_eq!(
         parse_stdout_json(&output),

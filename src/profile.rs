@@ -334,8 +334,8 @@ pub fn collect_import_files(path: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn collect_import_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)
-        .with_context(|| format!("reading directory {}", dir.display()))?
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();

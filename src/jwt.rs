@@ -203,3 +203,90 @@ pub fn is_token_expiring(token: &str, margin_secs: i64) -> Option<bool> {
     let now = crate::auth::now_unix_secs();
     Some(now + margin_secs >= exp)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_jwt(claims: &serde_json::Value) -> String {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
+        format!("header.{payload}.signature")
+    }
+
+    #[test]
+    fn test_parse_account_info_extracts_email_and_plan() {
+        let auth = json!({
+            "tokens": {
+                "id_token": make_jwt(&json!({
+                    "email": "user@example.com",
+                    "https://api.openai.com/auth": {
+                        "chatgpt_plan_type": "pro",
+                        "chatgpt_account_id": "acct-from-claim",
+                    }
+                })),
+                "account_id": "acct-from-tokens"
+            }
+        });
+
+        let info = parse_account_info(&auth);
+
+        assert_eq!(info.email.as_deref(), Some("user@example.com"));
+        assert_eq!(info.plan_type.as_deref(), Some("pro"));
+        assert_eq!(info.account_id.as_deref(), Some("acct-from-claim"));
+    }
+
+    #[test]
+    fn test_parse_account_info_empty_token() {
+        let auth = json!({
+            "tokens": {
+                "id_token": ""
+            }
+        });
+
+        let info = parse_account_info(&auth);
+
+        assert!(info.email.is_none());
+        assert!(info.plan_type.is_none());
+        assert!(info.account_id.is_none());
+        assert!(info.user_id.is_none());
+        assert!(info.workspace_name.is_none());
+        assert!(info.organizations.is_empty());
+    }
+
+    #[test]
+    fn test_is_token_expiring_expired() {
+        let token = make_jwt(&json!({ "exp": 0 }));
+
+        assert_eq!(is_token_expiring(&token, 0), Some(true));
+    }
+
+    #[test]
+    fn test_is_token_expiring_valid() {
+        let token = make_jwt(&json!({ "exp": 9_999_999_999_i64 }));
+
+        assert_eq!(is_token_expiring(&token, 60), Some(false));
+    }
+
+    #[test]
+    fn test_is_token_expiring_within_margin() {
+        let token = make_jwt(&json!({
+            "exp": crate::auth::now_unix_secs() + 30
+        }));
+
+        assert_eq!(is_token_expiring(&token, 60), Some(true));
+    }
+
+    #[test]
+    fn test_is_token_expiring_no_exp_claim() {
+        let token = make_jwt(&json!({ "sub": "user-123" }));
+
+        assert_eq!(is_token_expiring(&token, 60), None);
+    }
+
+    #[test]
+    fn test_is_token_expiring_invalid_jwt() {
+        assert_eq!(is_token_expiring("not-a-jwt", 60), None);
+    }
+}

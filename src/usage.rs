@@ -19,6 +19,8 @@ pub struct UsageInfo {
     pub fetched_at: Option<i64>,
     pub primary: Option<WindowUsage>,   // 5h window
     pub secondary: Option<WindowUsage>, // 7d window
+    pub credits_balance: Option<f64>,
+    pub unlimited_credits: Option<bool>,
 }
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -397,9 +399,208 @@ pub fn parse_usage(body: &Value) -> UsageInfo {
         .and_then(|v| if v.is_null() { None } else { Some(v) })
         .and_then(parse_window);
 
+    let credits_balance = body.pointer("/credits/balance").and_then(|v| v.as_f64());
+
+    let unlimited_credits = body.pointer("/credits/unlimited").and_then(|v| v.as_bool());
+
     UsageInfo {
         fetched_at: Some(auth::now_unix_secs()),
         primary,
         secondary,
+        credits_balance,
+        unlimited_credits,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::DateTime;
+    use serde_json::json;
+
+    fn usage_with(primary: Option<WindowUsage>, secondary: Option<WindowUsage>) -> UsageInfo {
+        UsageInfo {
+            fetched_at: None,
+            primary,
+            secondary,
+            credits_balance: None,
+            unlimited_credits: None,
+        }
+    }
+
+    fn window(used_percent: f64, resets_at: Option<i64>) -> WindowUsage {
+        WindowUsage {
+            used_percent: Some(used_percent),
+            resets_at,
+        }
+    }
+
+    #[test]
+    fn test_parse_usage_full_response() {
+        let primary_reset = DateTime::parse_from_rfc3339("2026-03-26T10:00:00Z")
+            .unwrap()
+            .timestamp();
+        let secondary_reset = DateTime::parse_from_rfc3339("2026-03-30T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let body = json!({
+            "rate_limit": {
+                "primary_window": {
+                    "remaining_seconds": 3600,
+                    "requests_remaining": 50,
+                    "requests_limit": 100,
+                    "reset_time": "2026-03-26T10:00:00Z",
+                    "used_percent": 50.0,
+                    "reset_at": primary_reset
+                },
+                "secondary_window": {
+                    "remaining_seconds": 86400,
+                    "requests_remaining": 200,
+                    "requests_limit": 500,
+                    "reset_time": "2026-03-30T00:00:00Z",
+                    "used_percent": 60.0,
+                    "reset_at": secondary_reset
+                }
+            },
+            "credits": {
+                "balance": 15.50,
+                "unlimited": false
+            }
+        });
+
+        let before = auth::now_unix_secs();
+        let usage = parse_usage(&body);
+        let after = auth::now_unix_secs();
+
+        assert!(matches!(usage.fetched_at, Some(ts) if ts >= before && ts <= after));
+        assert_eq!(
+            usage.primary.as_ref().and_then(|w| w.used_percent),
+            Some(50.0)
+        );
+        assert_eq!(
+            usage.primary.as_ref().and_then(|w| w.resets_at),
+            Some(primary_reset)
+        );
+        assert_eq!(
+            usage.secondary.as_ref().and_then(|w| w.used_percent),
+            Some(60.0)
+        );
+        assert_eq!(
+            usage.secondary.as_ref().and_then(|w| w.resets_at),
+            Some(secondary_reset)
+        );
+        assert_eq!(usage.credits_balance, Some(15.5));
+        assert_eq!(usage.unlimited_credits, Some(false));
+    }
+
+    #[test]
+    fn test_parse_usage_unlimited_credits() {
+        let usage = parse_usage(&json!({
+            "credits": {
+                "balance": 15.50,
+                "unlimited": true
+            }
+        }));
+
+        assert_eq!(usage.credits_balance, Some(15.5));
+        assert_eq!(usage.unlimited_credits, Some(true));
+    }
+
+    #[test]
+    fn test_parse_usage_no_credits() {
+        let usage = parse_usage(&json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 25.0,
+                    "reset_at": 123
+                }
+            }
+        }));
+
+        assert_eq!(usage.credits_balance, None);
+        assert_eq!(usage.unlimited_credits, None);
+    }
+
+    #[test]
+    fn test_parse_usage_null_windows() {
+        let usage = parse_usage(&json!({
+            "rate_limit": {
+                "primary_window": null,
+                "secondary_window": null
+            }
+        }));
+
+        assert!(usage.primary.is_none());
+        assert!(usage.secondary.is_none());
+    }
+
+    #[test]
+    fn test_parse_usage_empty_response() {
+        let usage = parse_usage(&json!({}));
+
+        assert!(usage.primary.is_none());
+        assert!(usage.secondary.is_none());
+        assert_eq!(usage.credits_balance, None);
+        assert_eq!(usage.unlimited_credits, None);
+    }
+
+    #[test]
+    fn test_is_available_both_under_100() {
+        let usage = usage_with(
+            Some(window(50.0, Some(1_000))),
+            Some(window(30.0, Some(2_000))),
+        );
+
+        assert!(is_available(&usage));
+    }
+
+    #[test]
+    fn test_is_available_primary_exhausted() {
+        let usage = usage_with(
+            Some(window(100.0, Some(1_000))),
+            Some(window(30.0, Some(2_000))),
+        );
+
+        assert!(!is_available(&usage));
+    }
+
+    #[test]
+    fn test_is_available_secondary_exhausted() {
+        let usage = usage_with(
+            Some(window(50.0, Some(1_000))),
+            Some(window(100.0, Some(2_000))),
+        );
+
+        assert!(!is_available(&usage));
+    }
+
+    #[test]
+    fn test_is_available_no_data() {
+        assert!(is_available(&UsageInfo::default()));
+    }
+
+    #[test]
+    fn test_score_available_account() {
+        let usage = usage_with(Some(window(30.0, Some(1_000))), None);
+
+        assert_eq!(score(&usage), 1_070.0);
+    }
+
+    #[test]
+    fn test_score_no_primary() {
+        assert_eq!(score(&UsageInfo::default()), 50.0);
+    }
+
+    #[test]
+    fn test_score_primary_exhausted_7d_ok() {
+        let now = auth::now_unix_secs();
+        let usage = usage_with(
+            Some(window(100.0, Some(now + 3_600))),
+            Some(window(50.0, Some(now + 86_400))),
+        );
+
+        let scored = score(&usage);
+
+        assert!((0.0..=500.0).contains(&scored));
     }
 }

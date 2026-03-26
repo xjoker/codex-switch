@@ -17,6 +17,10 @@ struct CacheEntry {
     primary_reset: Option<i64>,
     secondary_used: Option<f64>,
     secondary_reset: Option<i64>,
+    #[serde(default)]
+    credits_balance: Option<f64>,
+    #[serde(default)]
+    unlimited_credits: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -65,6 +69,8 @@ fn to_entry(u: &UsageInfo) -> CacheEntry {
         primary_reset: u.primary.as_ref().and_then(|w| w.resets_at),
         secondary_used: u.secondary.as_ref().and_then(|w| w.used_percent),
         secondary_reset: u.secondary.as_ref().and_then(|w| w.resets_at),
+        credits_balance: u.credits_balance,
+        unlimited_credits: u.unlimited_credits,
     }
 }
 
@@ -90,6 +96,8 @@ fn from_entry(e: &CacheEntry) -> UsageInfo {
         fetched_at: Some(e.ts as i64),
         primary,
         secondary,
+        credits_balance: e.credits_balance,
+        unlimited_credits: e.unlimited_credits,
     }
 }
 
@@ -110,4 +118,29 @@ pub fn put(alias: &str, usage: &UsageInfo) {
     let mut cache = load_cache();
     cache.entries.insert(alias.to_string(), to_entry(usage));
     save_cache(&cache);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_cache_entry_deserialize_without_credits() {
+        let entry: CacheEntry = serde_json::from_value(json!({
+            "ts": 123,
+            "primary_used": 25.0,
+            "primary_reset": 456,
+            "secondary_used": 75.0,
+            "secondary_reset": 789
+        }))
+        .unwrap();
+
+        assert_eq!(entry.credits_balance, None);
+        assert_eq!(entry.unlimited_credits, None);
+
+        let usage = from_entry(&entry);
+        assert_eq!(usage.credits_balance, None);
+        assert_eq!(usage.unlimited_credits, None);
+    }
 }

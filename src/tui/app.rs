@@ -344,7 +344,9 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
         app.poll_results();
         app.tick();
 
-        terminal.draw(|f| super::ui::render(f, &app)).context("drawing TUI")?;
+        terminal
+            .draw(|f| super::ui::render(f, &app))
+            .context("drawing TUI")?;
 
         if event::poll(Duration::from_millis(100)).context("polling terminal events")?
             && let Event::Key(key) = event::read().context("reading terminal event")?

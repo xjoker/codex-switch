@@ -24,17 +24,16 @@ pub fn detect_codex_processes() -> Vec<CodexProcess> {
             if let Ok(output) = std::process::Command::new("pgrep")
                 .args(["-x", name])
                 .output()
+                && output.status.success()
             {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        if let Ok(pid) = line.trim().parse::<u32>() {
-                            debug!("Detected codex process: pid={pid} name={name}");
-                            found.push(CodexProcess {
-                                pid,
-                                name: name.to_string(),
-                            });
-                        }
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Ok(pid) = line.trim().parse::<u32>() {
+                        debug!("Detected codex process: pid={pid} name={name}");
+                        found.push(CodexProcess {
+                            pid,
+                            name: name.to_string(),
+                        });
                     }
                 }
             }

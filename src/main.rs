@@ -814,5 +814,12 @@ fn print_usage_line(u: &usage::UsageInfo) {
             color::dim(&format!("(resets: {reset})"))
         );
     }
+    if let Some(balance) = u.credits_balance {
+        if u.unlimited_credits == Some(true) {
+            print!("  {}", color::dim("credits: unlimited"));
+        } else {
+            print!("  {}", color::dim(&format!("credits: ${balance:.2}")));
+        }
+    }
     println!();
 }

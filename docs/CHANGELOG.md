@@ -9,6 +9,8 @@
 - **OAuth port fallback** — When port 1455 is occupied, login automatically falls back to a random available port instead of failing
 - **Token pre-refresh** — Access tokens expiring within 60 seconds are proactively refreshed before usage API requests, reducing 401 retry latency
 - **Process detection on switch** — `use` command detects running Codex processes and warns before switching; use `--force` to override
+- **Credits balance display** — Usage output now shows `credits_balance` and `unlimited_credits` in CLI, TUI, and `--json` output (backward-compatible with APIs that don't return credits data)
+- **Unit test coverage** — 21 new unit tests covering JWT parsing/expiration, usage data parsing/scoring/availability, auth JSON structure, and cache deserialization compatibility
 
 ## v0.0.4 — 2026-03-26
 

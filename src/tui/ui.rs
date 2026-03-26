@@ -291,12 +291,16 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
+    let has_credits = u.credits_balance.is_some();
     let mut constraints = vec![];
     if u.primary.is_some() {
         constraints.push(Constraint::Length(2));
     }
     if u.secondary.is_some() {
         constraints.push(Constraint::Length(2));
+    }
+    if has_credits {
+        constraints.push(Constraint::Length(1));
     }
     if constraints.is_empty() {
         constraints.push(Constraint::Min(1));
@@ -338,9 +342,20 @@ fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
             .percent(pct)
             .label(label);
         f.render_widget(gauge, layout[idx]);
+        idx += 1;
     }
 
-    if u.primary.is_none() && u.secondary.is_none() {
+    if let Some(balance) = u.credits_balance {
+        let text = if u.unlimited_credits == Some(true) {
+            "Credits: unlimited".to_string()
+        } else {
+            format!("Credits: ${balance:.2}")
+        };
+        let p = Paragraph::new(text).style(Style::default().fg(Color::Cyan));
+        f.render_widget(p, layout[idx]);
+    }
+
+    if u.primary.is_none() && u.secondary.is_none() && !has_credits {
         let p = Paragraph::new("No usage data").style(Style::default().fg(Color::DarkGray));
         f.render_widget(p, layout[0]);
     }

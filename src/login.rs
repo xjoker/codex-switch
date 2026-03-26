@@ -527,3 +527,50 @@ fn open_browser(url: &str) {
         tracing::warn!("Failed to open browser: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::DateTime;
+
+    #[test]
+    fn test_build_auth_json_structure() {
+        let tokens = LoginTokens {
+            id_token: "id-token".to_string(),
+            access_token: "access-token".to_string(),
+            refresh_token: "refresh-token".to_string(),
+        };
+
+        let before = crate::auth::now_unix_secs();
+        let auth = build_auth_json(&tokens, "acct-123");
+        let after = crate::auth::now_unix_secs();
+
+        assert_eq!(
+            auth.pointer("/tokens/id_token").and_then(|v| v.as_str()),
+            Some("id-token")
+        );
+        assert_eq!(
+            auth.pointer("/tokens/access_token")
+                .and_then(|v| v.as_str()),
+            Some("access-token")
+        );
+        assert_eq!(
+            auth.pointer("/tokens/refresh_token")
+                .and_then(|v| v.as_str()),
+            Some("refresh-token")
+        );
+        assert_eq!(
+            auth.pointer("/tokens/account_id").and_then(|v| v.as_str()),
+            Some("acct-123")
+        );
+
+        let last_refresh = auth
+            .get("last_refresh")
+            .and_then(|v| v.as_str())
+            .expect("last_refresh should be present");
+        let parsed = DateTime::parse_from_rfc3339(last_refresh)
+            .unwrap()
+            .timestamp();
+        assert!(parsed >= before && parsed <= after);
+    }
+}

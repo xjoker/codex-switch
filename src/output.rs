@@ -31,6 +31,10 @@ pub enum JsonUsage {
         fetched_at: String,
         primary: Option<JsonWindow>,
         secondary: Option<JsonWindow>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        credits_balance: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unlimited_credits: Option<bool>,
     },
     Err {
         error: String,
@@ -138,6 +142,8 @@ pub fn usage_to_json(result: Result<&UsageInfo, &str>) -> JsonUsage {
                 fetched_at,
                 primary: u.primary.as_ref().map(|w| window_to_json(w, "5h")),
                 secondary: u.secondary.as_ref().map(|w| window_to_json(w, "7d")),
+                credits_balance: u.credits_balance,
+                unlimited_credits: u.unlimited_credits,
             }
         }
     }
