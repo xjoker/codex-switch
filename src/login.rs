@@ -23,6 +23,8 @@ const SCOPE: &str = "openid profile email offline_access api.connectors.read api
 const CALLBACK_TIMEOUT_SECS: u64 = 300;
 const CALLBACK_PORT: u16 = 1455;
 const CALLBACK_HOST: &str = "127.0.0.1";
+/// OAuth redirect_uri must use "localhost" to match OpenAI's registered URI.
+const REDIRECT_HOST: &str = "localhost";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -67,7 +69,7 @@ fn generate_state() -> String {
 }
 
 fn redirect_uri(port: u16) -> String {
-    format!("http://{CALLBACK_HOST}:{port}/auth/callback")
+    format!("http://{REDIRECT_HOST}:{port}/auth/callback")
 }
 
 // ── Main flow ─────────────────────────────────────────────
@@ -77,18 +79,12 @@ pub async fn run_device_auth() -> Result<LoginTokens> {
     let pkce = generate_pkce();
     let state = generate_state();
 
-    let listener = match TcpListener::bind(format!("{CALLBACK_HOST}:{CALLBACK_PORT}")).await {
-        Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            info!("Port {CALLBACK_PORT} in use, falling back to random port");
-            TcpListener::bind(format!("{CALLBACK_HOST}:0"))
-                .await
-                .map_err(|e| anyhow::anyhow!("Cannot bind callback server: {e}"))?
-        }
-        Err(e) => return Err(anyhow::anyhow!("Cannot bind port {CALLBACK_PORT}: {e}")),
-    };
-    let actual_port = listener.local_addr()?.port();
-    let actual_redirect = redirect_uri(actual_port);
+    // PKCE redirect_uri must be exactly http://localhost:1455/auth/callback
+    // (registered with OpenAI). Random port fallback is NOT possible.
+    let listener = TcpListener::bind(format!("{CALLBACK_HOST}:{CALLBACK_PORT}"))
+        .await
+        .map_err(|e| anyhow::anyhow!("Cannot bind port {CALLBACK_PORT} (already in use?): {e}"))?;
+    let actual_redirect = redirect_uri(CALLBACK_PORT);
     let authorize_url = build_authorize_url(&pkce.code_challenge, &state, &actual_redirect);
 
     user_println("");
@@ -96,11 +92,6 @@ pub async fn run_device_auth() -> Result<LoginTokens> {
     user_println("If the browser does not open, visit:");
     user_println(&authorize_url);
     user_println("");
-    if actual_port != CALLBACK_PORT {
-        user_println(&format!(
-            "Port {CALLBACK_PORT} is busy, using callback port {actual_port}."
-        ));
-    }
     user_println(&format!(
         "Waiting for authorization callback ({CALLBACK_TIMEOUT_SECS}s timeout)…"
     ));

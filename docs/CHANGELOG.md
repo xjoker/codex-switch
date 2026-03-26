@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.0.6 — 2026-03-26
+
+### Fixed
+
+- **OAuth login broken since v0.0.4** — redirect_uri changed from `http://localhost:1455/...` to `http://127.0.0.1:1455/...`, which doesn't match OpenAI's registered URI, causing `unknown_error` on login
+- **Removed random port fallback for PKCE login** — OAuth redirect_uri must exactly match the registered `localhost:1455`; random port fallback is only valid for device code flow
+
 ## v0.0.5 — 2026-03-26
 
 ### Added
