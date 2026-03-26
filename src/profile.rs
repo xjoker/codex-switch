@@ -1,7 +1,7 @@
 use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::auth::{
     backup_auth, codex_auth_path, current_file, profiles_dir, read_auth, write_auth,
@@ -19,7 +19,8 @@ pub fn list_profiles() -> Result<Vec<String>> {
     if !dir.exists() {
         return Ok(vec![]);
     }
-    let mut names: Vec<String> = std::fs::read_dir(&dir)?
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .with_context(|| format!("reading profiles directory {}", dir.display()))?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .filter_map(|e| e.file_name().into_string().ok())
@@ -37,9 +38,11 @@ pub fn read_current() -> String {
 fn write_current(alias: &str) -> Result<()> {
     let path = current_file();
     if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
+        std::fs::create_dir_all(p)
+            .with_context(|| format!("creating directory {}", p.display()))?;
     }
-    std::fs::write(path, alias)?;
+    std::fs::write(&path, alias)
+        .with_context(|| format!("writing current profile marker {}", path.display()))?;
     Ok(())
 }
 
@@ -309,7 +312,8 @@ pub fn cmd_delete(alias: &str) -> Result<()> {
     if read_current() == alias {
         return Err(CsError::ActiveProfileDelete(alias.to_string()).into());
     }
-    std::fs::remove_dir_all(&dir)?;
+    std::fs::remove_dir_all(&dir)
+        .with_context(|| format!("removing profile directory {}", dir.display()))?;
     user_println(&format!("Deleted profile: {alias}"));
     Ok(())
 }
@@ -330,10 +334,16 @@ pub fn collect_import_files(path: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn collect_import_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("reading directory {}", dir.display()))?
+    {
         let entry = entry?;
         let path = entry.path();
-        if entry.file_type()?.is_dir() {
+        if entry
+            .file_type()
+            .with_context(|| format!("reading file type of {}", path.display()))?
+            .is_dir()
+        {
             collect_import_files_recursive(&path, files)?;
             continue;
         }
@@ -383,7 +393,13 @@ pub fn rename_profile(old_alias: &str, new_alias: &str) -> Result<()> {
     if new_dir.exists() {
         anyhow::bail!("profile '{new_alias}' already exists");
     }
-    std::fs::rename(&old_dir, &new_dir)?;
+    std::fs::rename(&old_dir, &new_dir).with_context(|| {
+        format!(
+            "renaming profile {} → {}",
+            old_dir.display(),
+            new_dir.display()
+        )
+    })?;
     if read_current() == old_alias {
         write_current(new_alias)?;
     }

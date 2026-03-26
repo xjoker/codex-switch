@@ -6,7 +6,7 @@
 /// - Browser completes authorization and redirects back
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use serde::Deserialize;
@@ -143,13 +143,19 @@ struct CallbackResult {
 }
 
 async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<CallbackResult> {
-    let (mut stream, _) = listener.accept().await?;
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .context("accepting OAuth callback connection on port 1455")?;
 
     // Read until we have the full first line (may arrive in multiple reads on Windows)
     let mut buf = vec![0u8; 8192];
     let mut total = 0;
     loop {
-        let n = stream.read(&mut buf[total..]).await?;
+        let n = stream
+            .read(&mut buf[total..])
+            .await
+            .context("reading OAuth callback request")?;
         if n == 0 {
             break;
         }
@@ -237,11 +243,13 @@ async fn exchange_code_with_redirect(
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
-        .await?;
+        .await
+        .map_err(|e| crate::auth::format_reqwest_error("Token exchange request failed", &e))?;
 
     let status = resp.status();
     debug!("Token exchange: HTTP {status}");
-    let token_resp: TokenResponse = resp.json().await?;
+    let token_resp: TokenResponse = resp.json().await
+        .map_err(|e| anyhow::anyhow!("Failed to parse token response (HTTP {status}): {e}"))?;
 
     if let Some(e) = token_resp.error {
         let desc = token_resp.error_description.as_deref().unwrap_or("");
@@ -306,7 +314,7 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
         }))
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to request device code: {e}"))?;
+        .map_err(|e| crate::auth::format_reqwest_error("Failed to request device code", &e))?;
 
     let status = resp.status();
     if !status.is_success() {

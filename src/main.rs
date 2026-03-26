@@ -13,7 +13,7 @@ mod tui;
 mod update;
 mod usage;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Commands};
 use output::{
@@ -739,7 +739,8 @@ async fn self_update_cmd(check: bool, version: Option<&str>, json: bool) -> Resu
 
 fn open_cmd() -> Result<()> {
     let dir = auth::app_home();
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating directory {}", dir.display()))?;
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(&dir).spawn();
     #[cfg(target_os = "windows")]

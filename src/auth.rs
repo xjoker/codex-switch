@@ -54,10 +54,11 @@ pub fn read_auth(path: &Path) -> Result<serde_json::Value> {
 
 pub fn write_auth(path: &Path, val: &serde_json::Value) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
     }
     let raw = serde_json::to_string_pretty(val)?;
-    std::fs::write(path, raw)?;
+    std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -73,7 +74,8 @@ pub fn backup_auth(path: &Path) -> Result<()> {
     }
     let ts = now_unix_secs();
     let bak = path.with_extension(format!("json.bak.{ts}"));
-    std::fs::copy(path, &bak)?;
+    std::fs::copy(path, &bak)
+        .with_context(|| format!("backing up {} → {}", path.display(), bak.display()))?;
     cleanup_old_backups(path);
     Ok(())
 }
@@ -195,7 +197,10 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 }
 
 pub fn build_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().user_agent(USER_AGENT);
+    let mut builder = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60));
 
     if let Some(url) = proxy_url {
         tracing::debug!("Using proxy: {url}");
@@ -209,6 +214,17 @@ pub fn build_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::
     }
 
     Ok(builder.build()?)
+}
+
+/// Format a reqwest error with the full source chain for diagnostics.
+pub fn format_reqwest_error(context: &str, err: &reqwest::Error) -> anyhow::Error {
+    let mut msg = format!("{context}: {err}");
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        msg.push_str(&format!("\n  caused by: {cause}"));
+        source = std::error::Error::source(cause);
+    }
+    anyhow::anyhow!("{msg}")
 }
 
 fn cleanup_old_backups(path: &Path) {

@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, info};
 
-use crate::auth::{self, CLIENT_ID, TOKEN_URL};
+use crate::auth::{self, CLIENT_ID, TOKEN_URL, format_reqwest_error};
 
 #[derive(Debug, Default, Clone)]
 pub struct WindowUsage {
@@ -132,12 +132,14 @@ pub async fn fetch_usage_with_refresh(
         .get(&usage_url)
         .header("Authorization", format!("Bearer {access_token}"))
         .send()
-        .await?;
+        .await
+        .map_err(|e| format_reqwest_error("Usage API request failed", &e))?;
 
     let status = resp.status();
     debug!("Usage API: HTTP {status}");
     if status.is_success() {
-        let body: Value = resp.json().await?;
+        let body: Value = resp.json().await
+            .map_err(|e| anyhow::anyhow!("Failed to parse usage response (HTTP {status}): {e}"))?;
         return Ok((parse_usage(&body), None));
     }
 
@@ -156,22 +158,25 @@ pub async fn fetch_usage_with_refresh(
                         format!("Bearer {}", new_tokens.access_token),
                     )
                     .send()
-                    .await?;
+                    .await
+                    .map_err(|e| format_reqwest_error("Usage API retry request failed", &e))?;
 
-                if resp2.status().is_success() {
-                    let body: Value = resp2.json().await?;
+                let status2 = resp2.status();
+                if status2.is_success() {
+                    let body: Value = resp2.json().await
+                        .map_err(|e| anyhow::anyhow!("Failed to parse usage response after refresh (HTTP {status2}): {e}"))?;
                     return Ok((parse_usage(&body), Some(new_tokens)));
                 }
-                anyhow::bail!("HTTP {} (after token refresh)", resp2.status());
+                anyhow::bail!("Usage API failed (HTTP {status2}) after token refresh");
             }
             Err(e) => {
                 info!("Token refresh failed: {e}");
-                anyhow::bail!("HTTP {status} (token refresh failed: {e})");
+                anyhow::bail!("Usage API failed (HTTP {status}), token refresh also failed: {e}");
             }
         }
     }
 
-    anyhow::bail!("HTTP {status}");
+    anyhow::bail!("Usage API failed (HTTP {status})");
 }
 
 pub async fn validate_import_auth(
@@ -241,10 +246,12 @@ async fn do_refresh_token(
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
-        .await?;
+        .await
+        .map_err(|e| format_reqwest_error("Token refresh request failed", &e))?;
 
     let status = resp.status();
-    let r: RefreshResponse = resp.json().await?;
+    let r: RefreshResponse = resp.json().await
+        .map_err(|e| anyhow::anyhow!("Failed to parse token refresh response (HTTP {status}): {e}"))?;
 
     match (r.access_token, r.id_token, r.refresh_token) {
         (Some(at), Some(id), Some(rt)) => {
