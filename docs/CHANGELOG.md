@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.0.5 — 2026-03-26
+
+### Added
+
+- **OAuth port fallback** — When port 1455 is occupied, login automatically falls back to a random available port instead of failing
+- **Token pre-refresh** — Access tokens expiring within 60 seconds are proactively refreshed before usage API requests, reducing 401 retry latency
+- **Process detection on switch** — `use` command detects running Codex processes and warns before switching; use `--force` to override
+
 ## v0.0.4 — 2026-03-26
 
 ### Fixed

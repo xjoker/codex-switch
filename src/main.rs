@@ -8,6 +8,7 @@ mod error;
 mod jwt;
 mod login;
 mod output;
+mod process;
 mod profile;
 mod tui;
 mod update;
@@ -18,7 +19,7 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use output::{
     MessageMode, ProgressReporter, account_to_json, format_reset_time, print_error, print_json,
-    usage_to_json,
+    usage_to_json, user_println,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -65,7 +66,7 @@ async fn main() {
 
 async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
     match cmd {
-        Commands::Use { alias } => use_cmd(alias.as_deref(), json).await?,
+        Commands::Use { alias, force } => use_cmd(alias.as_deref(), force, json).await?,
         Commands::List { force } => list_cmd(force, json).await?,
         Commands::Delete { alias } => delete_cmd(&alias, json)?,
         Commands::Login { alias, device } => login_cmd(alias.as_deref(), device, json).await?,
@@ -81,7 +82,29 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
 
 // ── use ──────────────────────────────────────────────────
 
-async fn use_cmd(alias: Option<&str>, json: bool) -> Result<()> {
+async fn use_cmd(alias: Option<&str>, force: bool, json: bool) -> Result<()> {
+    if !force {
+        let procs = process::detect_codex_processes();
+        if !procs.is_empty() {
+            for proc in &procs {
+                tracing::debug!(
+                    pid = proc.pid,
+                    name = %proc.name,
+                    "Blocking switch because Codex process is running"
+                );
+            }
+            let pids: Vec<String> = procs.iter().map(|p| p.pid.to_string()).collect();
+            user_println(&format!(
+                "Warning: {} codex process(es) detected (PID: {})",
+                procs.len(),
+                pids.join(", ")
+            ));
+            user_println("Switching accounts while Codex is running may cause issues.");
+            user_println("Use --force to switch anyway, or stop Codex first.");
+            anyhow::bail!("Codex process(es) running, use --force to override");
+        }
+    }
+
     match alias {
         Some(a) => {
             profile::cmd_use(a)?;

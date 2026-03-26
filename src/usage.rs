@@ -128,6 +128,40 @@ pub async fn fetch_usage_with_refresh(
     let client = auth::build_http_client()?;
     let usage_url = usage_url();
 
+    // Pre-refresh: if access_token expires within 60 seconds, refresh proactively.
+    if let Some(rt) = refresh_token
+        && crate::jwt::is_token_expiring(access_token, 60).unwrap_or(false)
+    {
+        info!("Access token expiring soon, proactively refreshing");
+
+        match do_refresh_token(&client, rt).await {
+            Ok(new_tokens) => {
+                let resp = client
+                    .get(&usage_url)
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", new_tokens.access_token),
+                    )
+                    .send()
+                    .await
+                    .map_err(|e| format_reqwest_error("Usage API request failed", &e))?;
+
+                let status = resp.status();
+                debug!("Usage API: HTTP {status}");
+                if status.is_success() {
+                    let body: Value = resp.json().await.map_err(|e| {
+                        anyhow::anyhow!("Failed to parse usage response (HTTP {status}): {e}")
+                    })?;
+                    return Ok((parse_usage(&body), Some(new_tokens)));
+                }
+                anyhow::bail!("Usage API failed (HTTP {status}) after proactive token refresh");
+            }
+            Err(e) => {
+                info!("Proactive token refresh failed, trying with existing token: {e}");
+            }
+        }
+    }
+
     let resp = client
         .get(&usage_url)
         .header("Authorization", format!("Bearer {access_token}"))
@@ -138,7 +172,9 @@ pub async fn fetch_usage_with_refresh(
     let status = resp.status();
     debug!("Usage API: HTTP {status}");
     if status.is_success() {
-        let body: Value = resp.json().await
+        let body: Value = resp
+            .json()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to parse usage response (HTTP {status}): {e}"))?;
         return Ok((parse_usage(&body), None));
     }
@@ -163,8 +199,11 @@ pub async fn fetch_usage_with_refresh(
 
                 let status2 = resp2.status();
                 if status2.is_success() {
-                    let body: Value = resp2.json().await
-                        .map_err(|e| anyhow::anyhow!("Failed to parse usage response after refresh (HTTP {status2}): {e}"))?;
+                    let body: Value = resp2.json().await.map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to parse usage response after refresh (HTTP {status2}): {e}"
+                        )
+                    })?;
                     return Ok((parse_usage(&body), Some(new_tokens)));
                 }
                 anyhow::bail!("Usage API failed (HTTP {status2}) after token refresh");
@@ -250,8 +289,9 @@ async fn do_refresh_token(
         .map_err(|e| format_reqwest_error("Token refresh request failed", &e))?;
 
     let status = resp.status();
-    let r: RefreshResponse = resp.json().await
-        .map_err(|e| anyhow::anyhow!("Failed to parse token refresh response (HTTP {status}): {e}"))?;
+    let r: RefreshResponse = resp.json().await.map_err(|e| {
+        anyhow::anyhow!("Failed to parse token refresh response (HTTP {status}): {e}")
+    })?;
 
     match (r.access_token, r.id_token, r.refresh_token) {
         (Some(at), Some(id), Some(rt)) => {

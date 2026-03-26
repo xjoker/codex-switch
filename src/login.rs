@@ -2,7 +2,7 @@
 ///
 /// Matches the Codex CLI / Codex-Manager flow:
 /// - PKCE Authorization Code Flow (not Device Flow)
-/// - Local HTTP callback server on port 1455
+/// - Local HTTP callback server on port 1455, with localhost fallback port selection
 /// - Browser completes authorization and redirects back
 use std::time::Duration;
 
@@ -19,9 +19,10 @@ use crate::auth::{CLIENT_ID, ISSUER};
 use crate::output::user_println;
 
 const ORIGINATOR: &str = "codex_cli_rs";
-const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const CALLBACK_TIMEOUT_SECS: u64 = 300;
+const CALLBACK_PORT: u16 = 1455;
+const CALLBACK_HOST: &str = "127.0.0.1";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -65,6 +66,10 @@ fn generate_state() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+fn redirect_uri(port: u16) -> String {
+    format!("http://{CALLBACK_HOST}:{port}/auth/callback")
+}
+
 // ── Main flow ─────────────────────────────────────────────
 
 /// Run PKCE OAuth flow: open browser → wait for callback → exchange tokens
@@ -72,17 +77,30 @@ pub async fn run_device_auth() -> Result<LoginTokens> {
     let pkce = generate_pkce();
     let state = generate_state();
 
-    let authorize_url = build_authorize_url(&pkce.code_challenge, &state);
-
-    let listener = TcpListener::bind("127.0.0.1:1455")
-        .await
-        .map_err(|e| anyhow::anyhow!("Cannot bind port 1455 (already in use?): {e}"))?;
+    let listener = match TcpListener::bind(format!("{CALLBACK_HOST}:{CALLBACK_PORT}")).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            info!("Port {CALLBACK_PORT} in use, falling back to random port");
+            TcpListener::bind(format!("{CALLBACK_HOST}:0"))
+                .await
+                .map_err(|e| anyhow::anyhow!("Cannot bind callback server: {e}"))?
+        }
+        Err(e) => return Err(anyhow::anyhow!("Cannot bind port {CALLBACK_PORT}: {e}")),
+    };
+    let actual_port = listener.local_addr()?.port();
+    let actual_redirect = redirect_uri(actual_port);
+    let authorize_url = build_authorize_url(&pkce.code_challenge, &state, &actual_redirect);
 
     user_println("");
     user_println("Opening browser for Codex login…");
     user_println("If the browser does not open, visit:");
     user_println(&authorize_url);
     user_println("");
+    if actual_port != CALLBACK_PORT {
+        user_println(&format!(
+            "Port {CALLBACK_PORT} is busy, using callback port {actual_port}."
+        ));
+    }
     user_println(&format!(
         "Waiting for authorization callback ({CALLBACK_TIMEOUT_SECS}s timeout)…"
     ));
@@ -107,17 +125,18 @@ pub async fn run_device_auth() -> Result<LoginTokens> {
         callback_result.code.len()
     );
 
-    let tokens = exchange_code(&callback_result.code, &pkce.code_verifier).await?;
+    let tokens =
+        exchange_code(&callback_result.code, &pkce.code_verifier, &actual_redirect).await?;
     Ok(tokens)
 }
 
 // ── Authorization URL ─────────────────────────────────────
 
-fn build_authorize_url(code_challenge: &str, state: &str) -> String {
+fn build_authorize_url(code_challenge: &str, state: &str, redirect_uri: &str) -> String {
     let params = [
         ("response_type", "code"),
         ("client_id", CLIENT_ID),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
         ("scope", SCOPE),
         ("code_challenge", code_challenge),
         ("code_challenge_method", "S256"),
@@ -146,7 +165,7 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
     let (mut stream, _) = listener
         .accept()
         .await
-        .context("accepting OAuth callback connection on port 1455")?;
+        .context("accepting OAuth callback connection")?;
 
     // Read until we have the full first line (may arrive in multiple reads on Windows)
     let mut buf = vec![0u8; 8192];
@@ -217,8 +236,8 @@ Connection: close
 
 // ── Token exchange ────────────────────────────────────────
 
-async fn exchange_code(code: &str, code_verifier: &str) -> Result<LoginTokens> {
-    exchange_code_with_redirect(code, code_verifier, REDIRECT_URI).await
+async fn exchange_code(code: &str, code_verifier: &str, redirect_uri: &str) -> Result<LoginTokens> {
+    exchange_code_with_redirect(code, code_verifier, redirect_uri).await
 }
 
 async fn exchange_code_with_redirect(
@@ -248,7 +267,9 @@ async fn exchange_code_with_redirect(
 
     let status = resp.status();
     debug!("Token exchange: HTTP {status}");
-    let token_resp: TokenResponse = resp.json().await
+    let token_resp: TokenResponse = resp
+        .json()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to parse token response (HTTP {status}): {e}"))?;
 
     if let Some(e) = token_resp.error {

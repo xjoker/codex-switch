@@ -194,3 +194,12 @@ fn decode_jwt_payload(token: &str) -> Option<Value> {
     let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
     serde_json::from_slice(&decoded).ok()
 }
+
+/// Check if a JWT token is expired or will expire within `margin_secs`.
+/// Returns `true` if expired/expiring, `false` if still valid, `None` if exp claim is missing.
+pub fn is_token_expiring(token: &str, margin_secs: i64) -> Option<bool> {
+    let payload = decode_jwt_payload(token)?;
+    let exp = payload.get("exp")?.as_i64()?;
+    let now = crate::auth::now_unix_secs();
+    Some(now + margin_secs >= exp)
+}
