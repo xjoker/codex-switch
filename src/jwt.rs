@@ -195,6 +195,12 @@ fn decode_jwt_payload(token: &str) -> Option<Value> {
     serde_json::from_slice(&decoded).ok()
 }
 
+/// Return the `exp` claim (unix timestamp) from a JWT, or `None` if missing.
+pub fn token_expires_at(token: &str) -> Option<i64> {
+    let payload = decode_jwt_payload(token)?;
+    payload.get("exp")?.as_i64()
+}
+
 /// Check if a JWT token is expired or will expire within `margin_secs`.
 /// Returns `true` if expired/expiring, `false` if still valid, `None` if exp claim is missing.
 pub fn is_token_expiring(token: &str, margin_secs: i64) -> Option<bool> {

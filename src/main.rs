@@ -277,6 +277,10 @@ async fn list_cmd(force: bool, json: bool) -> Result<()> {
             profiles: json_items,
         });
     }
+
+    // Opportunistically refresh tokens about to expire (background, bounded)
+    usage::refresh_expiring_tokens().await;
+
     Ok(())
 }
 
@@ -499,6 +503,10 @@ async fn best_cmd(json: bool) -> Result<()> {
         print!("  ");
         print_usage_line(&best_usage);
     }
+
+    // Opportunistically refresh tokens about to expire (background, bounded)
+    usage::refresh_expiring_tokens().await;
+
     Ok(())
 }
 

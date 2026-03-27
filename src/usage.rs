@@ -493,6 +493,106 @@ pub fn parse_usage(body: &Value) -> UsageInfo {
     }
 }
 
+/// Max number of tokens to refresh opportunistically per CLI invocation.
+const OPPORTUNISTIC_REFRESH_LIMIT: usize = 3;
+/// Refresh tokens expiring within this many seconds.
+const OPPORTUNISTIC_REFRESH_MARGIN: i64 = 1800; // 30 minutes
+/// Total wall-clock timeout for all opportunistic refreshes (concurrent).
+const OPPORTUNISTIC_TOTAL_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Opportunistically refresh tokens that are about to expire.
+/// Runs concurrently with a bounded total timeout.
+/// Errors are logged, not propagated — safe to await at end of CLI commands.
+pub async fn refresh_expiring_tokens() {
+    let profiles = match crate::profile::list_profiles() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let now = auth::now_unix_secs();
+    let current = crate::profile::read_current();
+
+    // Collect (alias, profile_path, refresh_token, expires_at) for tokens expiring soon
+    let mut candidates: Vec<(String, std::path::PathBuf, String, i64)> = Vec::new();
+    for alias in &profiles {
+        let path = crate::profile::profile_auth_path(alias);
+        let val = match auth::read_auth(&path) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let (access_token, refresh_token) = auth::extract_tokens(&val);
+        let Some(at) = access_token else { continue };
+        let Some(rt) = refresh_token else { continue };
+        let Some(exp) = crate::jwt::token_expires_at(&at) else { continue };
+        let remaining = exp - now;
+        if remaining < OPPORTUNISTIC_REFRESH_MARGIN {
+            candidates.push((alias.clone(), path, rt, exp));
+        }
+    }
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Sort by expiration: soonest first
+    candidates.sort_by_key(|c| c.3);
+    candidates.truncate(OPPORTUNISTIC_REFRESH_LIMIT);
+
+    let count = candidates.len();
+    debug!(
+        "opportunistic refresh: {count} token(s) expiring within {}s",
+        OPPORTUNISTIC_REFRESH_MARGIN
+    );
+
+    // Spawn all refreshes concurrently, bounded by total timeout
+    let mut tasks = tokio::task::JoinSet::new();
+    for (alias, path, rt, exp) in candidates {
+        let current = current.clone();
+        tasks.spawn(async move {
+            let remaining = exp - auth::now_unix_secs();
+            debug!("[{alias}] token expires in {remaining}s, refreshing");
+
+            let client = match auth::build_http_client() {
+                Ok(c) => c,
+                Err(e) => {
+                    debug!("[{alias}] skipping refresh: {e}");
+                    return;
+                }
+            };
+
+            match do_refresh_token(&alias, &client, &rt).await {
+                Ok(new_tokens) => {
+                    let _ = auth::update_tokens(
+                        &path,
+                        &new_tokens.id_token,
+                        &new_tokens.access_token,
+                        &new_tokens.refresh_token,
+                    );
+                    if alias == current {
+                        let live = auth::codex_auth_path();
+                        let _ = auth::update_tokens(
+                            &live,
+                            &new_tokens.id_token,
+                            &new_tokens.access_token,
+                            &new_tokens.refresh_token,
+                        );
+                    }
+                    info!("[{alias}] opportunistic token refresh succeeded");
+                }
+                Err(e) => {
+                    debug!("[{alias}] opportunistic token refresh failed: {e}");
+                }
+            }
+        });
+    }
+
+    // Wait for all with total timeout — don't block CLI too long
+    let _ = tokio::time::timeout(OPPORTUNISTIC_TOTAL_TIMEOUT, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
