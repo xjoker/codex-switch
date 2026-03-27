@@ -72,13 +72,17 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             let plan_label = entry.info.plan_label();
             let plan_style = plan_color(entry.info.plan_type.as_deref(), is_selected);
 
-            let (status_text, status_color, pct_5h, pct_7d, reset_5h, reset_7d): (
+            let now = crate::auth::now_unix_secs();
+
+            let (status_text, status_color, pct_5h, pct_7d, reset_5h, reset_5h_color, reset_7d, reset_7d_color): (
                 String,
                 Color,
                 String,
                 String,
                 String,
+                Color,
                 String,
+                Color,
             ) = match &entry.usage {
                 UsageStatus::Idle => (
                     "—".into(),
@@ -86,7 +90,9 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                     "—".into(),
                     "—".into(),
                     "—".into(),
+                    Color::DarkGray,
                     "—".into(),
+                    Color::DarkGray,
                 ),
                 UsageStatus::Loading => (
                     "…".into(),
@@ -94,7 +100,9 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                     "…".into(),
                     "…".into(),
                     "loading".into(),
+                    Color::DarkGray,
                     "loading".into(),
+                    Color::DarkGray,
                 ),
                 UsageStatus::Error(_) => (
                     "Error".into(),
@@ -102,7 +110,9 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                     "Err".into(),
                     "Err".into(),
                     "—".into(),
+                    Color::DarkGray,
                     "—".into(),
+                    Color::DarkGray,
                 ),
                 UsageStatus::Loaded(u) => {
                     let p5 = u
@@ -117,30 +127,18 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                         .and_then(|w| w.used_percent)
                         .map(|p| format!("{:.0}%", p.min(100.0)))
                         .unwrap_or_else(|| "—".into());
-                    let r5 = u
-                        .primary
-                        .as_ref()
-                        .and_then(|w| w.resets_at)
-                        .map(format_reset_short)
-                        .unwrap_or_else(|| "—".into());
-                    let r7 = u
-                        .secondary
-                        .as_ref()
-                        .and_then(|w| w.resets_at)
-                        .map(format_reset_short)
-                        .unwrap_or_else(|| "—".into());
+                    let r5_ts = u.primary.as_ref().and_then(|w| w.resets_at);
+                    let r5 = r5_ts.map(format_reset_short).unwrap_or_else(|| "—".into());
+                    let r5c = r5_ts.map(|ts| reset_color(ts - now)).unwrap_or(Color::DarkGray);
+                    let r7_ts = u.secondary.as_ref().and_then(|w| w.resets_at);
+                    let r7 = r7_ts.map(format_reset_short).unwrap_or_else(|| "—".into());
+                    let r7c = r7_ts.map(|ts| reset_color(ts - now)).unwrap_or(Color::DarkGray);
                     if is_available(u) {
-                        ("OK".into(), Color::Green, p5, p7, r5, r7)
+                        ("OK".into(), Color::Green, p5, p7, r5, r5c, r7, r7c)
                     } else {
-                        ("Limited".into(), Color::Red, p5, p7, r5, r7)
+                        ("Limited".into(), Color::Red, p5, p7, r5, r5c, r7, r7c)
                     }
                 }
-            };
-
-            let dim = if is_selected {
-                Color::White
-            } else {
-                Color::DarkGray
             };
 
             Row::new(vec![
@@ -157,8 +155,8 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 )),
                 Cell::from(pct_5h.clone()).style(usage_pct_style(&pct_5h, is_selected)),
                 Cell::from(pct_7d.clone()).style(usage_pct_style(&pct_7d, is_selected)),
-                Cell::from(reset_5h).style(Style::default().fg(dim)),
-                Cell::from(reset_7d).style(Style::default().fg(dim)),
+                Cell::from(reset_5h).style(Style::default().fg(reset_5h_color)),
+                Cell::from(reset_7d).style(Style::default().fg(reset_7d_color)),
             ])
             .height(1)
         })
@@ -280,7 +278,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Error(e) => {
-            let p = Paragraph::new(format!("Usage fetch failed: {e}"))
+            let p = Paragraph::new(format!("Error: {}", e.detail))
                 .style(Style::default().fg(Color::Red));
             f.render_widget(p, layout[2]);
         }
@@ -291,6 +289,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
+    let now = crate::auth::now_unix_secs();
     let has_credits = u.credits_balance.is_some();
     let mut constraints = vec![];
     if u.primary.is_some() {
@@ -319,13 +318,28 @@ fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
             .resets_at
             .map(format_reset_time)
             .unwrap_or_else(|| "—".into());
-        let label = format!("5h  {pct}% used  resets: {reset_str}");
+        let remaining = w.resets_at.map(|ts| ts - now).unwrap_or(0);
+
+        // Row 1: gauge bar (1 line height)
+        let gauge_area = Rect { height: 1, ..layout[idx] };
         let gauge = Gauge::default()
             .block(Block::default())
             .gauge_style(gauge_style(pct))
             .percent(pct)
-            .label(label);
-        f.render_widget(gauge, layout[idx]);
+            .label(format!("5h  {pct}% used"));
+        f.render_widget(gauge, gauge_area);
+
+        // Row 2: reset time with color
+        let reset_area = Rect {
+            y: layout[idx].y + 1,
+            height: 1,
+            ..layout[idx]
+        };
+        let reset_line = Line::from(vec![
+            Span::styled("  resets: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(reset_str, Style::default().fg(reset_color(remaining))),
+        ]);
+        f.render_widget(Paragraph::new(reset_line), reset_area);
         idx += 1;
     }
 
@@ -335,23 +349,38 @@ fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
             .resets_at
             .map(format_reset_time)
             .unwrap_or_else(|| "—".into());
-        let label = format!("7d  {pct}% used  resets: {reset_str}");
+        let remaining = w.resets_at.map(|ts| ts - now).unwrap_or(0);
+
+        let gauge_area = Rect { height: 1, ..layout[idx] };
         let gauge = Gauge::default()
             .block(Block::default())
             .gauge_style(gauge_style(pct))
             .percent(pct)
-            .label(label);
-        f.render_widget(gauge, layout[idx]);
+            .label(format!("7d  {pct}% used"));
+        f.render_widget(gauge, gauge_area);
+
+        let reset_area = Rect {
+            y: layout[idx].y + 1,
+            height: 1,
+            ..layout[idx]
+        };
+        let reset_line = Line::from(vec![
+            Span::styled("  resets: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(reset_str, Style::default().fg(reset_color(remaining))),
+        ]);
+        f.render_widget(Paragraph::new(reset_line), reset_area);
         idx += 1;
     }
 
     if let Some(balance) = u.credits_balance {
-        let text = if u.unlimited_credits == Some(true) {
+        let unlimited = u.unlimited_credits == Some(true);
+        let text = if unlimited {
             "Credits: unlimited".to_string()
         } else {
             format!("Credits: ${balance:.2}")
         };
-        let p = Paragraph::new(text).style(Style::default().fg(Color::Cyan));
+        let p = Paragraph::new(text)
+            .style(Style::default().fg(credits_color(balance, unlimited)));
         f.render_widget(p, layout[idx]);
     }
 
@@ -451,6 +480,32 @@ fn plan_color(plan: Option<&str>, is_selected: bool) -> Style {
         s.add_modifier(Modifier::BOLD)
     } else {
         s
+    }
+}
+
+/// Color for reset countdown: green = soon (< 1h), yellow = medium (< 4h), red = far (>= 4h)
+fn reset_color(remaining_secs: i64) -> Color {
+    if remaining_secs <= 0 {
+        Color::Green
+    } else if remaining_secs < 3600 {
+        Color::Green
+    } else if remaining_secs < 14400 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
+/// Color for credits balance: green >= $10, yellow >= $2, red < $2
+fn credits_color(balance: f64, unlimited: bool) -> Color {
+    if unlimited {
+        Color::Green
+    } else if balance >= 10.0 {
+        Color::Green
+    } else if balance >= 2.0 {
+        Color::Yellow
+    } else {
+        Color::Red
     }
 }
 

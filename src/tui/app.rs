@@ -11,7 +11,7 @@ use crate::jwt::AccountInfo;
 use crate::profile::{
     cmd_delete, list_profiles, profile_auth_path, read_current, rename_profile, switch_profile,
 };
-use crate::usage::{UsageInfo, fetch_usage_retried, fetch_usage_retried_force};
+use crate::usage::{UsageError, UsageInfo, fetch_usage_retried, fetch_usage_retried_force};
 
 #[derive(Debug, Clone)]
 pub struct AccountEntry {
@@ -26,7 +26,7 @@ pub enum UsageStatus {
     Idle,
     Loading,
     Loaded(UsageInfo),
-    Error(String),
+    Error(UsageError),
 }
 
 pub enum ConfirmAction {
@@ -44,8 +44,8 @@ pub struct App {
     pub selected: usize,
     pub status_msg: Option<String>,
     pub status_expiry: Option<Instant>,
-    pub pending_results: tokio::sync::mpsc::Receiver<(usize, Result<UsageInfo, String>)>,
-    pub result_sender: tokio::sync::mpsc::Sender<(usize, Result<UsageInfo, String>)>,
+    pub pending_results: tokio::sync::mpsc::Receiver<(usize, Result<UsageInfo, UsageError>)>,
+    pub result_sender: tokio::sync::mpsc::Sender<(usize, Result<UsageInfo, UsageError>)>,
     pub confirm: Option<ConfirmAction>,
     pub rename: Option<RenameState>,
     pub usage_limiter: Arc<Semaphore>,

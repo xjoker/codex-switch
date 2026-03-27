@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::auth::{self, CLIENT_ID, TOKEN_URL, format_reqwest_error};
 
@@ -42,8 +42,42 @@ pub struct RefreshedTokens {
     pub refresh_token: String,
 }
 
+/// Structured error for usage fetch failures.
+#[derive(Debug, Clone)]
+pub struct UsageError {
+    /// Short summary for user-facing display (e.g. "HTTP 401 Unauthorized")
+    pub summary: String,
+    /// Full detail for debug/log (e.g. "Usage API failed (HTTP 401), token refresh also failed: ...")
+    pub detail: String,
+}
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.detail)
+    }
+}
+
 fn usage_url() -> String {
     std::env::var("CS_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
+}
+
+/// Extract a short summary from an error message for user-facing display.
+/// Looks for "HTTP <status>" patterns; falls back to first line truncated.
+fn extract_error_summary(err: &str) -> String {
+    // Look for "HTTP 4xx ..." or "HTTP 5xx ..." pattern
+    if let Some(pos) = err.find("HTTP ") {
+        let rest = &err[pos..];
+        // Take until comma, closing paren, or end
+        let end = rest.find([',', ')']).unwrap_or(rest.len());
+        return rest[..end].to_string();
+    }
+    // Fallback: first line, truncated
+    let first_line = err.lines().next().unwrap_or(err);
+    if first_line.len() > 60 {
+        format!("{}…", &first_line[..60])
+    } else {
+        first_line.to_string()
+    }
 }
 
 /// High-level: fetch usage with retry, token refresh, and disk cache.
@@ -52,7 +86,7 @@ pub async fn fetch_usage_retried(
     alias: &str,
     profile_path: &Path,
     current_alias: &str,
-) -> std::result::Result<UsageInfo, String> {
+) -> std::result::Result<UsageInfo, UsageError> {
     fetch_usage_retried_inner(alias, profile_path, current_alias, false).await
 }
 
@@ -61,7 +95,7 @@ pub async fn fetch_usage_retried_force(
     alias: &str,
     profile_path: &Path,
     current_alias: &str,
-) -> std::result::Result<UsageInfo, String> {
+) -> std::result::Result<UsageInfo, UsageError> {
     fetch_usage_retried_inner(alias, profile_path, current_alias, true).await
 }
 
@@ -70,7 +104,7 @@ async fn fetch_usage_retried_inner(
     profile_path: &Path,
     current_alias: &str,
     force: bool,
-) -> std::result::Result<UsageInfo, String> {
+) -> std::result::Result<UsageInfo, UsageError> {
     if !force {
         if let Some(cached) = crate::cache::get(alias) {
             debug!("{alias}: cache hit");
@@ -81,20 +115,28 @@ async fn fetch_usage_retried_inner(
         debug!("{alias}: force refresh, bypassing cache");
     }
 
-    let val = auth::read_auth(profile_path).map_err(|e| e.to_string())?;
+    let val = auth::read_auth(profile_path).map_err(|e| {
+        let detail = format!("failed to read auth file {}: {e}", profile_path.display());
+        UsageError { summary: "auth file unreadable".into(), detail }
+    })?;
     let (access_token, refresh_token) = auth::extract_tokens(&val);
 
     let at = match access_token {
         Some(t) => t,
-        None => return Err("no access_token".to_string()),
+        None => return Err(UsageError {
+            summary: "no access_token".into(),
+            detail: "no access_token in auth file".into(),
+        }),
     };
 
     let mut last_err = String::new();
+    let mut last_summary = String::new();
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
+            debug!("[{alias}] retry attempt {}/{MAX_RETRIES}", attempt + 1);
             tokio::time::sleep(RETRY_DELAY).await;
         }
-        match fetch_usage_with_refresh(&at, refresh_token.as_deref()).await {
+        match fetch_usage_with_refresh(alias, &at, refresh_token.as_deref()).await {
             Ok((usage, refreshed)) => {
                 if let Some(new_tokens) = refreshed {
                     let _ = auth::update_tokens(
@@ -116,14 +158,20 @@ async fn fetch_usage_retried_inner(
                 crate::cache::put(alias, &usage);
                 return Ok(usage);
             }
-            Err(e) => last_err = e.to_string(),
+            Err(e) => {
+                let msg = e.to_string();
+                warn!("[{alias}] attempt {}/{MAX_RETRIES} failed: {msg}", attempt + 1);
+                last_summary = extract_error_summary(&msg);
+                last_err = msg;
+            }
         }
     }
-    Err(last_err)
+    Err(UsageError { summary: last_summary, detail: last_err })
 }
 
 /// Fetch usage; on 401/403 automatically refresh the token and retry once.
 pub async fn fetch_usage_with_refresh(
+    alias: &str,
     access_token: &str,
     refresh_token: Option<&str>,
 ) -> Result<(UsageInfo, Option<RefreshedTokens>)> {
@@ -134,9 +182,9 @@ pub async fn fetch_usage_with_refresh(
     if let Some(rt) = refresh_token
         && crate::jwt::is_token_expiring(access_token, 60).unwrap_or(false)
     {
-        info!("Access token expiring soon, proactively refreshing");
+        info!("[{alias}] access token expiring soon, proactively refreshing");
 
-        match do_refresh_token(&client, rt).await {
+        match do_refresh_token(alias, &client, rt).await {
             Ok(new_tokens) => {
                 let resp = client
                     .get(&usage_url)
@@ -149,17 +197,17 @@ pub async fn fetch_usage_with_refresh(
                     .map_err(|e| format_reqwest_error("Usage API request failed", &e))?;
 
                 let status = resp.status();
-                debug!("Usage API: HTTP {status}");
+                debug!("[{alias}] Usage API (after proactive refresh): HTTP {status}");
                 if status.is_success() {
                     let body: Value = resp.json().await.map_err(|e| {
-                        anyhow::anyhow!("Failed to parse usage response (HTTP {status}): {e}")
+                        anyhow::anyhow!("failed to parse usage response (HTTP {status}): {e}")
                     })?;
                     return Ok((parse_usage(&body), Some(new_tokens)));
                 }
                 anyhow::bail!("Usage API failed (HTTP {status}) after proactive token refresh");
             }
             Err(e) => {
-                info!("Proactive token refresh failed, trying with existing token: {e}");
+                info!("[{alias}] proactive token refresh failed, trying with existing token: {e}");
             }
         }
     }
@@ -172,12 +220,12 @@ pub async fn fetch_usage_with_refresh(
         .map_err(|e| format_reqwest_error("Usage API request failed", &e))?;
 
     let status = resp.status();
-    debug!("Usage API: HTTP {status}");
+    debug!("[{alias}] Usage API: HTTP {status}");
     if status.is_success() {
         let body: Value = resp
             .json()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to parse usage response (HTTP {status}): {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to parse usage response (HTTP {status}): {e}"))?;
         return Ok((parse_usage(&body), None));
     }
 
@@ -185,9 +233,9 @@ pub async fn fetch_usage_with_refresh(
     if let Some(rt) = refresh_token
         && (status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN)
     {
-        info!("Got HTTP {status}, attempting token refresh");
+        info!("[{alias}] got HTTP {status}, attempting token refresh");
 
-        match do_refresh_token(&client, rt).await {
+        match do_refresh_token(alias, &client, rt).await {
             Ok(new_tokens) => {
                 let resp2 = client
                     .get(&usage_url)
@@ -200,24 +248,25 @@ pub async fn fetch_usage_with_refresh(
                     .map_err(|e| format_reqwest_error("Usage API retry request failed", &e))?;
 
                 let status2 = resp2.status();
+                debug!("[{alias}] Usage API (after token refresh): HTTP {status2}");
                 if status2.is_success() {
                     let body: Value = resp2.json().await.map_err(|e| {
                         anyhow::anyhow!(
-                            "Failed to parse usage response after refresh (HTTP {status2}): {e}"
+                            "failed to parse usage response after refresh (HTTP {status2}): {e}"
                         )
                     })?;
                     return Ok((parse_usage(&body), Some(new_tokens)));
                 }
-                anyhow::bail!("Usage API failed (HTTP {status2}) after token refresh");
+                anyhow::bail!("Usage API still failed (HTTP {status2}) after token refresh");
             }
             Err(e) => {
-                info!("Token refresh failed: {e}");
+                info!("[{alias}] token refresh failed: {e}");
                 anyhow::bail!("Usage API failed (HTTP {status}), token refresh also failed: {e}");
             }
         }
     }
 
-    anyhow::bail!("Usage API failed (HTTP {status})");
+    anyhow::bail!("Usage API failed (HTTP {status}), no refresh_token available");
 }
 
 pub async fn validate_import_auth(
@@ -233,9 +282,10 @@ pub async fn validate_import_auth(
 
     let (access_token, refresh_token) = auth::extract_tokens(val);
 
+    let alias = "import";
     match (access_token, refresh_token) {
         (Some(at), rt) => {
-            let (usage, refreshed) = fetch_usage_with_refresh(&at, rt.as_deref()).await?;
+            let (usage, refreshed) = fetch_usage_with_refresh(alias, &at, rt.as_deref()).await?;
             if let Some(tokens) = &refreshed {
                 auth::apply_tokens(
                     val,
@@ -248,7 +298,7 @@ pub async fn validate_import_auth(
         }
         (None, Some(rt)) => {
             let client = auth::build_http_client()?;
-            let refreshed = do_refresh_token(&client, &rt).await?;
+            let refreshed = do_refresh_token(alias, &client, &rt).await?;
             auth::apply_tokens(
                 val,
                 &refreshed.id_token,
@@ -256,7 +306,7 @@ pub async fn validate_import_auth(
                 &refreshed.refresh_token,
             )?;
             let (usage, refreshed_again) =
-                fetch_usage_with_refresh(&refreshed.access_token, Some(&refreshed.refresh_token))
+                fetch_usage_with_refresh(alias, &refreshed.access_token, Some(&refreshed.refresh_token))
                     .await?;
             if let Some(tokens) = &refreshed_again {
                 auth::apply_tokens(
@@ -273,6 +323,7 @@ pub async fn validate_import_auth(
 }
 
 async fn do_refresh_token(
+    alias: &str,
     client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<RefreshedTokens> {
@@ -282,34 +333,64 @@ async fn do_refresh_token(
         urlencoding::encode(CLIENT_ID),
     );
 
+    debug!("[{alias}] sending token refresh request to {TOKEN_URL}");
+
     let resp = client
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
         .await
-        .map_err(|e| format_reqwest_error("Token refresh request failed", &e))?;
+        .map_err(|e| format_reqwest_error("token refresh request failed", &e))?;
 
     let status = resp.status();
-    let r: RefreshResponse = resp.json().await.map_err(|e| {
-        anyhow::anyhow!("Failed to parse token refresh response (HTTP {status}): {e}")
+    debug!("[{alias}] token refresh response: HTTP {status}");
+
+    // Read raw body first so we can log it on parse failure
+    let body_text = resp.text().await.map_err(|e| {
+        anyhow::anyhow!("failed to read token refresh response body (HTTP {status}): {e}")
     })?;
+
+    let r: RefreshResponse = serde_json::from_str(&body_text).map_err(|e| {
+        let preview = if body_text.len() > 500 {
+            format!("{}...(truncated)", &body_text[..500])
+        } else {
+            body_text.clone()
+        };
+        anyhow::anyhow!(
+            "failed to parse token refresh response (HTTP {status}): {e}\n  response body: {preview}"
+        )
+    })?;
+
+    if let Some(err) = &r.error {
+        warn!("[{alias}] token refresh returned error field: {err}");
+    }
 
     match (r.access_token, r.id_token, r.refresh_token) {
         (Some(at), Some(id), Some(rt)) => {
-            info!("Token refresh succeeded");
+            info!("[{alias}] token refresh succeeded");
             Ok(RefreshedTokens {
                 id_token: id,
                 access_token: at,
                 refresh_token: rt,
             })
         }
-        (Some(at), Some(id), None) => Ok(RefreshedTokens {
-            id_token: id,
-            access_token: at,
-            refresh_token: refresh_token.to_string(),
-        }),
-        _ => anyhow::bail!("Token refresh HTTP {status}: missing required fields"),
+        (Some(at), Some(id), None) => {
+            debug!("[{alias}] token refresh succeeded (no new refresh_token, reusing old one)");
+            Ok(RefreshedTokens {
+                id_token: id,
+                access_token: at,
+                refresh_token: refresh_token.to_string(),
+            })
+        }
+        (at, id, rt) => {
+            anyhow::bail!(
+                "token refresh HTTP {status}: missing required fields (access_token: {}, id_token: {}, refresh_token: {})",
+                at.is_some(),
+                id.is_some(),
+                rt.is_some(),
+            )
+        }
     }
 }
 

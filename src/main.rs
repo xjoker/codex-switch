@@ -146,7 +146,7 @@ async fn list_cmd(force: bool, json: bool) -> Result<()> {
         name: String,
         is_current: bool,
         info: jwt::AccountInfo,
-        usage_result: Option<std::result::Result<usage::UsageInfo, String>>,
+        usage_result: Option<std::result::Result<usage::UsageInfo, usage::UsageError>>,
     }
 
     let mut rows: Vec<ListRow> = profiles
@@ -186,7 +186,10 @@ async fn list_cmd(force: bool, json: bool) -> Result<()> {
         let sem = semaphore.clone();
         tasks.spawn(async move {
             let Ok(_permit) = sem.acquire_owned().await else {
-                return (idx, Err("usage limiter closed".to_string()));
+                return (idx, Err(usage::UsageError {
+                    summary: "limiter closed".into(),
+                    detail: "usage limiter closed".into(),
+                }));
             };
             let path = profile::profile_auth_path(&alias);
             let usage_result = if force {
@@ -217,11 +220,14 @@ async fn list_cmd(force: bool, json: bool) -> Result<()> {
     for row in rows {
         let usage_result = row
             .usage_result
-            .unwrap_or_else(|| Err("usage result missing".to_string()));
+            .unwrap_or_else(|| Err(usage::UsageError {
+                summary: "unknown".into(),
+                detail: "usage result missing".into(),
+            }));
         if json {
             let ju = match &usage_result {
                 Ok(u) => usage_to_json(Ok(u)),
-                Err(e) => usage_to_json(Err(e.as_str())),
+                Err(e) => usage_to_json(Err(&e.detail)),
             };
             json_items.push(output::JsonProfileWithUsage {
                 alias: row.name,
@@ -261,7 +267,7 @@ async fn list_cmd(force: bool, json: bool) -> Result<()> {
                     print!("  {} ", color::status_tag(tag));
                     print_usage_line(&u);
                 }
-                Err(e) => println!("  {} fetch failed: {e}", color::status_tag("Error")),
+                Err(e) => println!("  {} {}", color::status_tag("Error"), color::error(&e.summary)),
             }
         }
     }
@@ -432,7 +438,10 @@ async fn best_cmd(json: bool) -> Result<()> {
             let path = profile::profile_auth_path(&alias);
             match usage::fetch_usage_retried(&alias, &path, &current).await {
                 Ok(u) => Some((alias, u)),
-                Err(_) => None,
+                Err(e) => {
+                    tracing::warn!("[{alias}] usage fetch failed during auto-select: {e}");
+                    None
+                }
             }
         });
     }
@@ -791,35 +800,33 @@ fn print_usage_line(u: &usage::UsageInfo) {
     if let Some(w) = &u.primary {
         let pct = w.used_percent.unwrap_or(0.0);
         let pct_str = format!("{pct:.0}%");
+        let remaining = w.resets_at.map(|ts| ts - crate::auth::now_unix_secs()).unwrap_or(0);
         let reset = w
             .resets_at
             .map(format_reset_time)
             .unwrap_or_else(|| "unknown".into());
-        print!(
-            "5h {} used {}",
-            color::usage_pct(&pct_str, pct),
-            color::dim(&format!("(resets: {reset})"))
-        );
+        let reset_colored = color::reset_time(&format!("(resets: {reset})"), remaining);
+        print!("5h {} used {reset_colored}", color::usage_pct(&pct_str, pct));
     }
     if let Some(w) = &u.secondary {
         let pct = w.used_percent.unwrap_or(0.0);
         let pct_str = format!("{pct:.0}%");
+        let remaining = w.resets_at.map(|ts| ts - crate::auth::now_unix_secs()).unwrap_or(0);
         let reset = w
             .resets_at
             .map(format_reset_time)
             .unwrap_or_else(|| "unknown".into());
-        print!(
-            "  7d {} used {}",
-            color::usage_pct(&pct_str, pct),
-            color::dim(&format!("(resets: {reset})"))
-        );
+        let reset_colored = color::reset_time(&format!("(resets: {reset})"), remaining);
+        print!("  7d {} used {reset_colored}", color::usage_pct(&pct_str, pct));
     }
     if let Some(balance) = u.credits_balance {
-        if u.unlimited_credits == Some(true) {
-            print!("  {}", color::dim("credits: unlimited"));
+        let unlimited = u.unlimited_credits == Some(true);
+        let text = if unlimited {
+            "credits: unlimited".to_string()
         } else {
-            print!("  {}", color::dim(&format!("credits: ${balance:.2}")));
-        }
+            format!("credits: ${balance:.2}")
+        };
+        print!("  {}", color::credits(&text, balance, unlimited));
     }
     println!();
 }

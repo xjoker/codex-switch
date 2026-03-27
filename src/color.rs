@@ -112,6 +112,38 @@ pub fn usage_pct(s: &str, pct: f64) -> String {
     }
 }
 
+/// Color a reset countdown: green = soon (< 1h), yellow = medium (< 4h), red = far (>= 4h)
+pub fn reset_time(s: &str, remaining_secs: i64) -> String {
+    if !enabled() {
+        return s.to_string();
+    }
+    if remaining_secs <= 0 {
+        format!("{}", s.green())
+    } else if remaining_secs < 3600 {
+        format!("{}", s.green())
+    } else if remaining_secs < 14400 {
+        format!("{}", s.yellow())
+    } else {
+        format!("{}", s.red())
+    }
+}
+
+/// Color a credits balance: green >= $10, yellow >= $2, red < $2
+pub fn credits(s: &str, balance: f64, unlimited: bool) -> String {
+    if !enabled() {
+        return s.to_string();
+    }
+    if unlimited {
+        format!("{}", s.green())
+    } else if balance >= 10.0 {
+        format!("{}", s.green())
+    } else if balance >= 2.0 {
+        format!("{}", s.yellow())
+    } else {
+        format!("{}", s.red())
+    }
+}
+
 /// Color a status tag: OK = green, Limited = red, Error = red
 pub fn status_tag(tag: &str) -> String {
     if !enabled() {
