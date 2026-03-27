@@ -4,14 +4,35 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::auth::{
-    backup_auth, codex_auth_path, current_file, profiles_dir, read_auth, write_auth,
+    app_home, backup_auth, codex_auth_path, current_file, profiles_dir, read_auth, write_auth,
 };
 use crate::error::CsError;
 use crate::jwt::parse_account_info;
 use crate::output::{user_print, user_println};
 
+const MAX_ALIAS_LEN: usize = 64;
+
 pub fn profile_auth_path(alias: &str) -> PathBuf {
     profiles_dir().join(alias).join("auth.json")
+}
+
+pub fn validate_alias(alias: &str) -> Result<()> {
+    if alias.is_empty() {
+        anyhow::bail!("alias cannot be empty");
+    }
+    if alias == "." || alias == ".." {
+        anyhow::bail!("alias cannot be '.' or '..'");
+    }
+    if alias.len() > MAX_ALIAS_LEN {
+        anyhow::bail!("alias must be at most {MAX_ALIAS_LEN} characters");
+    }
+    if !alias
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        anyhow::bail!("alias may only contain ASCII letters, digits, '_', '-', '.'");
+    }
+    Ok(())
 }
 
 pub fn list_profiles() -> Result<Vec<String>> {
@@ -35,11 +56,31 @@ pub fn read_current() -> String {
         .unwrap_or_default()
 }
 
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("creating directory {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn ensure_profile_parent(path: &Path) -> Result<()> {
+    ensure_private_dir(&app_home())?;
+    ensure_private_dir(&profiles_dir())?;
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+    Ok(())
+}
+
 fn write_current(alias: &str) -> Result<()> {
     let path = current_file();
     if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)
-            .with_context(|| format!("creating directory {}", p.display()))?;
+        ensure_private_dir(p)?;
     }
     std::fs::write(&path, alias)
         .with_context(|| format!("writing current profile marker {}", path.display()))?;
@@ -105,9 +146,10 @@ pub fn find_profile_by_identity(identity: &AccountIdentity) -> Option<String> {
 
 pub fn alias_from_email(email: &str) -> String {
     let base = email.split('@').next().unwrap_or(email);
-    base.chars()
+    let alias = base
+        .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_') {
                 c
             } else {
                 '_'
@@ -115,7 +157,14 @@ pub fn alias_from_email(email: &str) -> String {
         })
         .collect::<String>()
         .trim_matches('_')
-        .to_string()
+        .chars()
+        .take(MAX_ALIAS_LEN)
+        .collect::<String>();
+    if alias.is_empty() {
+        "account".to_string()
+    } else {
+        alias
+    }
 }
 
 // ── Return types ──────────────────────────────────────────
@@ -203,6 +252,7 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
         None => {
             if let Some(ref existing_alias) = existing {
                 let dst = profile_auth_path(existing_alias);
+                ensure_profile_parent(&dst)?;
                 write_auth(&dst, &val)?;
                 write_current(existing_alias)?;
                 user_println(&format!("Updated profile: {existing_alias}"));
@@ -220,11 +270,12 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
         && let Some(existing_alias) = existing
     {
         let dst = profile_auth_path(&existing_alias);
+        ensure_profile_parent(&dst)?;
         write_auth(&dst, &val)?;
         write_current(&existing_alias)?;
         if existing_alias != resolved_alias {
             user_println(&format!(
-                "Duplicate account detected — updated existing profile: {existing_alias} (not creating {resolved_alias})"
+                "Duplicate account detected -- updated existing profile: {existing_alias} (not creating {resolved_alias})"
             ));
         } else {
             user_println(&format!("Updated profile: {existing_alias}"));
@@ -233,10 +284,14 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
     }
 
     // New profile
+    validate_alias(&resolved_alias)?;
     let dst = profile_auth_path(&resolved_alias);
     if dst.exists() {
         let unique = make_unique_alias(&resolved_alias);
-        write_auth(&profile_auth_path(&unique), &val)?;
+        validate_alias(&unique)?;
+        let unique_path = profile_auth_path(&unique);
+        ensure_profile_parent(&unique_path)?;
+        write_auth(&unique_path, &val)?;
         write_current(&unique)?;
         user_println(&format!(
             "Saved profile: {unique} (alias '{resolved_alias}' already taken)"
@@ -244,6 +299,7 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
         return Ok(SaveAction::Created(unique));
     }
 
+    ensure_profile_parent(&dst)?;
     write_auth(&dst, &val)?;
     write_current(&resolved_alias)?;
     user_println(&format!("Saved profile: {resolved_alias}"));
@@ -253,7 +309,10 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
 fn make_unique_alias(base: &str) -> String {
     let mut n = 2;
     loop {
-        let candidate = format!("{base}_{n}");
+        let suffix = format!("_{n}");
+        let prefix_len = MAX_ALIAS_LEN.saturating_sub(suffix.len());
+        let prefix = base.chars().take(prefix_len).collect::<String>();
+        let candidate = format!("{prefix}{suffix}");
         if !profile_auth_path(&candidate).exists() {
             return candidate;
         }
@@ -262,6 +321,7 @@ fn make_unique_alias(base: &str) -> String {
 }
 
 pub fn cmd_use(alias: &str) -> Result<()> {
+    validate_alias(alias)?;
     let src = profile_auth_path(alias);
     if !src.exists() {
         return Err(CsError::NotFound(alias.to_string()).into());
@@ -271,7 +331,7 @@ pub fn cmd_use(alias: &str) -> Result<()> {
 
     if dst.exists() && find_matching_profile(&dst).is_none() {
         user_print(
-            "Current auth.json does not belong to any saved profile — switching will overwrite it. Continue? [y/N] ",
+            "Current auth.json does not belong to any saved profile -- switching will overwrite it. Continue? [y/N] ",
         );
         io::stdout().flush()?;
         io::stderr().flush()?;
@@ -292,6 +352,7 @@ pub fn cmd_use(alias: &str) -> Result<()> {
 }
 
 pub fn switch_profile(alias: &str) -> Result<()> {
+    validate_alias(alias)?;
     let src = profile_auth_path(alias);
     if !src.exists() {
         return Err(CsError::NotFound(alias.to_string()).into());
@@ -305,6 +366,7 @@ pub fn switch_profile(alias: &str) -> Result<()> {
 }
 
 pub fn cmd_delete(alias: &str) -> Result<()> {
+    validate_alias(alias)?;
     let dir = profiles_dir().join(alias);
     if !dir.exists() {
         return Err(CsError::NotFound(alias.to_string()).into());
@@ -366,6 +428,7 @@ pub fn save_imported_auth_value(
 
     if let Some(existing) = find_profile_by_identity(&identity) {
         let dst = profile_auth_path(&existing);
+        ensure_profile_parent(&dst)?;
         write_auth(&dst, &val)?;
         return Ok(SaveAction::Updated(existing));
     }
@@ -374,17 +437,23 @@ pub fn save_imported_auth_value(
         .map(|s| s.to_string())
         .or_else(|| identity.email.as_deref().map(alias_from_email))
         .unwrap_or_else(|| "account".to_string());
+    validate_alias(&alias)?;
     let alias = if profile_auth_path(&alias).exists() {
         make_unique_alias(&alias)
     } else {
         alias
     };
+    validate_alias(&alias)?;
 
-    write_auth(&profile_auth_path(&alias), &val)?;
+    let dst = profile_auth_path(&alias);
+    ensure_profile_parent(&dst)?;
+    write_auth(&dst, &val)?;
     Ok(SaveAction::Created(alias))
 }
 
 pub fn rename_profile(old_alias: &str, new_alias: &str) -> Result<()> {
+    validate_alias(old_alias)?;
+    validate_alias(new_alias)?;
     let old_dir = profiles_dir().join(old_alias);
     if !old_dir.exists() {
         return Err(CsError::NotFound(old_alias.to_string()).into());
@@ -395,15 +464,18 @@ pub fn rename_profile(old_alias: &str, new_alias: &str) -> Result<()> {
     }
     std::fs::rename(&old_dir, &new_dir).with_context(|| {
         format!(
-            "renaming profile {} → {}",
+            "renaming profile {} -> {}",
             old_dir.display(),
             new_dir.display()
         )
     })?;
+    if let Err(err) = crate::cache::rename(old_alias, new_alias) {
+        tracing::warn!("Failed to rename cache entry {old_alias} -> {new_alias}: {err}");
+    }
     if read_current() == old_alias {
         write_current(new_alias)?;
     }
-    user_println(&format!("Renamed profile: {old_alias} → {new_alias}"));
+    user_println(&format!("Renamed profile: {old_alias} -> {new_alias}"));
     Ok(())
 }
 
@@ -412,6 +484,7 @@ pub fn save_auth_value(val: serde_json::Value, hint_alias: Option<&str>) -> Resu
 
     if let Some(existing) = find_profile_by_identity(&identity) {
         let dst = profile_auth_path(&existing);
+        ensure_profile_parent(&dst)?;
         write_auth(&dst, &val)?;
         write_current(&existing)?;
         return Ok(SaveAction::Updated(existing));
@@ -421,17 +494,148 @@ pub fn save_auth_value(val: serde_json::Value, hint_alias: Option<&str>) -> Resu
         .map(|s| s.to_string())
         .or_else(|| identity.email.as_deref().map(alias_from_email))
         .unwrap_or_else(|| "account".to_string());
+    validate_alias(&alias)?;
 
     let alias = if profile_auth_path(&alias).exists() {
         make_unique_alias(&alias)
     } else {
         alias
     };
+    validate_alias(&alias)?;
 
     let auth_dst = codex_auth_path();
     write_auth(&auth_dst, &val)?;
 
-    write_auth(&profile_auth_path(&alias), &val)?;
+    let profile_dst = profile_auth_path(&alias);
+    ensure_profile_parent(&profile_dst)?;
+    write_auth(&profile_dst, &val)?;
     write_current(&alias)?;
     Ok(SaveAction::Created(alias))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
+
+    use anyhow::Result;
+
+    use super::{cmd_delete, cmd_use, rename_profile, switch_profile, validate_alias};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct TestEnv {
+        _lock: MutexGuard<'static, ()>,
+        _home: tempfile::TempDir,
+        old_home: Option<OsString>,
+        old_codex_home: Option<OsString>,
+    }
+
+    impl TestEnv {
+        fn new() -> Self {
+            let lock = ENV_LOCK.lock().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            let codex_home = home.path().join(".codex");
+            let old_home = std::env::var_os("HOME");
+            let old_codex_home = std::env::var_os("CODEX_HOME");
+
+            unsafe {
+                std::env::set_var("HOME", home.path());
+                std::env::set_var("CODEX_HOME", &codex_home);
+            }
+
+            Self {
+                _lock: lock,
+                _home: home,
+                old_home,
+                old_codex_home,
+            }
+        }
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.old_home {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.old_codex_home {
+                    Some(value) => std::env::set_var("CODEX_HOME", value),
+                    None => std::env::remove_var("CODEX_HOME"),
+                }
+            }
+        }
+    }
+
+    fn assert_invalid_alias(result: Result<()>, expected_message: &str) {
+        let err = result.unwrap_err();
+        assert_eq!(err.to_string(), expected_message);
+    }
+
+    #[test]
+    fn validate_alias_accepts_expected_values() {
+        assert!(validate_alias("alpha-123_.beta").is_ok());
+        assert!(validate_alias(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn validate_alias_rejects_reserved_or_empty_values() {
+        assert!(validate_alias("").is_err());
+        assert!(validate_alias(".").is_err());
+        assert!(validate_alias("..").is_err());
+    }
+
+    #[test]
+    fn validate_alias_rejects_separators_and_non_ascii() {
+        assert!(validate_alias("../escape").is_err());
+        assert!(validate_alias("with/slash").is_err());
+        assert!(validate_alias("\u{4E2D}\u{6587}").is_err());
+        assert!(validate_alias(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn profile_commands_reject_invalid_alias_inputs() {
+        let _env = TestEnv::new();
+
+        for alias in ["../escape", "with/slash"] {
+            assert_invalid_alias(
+                cmd_use(alias),
+                "alias may only contain ASCII letters, digits, '_', '-', '.'",
+            );
+            assert_invalid_alias(
+                switch_profile(alias),
+                "alias may only contain ASCII letters, digits, '_', '-', '.'",
+            );
+            assert_invalid_alias(
+                cmd_delete(alias),
+                "alias may only contain ASCII letters, digits, '_', '-', '.'",
+            );
+            assert_invalid_alias(
+                rename_profile(alias, "valid-alias"),
+                "alias may only contain ASCII letters, digits, '_', '-', '.'",
+            );
+        }
+
+        assert_invalid_alias(cmd_use(""), "alias cannot be empty");
+        assert_invalid_alias(switch_profile(""), "alias cannot be empty");
+        assert_invalid_alias(cmd_delete(""), "alias cannot be empty");
+        assert_invalid_alias(rename_profile("", "valid-alias"), "alias cannot be empty");
+    }
+
+    #[test]
+    fn rename_profile_rejects_invalid_new_alias() {
+        let _env = TestEnv::new();
+        let old_dir = super::profiles_dir().join("valid-alias");
+        std::fs::create_dir_all(&old_dir).unwrap();
+
+        for alias in ["../escape", "with/slash"] {
+            assert_invalid_alias(
+                rename_profile("valid-alias", alias),
+                "alias may only contain ASCII letters, digits, '_', '-', '.'",
+            );
+        }
+
+        assert_invalid_alias(rename_profile("valid-alias", ""), "alias cannot be empty");
+    }
 }

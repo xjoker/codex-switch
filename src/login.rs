@@ -72,6 +72,24 @@ fn redirect_uri(port: u16) -> String {
     format!("http://{REDIRECT_HOST}:{port}/auth/callback")
 }
 
+fn redacted_device_poll_log_body(body: &serde_json::Value) -> String {
+    let mut value = body.clone();
+    if let Some(obj) = value.as_object_mut() {
+        for key in &[
+            "authorization_code",
+            "code_verifier",
+            "access_token",
+            "refresh_token",
+            "id_token",
+        ] {
+            if obj.contains_key(*key) {
+                obj.insert((*key).to_string(), serde_json::json!("***"));
+            }
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_default()
+}
+
 // ── Main flow ─────────────────────────────────────────────
 
 /// Run PKCE OAuth flow: open browser → wait for callback → exchange tokens
@@ -88,12 +106,12 @@ pub async fn run_device_auth() -> Result<LoginTokens> {
     let authorize_url = build_authorize_url(&pkce.code_challenge, &state, &actual_redirect);
 
     user_println("");
-    user_println("Opening browser for Codex login…");
+    user_println("Opening browser for Codex login...");
     user_println("If the browser does not open, visit:");
     user_println(&authorize_url);
     user_println("");
     user_println(&format!(
-        "Waiting for authorization callback ({CALLBACK_TIMEOUT_SECS}s timeout)…"
+        "Waiting for authorization callback ({CALLBACK_TIMEOUT_SECS}s timeout)..."
     ));
 
     open_browser(&authorize_url);
@@ -216,7 +234,7 @@ Connection: close
     }
 
     if returned_state.as_deref() != Some(expected_state) {
-        bail!("State mismatch — possible CSRF attack, login aborted");
+        bail!("State mismatch -- possible CSRF attack, login aborted");
     }
 
     match code {
@@ -265,7 +283,7 @@ async fn exchange_code_with_redirect(
 
     if let Some(e) = token_resp.error {
         let desc = token_resp.error_description.as_deref().unwrap_or("");
-        bail!("Token exchange failed (HTTP {status}): {e} — {desc}");
+        bail!("Token exchange failed (HTTP {status}): {e} -- {desc}");
     }
 
     match (
@@ -361,7 +379,7 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
     user_println(&format!("  Enter code:         {user_code}"));
     user_println("");
     user_println(&format!(
-        "  Waiting for authorization (polling every {interval_secs}s)…"
+        "  Waiting for authorization (polling every {interval_secs}s)..."
     ));
 
     // Step 3: Poll for token (Ctrl+C safe)
@@ -383,7 +401,7 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
         }
 
         poll_count += 1;
-        eprint!("\r  Polling… ({poll_count})    ");
+        eprint!("\r  Polling... ({poll_count})    ");
 
         let poll_resp = match client
             .post(DEVICE_TOKEN_URL)
@@ -410,10 +428,8 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
             }
         };
 
-        debug!(
-            "Device poll response: {}",
-            serde_json::to_string(&body).unwrap_or_default()
-        );
+        let log_body = redacted_device_poll_log_body(&body);
+        debug!("Device poll response: {log_body}");
 
         // Check for error response
         if let Some(err) = body.get("error") {
@@ -472,7 +488,7 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
 
         eprint!("\r                          \r");
         info!("Device authorization successful, exchanging code for tokens");
-        user_println("  Authorization successful, exchanging tokens…");
+        user_println("  Authorization successful, exchanging tokens...");
 
         // Use the standard /oauth/token endpoint with the returned code + verifier
         // The redirect_uri for device flow is the OpenAI deviceauth callback
@@ -563,5 +579,27 @@ mod tests {
             .unwrap()
             .timestamp();
         assert!(parsed >= before && parsed <= after);
+    }
+
+    #[test]
+    fn test_redacted_device_poll_log_body_masks_sensitive_fields() {
+        let body = serde_json::json!({
+            "authorization_code": "auth-code",
+            "code_verifier": "verifier",
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "id_token": "id",
+            "status": "ok",
+        });
+
+        let redacted: serde_json::Value =
+            serde_json::from_str(&redacted_device_poll_log_body(&body)).unwrap();
+
+        assert_eq!(redacted["authorization_code"], "***");
+        assert_eq!(redacted["code_verifier"], "***");
+        assert_eq!(redacted["access_token"], "***");
+        assert_eq!(redacted["refresh_token"], "***");
+        assert_eq!(redacted["id_token"], "***");
+        assert_eq!(redacted["status"], "ok");
     }
 }

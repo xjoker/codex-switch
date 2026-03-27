@@ -13,7 +13,7 @@
 - **账号管理** — 保存、切换、重命名、删除 Codex 账号
 - **自动探测** — 自动发现并追踪当前 `auth.json`
 - **用量仪表盘** — 实时监控配额（5 小时和 7 天窗口），包含每个账号自己的刷新时间
-- **智能切换** — `codex-switch use` 不带参数时自动选择剩余配额最多的账号
+- **智能切换** — `codex-switch use` 不带参数时自动选择剩余配额最多的账号（Team 账号优先调度）
 - **仅刷新过期账号** — `use`、`list` 和 TUI 默认只刷新缓存已过期的账号
 - **进度展示** — 大批量 `use`、`list`、目录 `import` 统一显示单行跨平台进度条
 - **交互式 TUI** — 完整的终端界面，实时用量数据、颜色状态、键盘快捷键
@@ -51,10 +51,10 @@ brew install xjoker/tap/codex-switch
 
 ```bash
 # macOS / Linux
-CS_VERSION=0.0.3 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+CS_VERSION=0.0.7 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
 
 # Windows
-$env:CS_VERSION="0.0.3"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+$env:CS_VERSION="0.0.7"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
 ```
 
 ### 手动下载
@@ -87,6 +87,9 @@ sudo cp target/release/codex-switch /usr/local/bin/  # macOS/Linux
 # 1. 登录第一个 Codex 账号
 codex-switch login
 
+# 1b. 无浏览器的服务器环境，使用设备码登录：
+codex-switch login --device
+
 # 2. 登录另一个账号
 codex-switch login
 
@@ -113,6 +116,7 @@ codex-switch self-update --check
 | `codex-switch use [别名]` | 切换账号。不带别名则自动选择配额最优的账号 |
 | `codex-switch list [-f]` | 显示所有账号信息、用量和可用状态（`-f` 强制刷新，忽略缓存） |
 | `codex-switch login [--device] [别名]` | OAuth 登录（`--device` 用于无浏览器的服务器）。若别名已存在则重新授权 |
+| `codex-switch rename <旧别名> <新别名>` | 重命名账号 |
 | `codex-switch delete <别名>` | 删除账号 |
 | `codex-switch import <路径> [别名]` | 导入单个 auth.json，或递归扫描目录下所有 JSON 文件并校验后导入 |
 | `codex-switch self-update [--check] [--version <版本>]` | 手动检查 GitHub Releases，或更新当前直装版本 |
@@ -136,7 +140,12 @@ codex-switch self-update --check
 |------|------|
 | `j` / `k` 或 `↑` / `↓` | 导航 |
 | `Enter` | 切换到选中账号 |
+| `/` | 搜索/过滤账号 |
 | `r` | 刷新所有用量数据 |
+| `s` | 切换排序（名称/配额/状态） |
+| `Space` | 标记/取消标记账号 |
+| `b` | 批量刷新已标记账号 |
+| `c` | 清除所有标记 |
 | `n` | 重命名选中账号 |
 | `d` | 删除选中账号（需确认） |
 | `q` / `Esc` | 退出 |
@@ -153,7 +162,7 @@ codex-switch self-update --check
 codex-switch self-update
 
 # 更新到指定的新版本
-codex-switch self-update --version 0.0.3
+codex-switch self-update --version 0.0.7
 ```
 
 - Homebrew 安装不会被程序自行覆盖，请使用 `brew upgrade xjoker/tap/codex-switch`
@@ -204,7 +213,52 @@ codex-switch --proxy socks5h://127.0.0.1:1080 list
 # 环境变量
 export CS_PROXY="http://user:pass@proxy.corp.com:8080"
 codex-switch list
+
+# 标准环境变量（reqwest 自动读取）
+export HTTPS_PROXY="http://proxy.corp.com:8080"
+codex-switch list
 ```
+
+## 常见使用场景
+
+### 每次启动 Codex 前自动切换
+
+```bash
+# 加入 shell 配置文件（.zshrc / .bashrc）：
+codex-switch use && codex
+```
+
+### 定时刷新 Token（可选）
+
+通过 cron 定时刷新缓存和 Token，让 `codex-switch use` 即时响应：
+
+```bash
+# 编辑 crontab
+crontab -e
+
+# 每 5 分钟刷新所有账号用量
+*/5 * * * * /usr/local/bin/codex-switch list --json > /dev/null 2>&1
+```
+
+此任务会定期执行 `codex-switch list`，刷新过期 Token 并缓存用量数据。**不会**自动切换账号。
+
+### CI / 自动化场景
+
+```bash
+# 一行命令：切换到最佳账号并启动 Codex
+codex-switch use --json && codex --quiet ...
+```
+
+## 故障排查
+
+遇到错误时，使用 `--debug` 查看详细的 HTTP 请求、API 响应和缓存状态：
+
+```bash
+codex-switch --debug list
+codex-switch --debug use
+```
+
+如果问题持续存在，请附上 debug 输出（注意脱敏 Token 和邮箱等敏感信息）[提交 Issue](https://github.com/xjoker/codex-switch/issues)。
 
 ## 工作原理
 
@@ -243,8 +297,11 @@ codex-switch list
 1. 7 天（周）限额达 100% → 极低分（账号不可用）
 2. 5 小时窗口有剩余配额 → 高分（1000 + 剩余百分比）
 3. 5 小时窗口耗尽但周限额未满 → 中等分数（根据重置时间）
+4. **Team 账号加权** → Team 计划账号获得 +20 评分加成，配额相近时优先使用
 
 选择得分最高的账号并切换。
+
+> **注意：** 切换账号后，需要**重启 Codex** 才能加载新的 `auth.json`。Codex CLI 仅在启动时读取认证文件，不会监听文件变化。
 
 ### 缓存行为
 
@@ -263,21 +320,6 @@ codex-switch list
 - CLI 和 TUI 都不允许删除当前激活账号
 - JSON 模式保证 stdout 只输出机器可读内容，进度和人类提示会走 stderr
 
-## JSON 输出
-
-所有命令都支持 `--json`：
-
-```bash
-# 以 JSON 列出所有账号
-codex-switch --json list
-
-# 切换账号并返回结果
-codex-switch --json use alice
-
-# JSON 模式检查更新
-codex-switch --json self-update --check
-```
-
 ## 平台说明
 
 ### macOS
@@ -292,6 +334,7 @@ codex-switch --json self-update --check
 - 浏览器通过 `xdg-open` 打开（确保已配置桌面浏览器）
 - 文件管理器通过 `xdg-open` 打开
 - WSL：浏览器打开可能需要 `wslu` 包（`sudo apt install wslu`）
+- **无浏览器的服务器环境：** 使用 `codex-switch login --device` 进行设备码登录 — 会显示一个 URL 和验证码，在任何有浏览器的设备上完成授权即可
 
 ### Windows
 
@@ -300,6 +343,39 @@ codex-switch --json self-update --check
 - 文件管理器通过 `explorer.exe` 打开
 - 终端：支持 Windows Terminal、PowerShell 和 cmd.exe
 - TUI 通过 `crossterm` 使用 Windows Console API 渲染
+
+## JSON 输出
+
+大多数命令都支持 `--json` 机器可读输出（`tui` 和 `open` 除外）：
+
+```bash
+# 以 JSON 列出所有账号
+codex-switch --json list
+
+# 切换账号并返回结果
+codex-switch --json use alice
+
+# JSON 模式检查更新
+codex-switch --json self-update --check
+```
+
+## 编译
+
+```bash
+# Debug 构建
+cargo build
+
+# Release 构建（优化并去除符号）
+cargo build --release
+
+# 从 macOS 交叉编译 Linux
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+
+# 从 macOS/Linux 交叉编译 Windows
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
+```
 
 ## 许可证
 

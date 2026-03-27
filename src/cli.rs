@@ -14,12 +14,12 @@ pub enum ColorMode {
 #[command(
     name = "codex-switch",
     version = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_REPOSITORY")),
-    about = "Codex account switcher — multi-profile manager with usage dashboard\nhttps://github.com/xjoker/codex-switch",
+    about = "Codex account switcher -- multi-profile manager with usage dashboard\nhttps://github.com/xjoker/codex-switch",
     long_about = None,
-    after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
+    after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, delete, login, import, self-update)
+    /// Output as compact JSON (supported by list, use, rename, delete, login, import, self-update)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -66,6 +66,13 @@ pub enum Commands {
         #[arg(long, short)]
         force: bool,
     },
+    /// Rename a profile
+    Rename {
+        /// Current profile alias
+        old: String,
+        /// New profile alias
+        new: String,
+    },
     /// Delete a profile
     Delete {
         /// Profile alias
@@ -73,7 +80,7 @@ pub enum Commands {
     },
     /// Log in via browser or --device code flow; re-authorizes if alias already exists
     Login {
-        /// Profile alias — if it already exists, re-authorizes it; otherwise creates a new profile
+        /// Profile alias -- if it already exists, re-authorizes it; otherwise creates a new profile
         alias: Option<String>,
 
         /// Use device code flow (for headless servers without a browser)
@@ -89,7 +96,7 @@ pub enum Commands {
     },
     /// Manually check GitHub Releases (`--check`) or update this binary
     #[command(
-        after_help = "Examples:\n  codex-switch self-update --check\n  codex-switch self-update\n  codex-switch self-update --version 0.0.3\n\nUpdate checks are manual only. The app never checks automatically on startup.\nDowngrades are not supported; `--version` only accepts the current version or a newer release."
+        after_help = "Examples:\n  codex-switch self-update --check\n  codex-switch self-update\n  codex-switch self-update --version 0.0.7\n\nUpdate checks are manual only. The app never checks automatically on startup.\nDowngrades are not supported; `--version` only accepts the current version or a newer release."
     )]
     SelfUpdate {
         /// Check whether a newer version is available without installing it

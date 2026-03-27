@@ -69,10 +69,17 @@ fn load_from_file() -> AppConfig {
         return AppConfig::default();
     }
     match std::fs::read_to_string(&path) {
-        Ok(content) => toml::from_str::<AppConfig>(&content)
-            .unwrap_or_default()
-            .normalize(),
-        Err(_) => AppConfig::default(),
+        Ok(content) => match toml::from_str::<AppConfig>(&content) {
+            Ok(config) => config.normalize(),
+            Err(err) => {
+                tracing::warn!("Failed to load config: {err}");
+                AppConfig::default()
+            }
+        },
+        Err(err) => {
+            tracing::warn!("Failed to load config: {err}");
+            AppConfig::default()
+        }
     }
 }
 

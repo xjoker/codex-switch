@@ -13,7 +13,7 @@ Multi-account profile manager for [OpenAI Codex CLI](https://github.com/openai/c
 - **Profile Management** — Save, switch, rename, delete Codex accounts
 - **Auto-Detection** — Automatically discovers and tracks the current `auth.json`
 - **Usage Dashboard** — Live quota monitoring (5h and 7d windows) with status indicators and per-account refresh timestamps
-- **Smart Auto-Switch** — `codex-switch use` without arguments selects the account with the most remaining quota
+- **Smart Auto-Switch** — `codex-switch use` without arguments selects the account with the most remaining quota (Team accounts are prioritized over other plan types)
 - **Stale-Only Refresh** — `use`, `list`, and TUI refresh only accounts whose cached usage has expired
 - **Progress Display** — Long-running `use`, `list`, and directory `import` operations show a single-line cross-platform progress indicator
 - **Interactive TUI** — Full terminal UI with live usage data, color-coded status, and keyboard shortcuts
@@ -51,10 +51,10 @@ brew install xjoker/tap/codex-switch
 
 ```bash
 # macOS / Linux
-CS_VERSION=0.0.3 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+CS_VERSION=0.0.7 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
 
 # Windows
-$env:CS_VERSION="0.0.3"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+$env:CS_VERSION="0.0.7"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
 ```
 
 ### From GitHub Releases (Manual)
@@ -88,6 +88,9 @@ sudo cp target/release/codex-switch /usr/local/bin/  # macOS/Linux
 # 1. Log in to your first Codex account
 codex-switch login
 
+# 1b. On headless servers (no browser), use device code flow:
+codex-switch login --device
+
 # 2. Log in to another account
 codex-switch login
 
@@ -114,6 +117,7 @@ codex-switch self-update --check
 | `codex-switch use [alias]` | Switch to a profile. Omit alias to auto-select the best account by quota |
 | `codex-switch list [-f]` | List all profiles with account info, usage, and availability (`-f` force refresh) |
 | `codex-switch login [--device] [alias]` | Log in via OAuth (`--device` for headless servers). If alias exists, re-authorizes |
+| `codex-switch rename <old> <new>` | Rename a profile |
 | `codex-switch delete <alias>` | Delete a profile |
 | `codex-switch import <path> [alias]` | Import one auth.json file, or recursively validate and import all JSON files under a directory |
 | `codex-switch self-update [--check] [--version <ver>]` | Manually check GitHub Releases or update the current direct-install binary |
@@ -137,7 +141,12 @@ codex-switch self-update --check
 |-----|--------|
 | `j` / `k` or `Up` / `Down` | Navigate accounts |
 | `Enter` | Switch to selected account |
+| `/` | Search / filter accounts |
 | `r` | Refresh all usage data |
+| `s` | Cycle sort mode (name / quota / status) |
+| `Space` | Mark / unmark account for batch operations |
+| `b` | Batch refresh marked accounts |
+| `c` | Clear all marks |
 | `n` | Rename selected profile |
 | `d` | Delete selected profile (with confirmation) |
 | `q` / `Esc` | Quit |
@@ -154,7 +163,7 @@ codex-switch self-update --check
 codex-switch self-update
 
 # Update to a specific newer version
-codex-switch self-update --version 0.0.3
+codex-switch self-update --version 0.0.7
 ```
 
 - Homebrew installs are not self-overwritten. Use `brew upgrade xjoker/tap/codex-switch`.
@@ -211,6 +220,47 @@ export HTTPS_PROXY="http://proxy.corp.com:8080"
 codex-switch list
 ```
 
+## Common Usage Scenarios
+
+### Auto-switch before each Codex session
+
+```bash
+# Add to your shell profile (.zshrc / .bashrc):
+codex-switch use && codex
+```
+
+### Scheduled token refresh via cron (optional)
+
+Keep cached usage data and tokens fresh in the background so `codex-switch use` is instant:
+
+```bash
+# Edit crontab
+crontab -e
+
+# Refresh all account usage every 5 minutes
+*/5 * * * * /usr/local/bin/codex-switch list --json > /dev/null 2>&1
+```
+
+This runs `codex-switch list` periodically, which refreshes stale tokens and caches usage data. It does **not** switch accounts automatically.
+
+### Use in CI / automation
+
+```bash
+# Switch to best account and launch Codex in one line
+codex-switch use --json && codex --quiet ...
+```
+
+## Troubleshooting
+
+If you encounter errors, run with `--debug` to see detailed HTTP requests, API responses, and cache status:
+
+```bash
+codex-switch --debug list
+codex-switch --debug use
+```
+
+If the issue persists, please [open an issue](https://github.com/xjoker/codex-switch/issues) with the debug output attached (remember to redact any sensitive information like tokens or emails).
+
 ## How It Works
 
 ### File Locations
@@ -248,8 +298,11 @@ When called without an alias, `codex-switch use` first consumes fresh cached ent
 1. Weekly (7d) limit at 100% → heavily penalized (account unusable)
 2. 5h window has remaining quota → high score (1000 + remaining %)
 3. 5h window exhausted, weekly OK → medium score (based on reset time)
+4. **Team account bonus** → Team plan accounts receive a +20 scoring bonus, so they are preferred when quotas are similar
 
 The highest-scoring account is selected and switched to.
+
+> **Note:** After switching accounts, you must **restart Codex** for it to pick up the new `auth.json`. The Codex CLI reads `auth.json` at startup and does not watch for file changes.
 
 ### Cache Behavior
 
@@ -282,6 +335,7 @@ When a usage query returns HTTP 401/403, the tool automatically attempts to refr
 - Browser opens via `xdg-open` (ensure a desktop browser is configured)
 - File manager opens via `xdg-open`
 - WSL: browser opening may require `wslu` package (`sudo apt install wslu`)
+- **Headless servers (no browser):** Use `codex-switch login --device` for device code flow — displays a URL and code to enter on any device with a browser
 
 ### Windows
 
@@ -293,7 +347,7 @@ When a usage query returns HTTP 401/403, the tool automatically attempts to refr
 
 ## JSON Output
 
-All commands support `--json` for machine-readable output:
+Most commands support `--json` for machine-readable output (except `tui` and `open`):
 
 ```bash
 # List profiles as JSON

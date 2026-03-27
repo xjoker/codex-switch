@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,7 @@ use crate::auth;
 use crate::jwt::AccountInfo;
 use crate::profile::{
     cmd_delete, list_profiles, profile_auth_path, read_current, rename_profile, switch_profile,
+    validate_alias,
 };
 use crate::usage::{UsageError, UsageInfo, fetch_usage_retried, fetch_usage_retried_force};
 
@@ -29,6 +31,23 @@ pub enum UsageStatus {
     Error(UsageError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    Name,
+    Quota,
+    Status,
+}
+
+impl SortMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SortMode::Name => "name",
+            SortMode::Quota => "quota",
+            SortMode::Status => "status",
+        }
+    }
+}
+
 pub enum ConfirmAction {
     Delete(String),
 }
@@ -39,13 +58,24 @@ pub struct RenameState {
     pub cursor: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchState {
+    pub query: String,
+    pub cursor: usize,
+}
+
 pub struct App {
     pub accounts: Vec<AccountEntry>,
     pub selected: usize,
+    pub search: Option<SearchState>,
+    pub search_active: bool,
+    pub sort_mode: SortMode,
+    pub view_indices: Vec<usize>,
+    pub marked: BTreeSet<String>,
     pub status_msg: Option<String>,
     pub status_expiry: Option<Instant>,
-    pub pending_results: tokio::sync::mpsc::Receiver<(usize, Result<UsageInfo, UsageError>)>,
-    pub result_sender: tokio::sync::mpsc::Sender<(usize, Result<UsageInfo, UsageError>)>,
+    pub pending_results: tokio::sync::mpsc::Receiver<(String, Result<UsageInfo, UsageError>)>,
+    pub result_sender: tokio::sync::mpsc::Sender<(String, Result<UsageInfo, UsageError>)>,
     pub confirm: Option<ConfirmAction>,
     pub rename: Option<RenameState>,
     pub usage_limiter: Arc<Semaphore>,
@@ -57,6 +87,11 @@ impl App {
         App {
             accounts: vec![],
             selected: 0,
+            search: None,
+            search_active: false,
+            sort_mode: SortMode::Name,
+            view_indices: vec![],
+            marked: BTreeSet::new(),
             status_msg: None,
             status_expiry: None,
             pending_results: rx,
@@ -84,9 +119,90 @@ impl App {
                 }
             })
             .collect();
-        if let Some(idx) = self.accounts.iter().position(|a| a.is_current) {
-            self.selected = idx;
+        self.marked
+            .retain(|alias| self.accounts.iter().any(|account| &account.alias == alias));
+        self.selected = 0;
+        self.view_indices.clear();
+        self.update_view();
+        if let Some(account_idx) = self.accounts.iter().position(|a| a.is_current)
+            && let Some(view_idx) = self.view_indices.iter().position(|&idx| idx == account_idx)
+        {
+            self.selected = view_idx;
         }
+    }
+
+    /// Recompute `view_indices` based on the current search query.
+    pub fn update_view(&mut self) {
+        let selected_account_idx = self.selected_account_idx();
+
+        self.view_indices = match &self.search {
+            None => (0..self.accounts.len()).collect(),
+            Some(s) if s.query.is_empty() => (0..self.accounts.len()).collect(),
+            Some(s) => {
+                let q = s.query.to_lowercase();
+                self.accounts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| {
+                        entry.alias.to_lowercase().contains(&q)
+                            || entry
+                                .info
+                                .email
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(&q)
+                            || entry
+                                .info
+                                .plan_type
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(&q)
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            }
+        };
+
+        match self.sort_mode {
+            SortMode::Name => {}
+            SortMode::Quota => {
+                let quotas: Vec<f64> = (0..self.accounts.len())
+                    .map(|idx| self.get_5h_used_pct(idx))
+                    .collect();
+                self.view_indices.sort_by(|&a, &b| {
+                    quotas[a]
+                        .partial_cmp(&quotas[b])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortMode::Status => {
+                let statuses: Vec<u8> = (0..self.accounts.len())
+                    .map(|idx| self.status_order(idx))
+                    .collect();
+                self.view_indices
+                    .sort_by(|&a, &b| statuses[a].cmp(&statuses[b]));
+            }
+        }
+
+        if let Some(account_idx) = selected_account_idx
+            && let Some(view_idx) = self.view_indices.iter().position(|&idx| idx == account_idx)
+        {
+            self.selected = view_idx;
+            return;
+        }
+
+        if self.view_indices.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.view_indices.len() {
+            self.selected = self.view_indices.len() - 1;
+        }
+    }
+
+    /// Get the selected index in `accounts`.
+    pub fn selected_account_idx(&self) -> Option<usize> {
+        self.view_indices.get(self.selected).copied()
     }
 
     pub fn loading_count(&self) -> usize {
@@ -94,6 +210,71 @@ impl App {
             .iter()
             .filter(|a| matches!(a.usage, UsageStatus::Loading))
             .count()
+    }
+
+    pub fn cycle_sort(&mut self) {
+        self.sort_mode = match self.sort_mode {
+            SortMode::Name => SortMode::Quota,
+            SortMode::Quota => SortMode::Status,
+            SortMode::Status => SortMode::Name,
+        };
+        self.update_view();
+    }
+
+    pub fn toggle_mark(&mut self) {
+        if let Some(idx) = self.selected_account_idx() {
+            let alias = self.accounts[idx].alias.clone();
+            if !self.marked.remove(&alias) {
+                self.marked.insert(alias);
+            }
+        }
+
+        if self.selected + 1 < self.view_indices.len() {
+            self.selected += 1;
+        }
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marked.clear();
+    }
+
+    pub fn batch_refresh(&mut self) {
+        if self.marked.is_empty() {
+            self.set_status("No accounts marked (use Space to mark)".to_string(), 3);
+            return;
+        }
+
+        let aliases: Vec<String> = self.marked.iter().cloned().collect();
+        let count = aliases.len();
+        for alias in &aliases {
+            if let Some(idx) = self.accounts.iter().position(|a| &a.alias == alias) {
+                self.accounts[idx].usage = UsageStatus::Idle;
+                self.fetch_usage_for(idx, true);
+            }
+        }
+        self.update_view();
+        self.set_status(format!("Refreshing {count} marked account(s)..."), 3);
+    }
+
+    fn get_5h_used_pct(&self, idx: usize) -> f64 {
+        match &self.accounts[idx].usage {
+            UsageStatus::Loaded(u) => u
+                .primary
+                .as_ref()
+                .and_then(|w| w.used_percent)
+                .unwrap_or(999.0),
+            _ => 999.0,
+        }
+    }
+
+    fn status_order(&self, idx: usize) -> u8 {
+        match &self.accounts[idx].usage {
+            UsageStatus::Error(_) => 0,
+            UsageStatus::Loaded(u) if !crate::usage::is_available(u) => 1,
+            UsageStatus::Loaded(_) => 2,
+            UsageStatus::Loading => 3,
+            UsageStatus::Idle => 4,
+        }
     }
 
     fn fetch_usage_for(&mut self, idx: usize, force: bool) {
@@ -123,7 +304,7 @@ impl App {
             } else {
                 fetch_usage_retried(&alias, &path, &current).await
             };
-            let _ = tx.send((idx, result)).await;
+            let _ = tx.send((alias, result)).await;
         });
     }
 
@@ -144,21 +325,31 @@ impl App {
         for i in 0..count {
             self.fetch_usage_for(i, force);
         }
+        self.update_view();
     }
 
     pub fn poll_results(&mut self) {
-        while let Ok((idx, result)) = self.pending_results.try_recv() {
-            if let Some(entry) = self.accounts.get_mut(idx) {
-                entry.usage = match result {
-                    Ok(u) => UsageStatus::Loaded(u),
-                    Err(e) => UsageStatus::Error(e),
-                };
-            }
+        let mut changed = false;
+        while let Ok((alias, result)) = self.pending_results.try_recv() {
+            let Some(idx) = self.accounts.iter().position(|entry| entry.alias == alias) else {
+                continue;
+            };
+            self.accounts[idx].usage = match result {
+                Ok(u) => UsageStatus::Loaded(u),
+                Err(e) => UsageStatus::Error(e),
+            };
+            changed = true;
+        }
+        if changed {
+            self.update_view();
         }
     }
 
     pub fn switch_selected(&mut self) {
-        if let Some(entry) = self.accounts.get(self.selected) {
+        if let Some(entry) = self
+            .selected_account_idx()
+            .and_then(|idx| self.accounts.get(idx))
+        {
             let alias = entry.alias.clone();
             match switch_profile(&alias) {
                 Ok(()) => {
@@ -174,7 +365,10 @@ impl App {
     }
 
     pub fn request_delete(&mut self) {
-        if let Some(entry) = self.accounts.get(self.selected) {
+        if let Some(entry) = self
+            .selected_account_idx()
+            .and_then(|idx| self.accounts.get(idx))
+        {
             if entry.is_current {
                 self.set_status("Cannot delete the active profile".to_string(), 3);
                 return;
@@ -193,9 +387,6 @@ impl App {
                 Ok(()) => {
                     self.set_status(format!("Deleted {alias}"), 3);
                     self.load_profiles();
-                    if self.selected >= self.accounts.len() && !self.accounts.is_empty() {
-                        self.selected = self.accounts.len() - 1;
-                    }
                     self.refresh_all(true);
                 }
                 Err(e) => self.set_status(format!("Delete failed: {e}"), 5),
@@ -208,7 +399,10 @@ impl App {
     }
 
     pub fn start_rename(&mut self) {
-        if let Some(entry) = self.accounts.get(self.selected) {
+        if let Some(entry) = self
+            .selected_account_idx()
+            .and_then(|idx| self.accounts.get(idx))
+        {
             let old = entry.alias.clone();
             let len = old.len();
             self.rename = Some(RenameState {
@@ -236,19 +430,23 @@ impl App {
                 if new.is_empty() || new == old {
                     return false;
                 }
-                if !new
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                {
-                    self.set_status("Invalid alias (use letters, digits, - or _)".to_string(), 3);
+                if let Err(err) = validate_alias(&new) {
+                    self.set_status(format!("Invalid alias: {err}"), 3);
                     return false;
                 }
                 match rename_profile(&old, &new) {
                     Ok(()) => {
-                        self.set_status(format!("Renamed {old} → {new}"), 3);
+                        let was_marked = self.marked.remove(&old);
+                        if was_marked {
+                            self.marked.insert(new.clone());
+                        }
+                        self.set_status(format!("Renamed {old} -> {new}"), 3);
                         self.load_profiles();
-                        if let Some(idx) = self.accounts.iter().position(|a| a.alias == new) {
-                            self.selected = idx;
+                        if let Some(account_idx) = self.accounts.iter().position(|a| a.alias == new)
+                            && let Some(view_idx) =
+                                self.view_indices.iter().position(|&idx| idx == account_idx)
+                        {
+                            self.selected = view_idx;
                         }
                         self.refresh_all(true);
                     }
@@ -297,6 +495,87 @@ impl App {
         true
     }
 
+    pub fn handle_search_key(&mut self, code: KeyCode) -> bool {
+        let mut clear_search = false;
+        let mut accept_search = false;
+
+        {
+            let state = match &mut self.search {
+                Some(s) => s,
+                None => return false,
+            };
+
+            match code {
+                KeyCode::Esc => {
+                    clear_search = true;
+                }
+                KeyCode::Enter => {
+                    accept_search = true;
+                }
+                KeyCode::Backspace => {
+                    if state.cursor > 0 {
+                        state.cursor -= 1;
+                        let byte_pos = char_to_byte(&state.query, state.cursor);
+                        state.query.remove(byte_pos);
+                    }
+                }
+                KeyCode::Delete => {
+                    let char_count = state.query.chars().count();
+                    if state.cursor < char_count {
+                        let byte_pos = char_to_byte(&state.query, state.cursor);
+                        state.query.remove(byte_pos);
+                    }
+                }
+                KeyCode::Left => {
+                    if state.cursor > 0 {
+                        state.cursor -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    let char_count = state.query.chars().count();
+                    if state.cursor < char_count {
+                        state.cursor += 1;
+                    }
+                }
+                KeyCode::Home => {
+                    state.cursor = 0;
+                }
+                KeyCode::End => {
+                    state.cursor = state.query.chars().count();
+                }
+                KeyCode::Char(c) => {
+                    let byte_pos = char_to_byte(&state.query, state.cursor);
+                    state.query.insert(byte_pos, c);
+                    state.cursor += 1;
+                }
+                _ => {}
+            }
+        }
+
+        if clear_search {
+            self.search = None;
+            self.search_active = false;
+            self.update_view();
+            return false;
+        }
+
+        if accept_search {
+            self.search_active = false;
+            if self
+                .search
+                .as_ref()
+                .is_some_and(|state| state.query.is_empty())
+            {
+                self.search = None;
+            }
+            self.update_view();
+            return false;
+        }
+
+        self.update_view();
+        true
+    }
+
     fn set_status(&mut self, msg: String, secs: u64) {
         self.status_msg = Some(msg);
         self.status_expiry = Some(Instant::now() + Duration::from_secs(secs));
@@ -331,6 +610,7 @@ pub async fn run() -> Result<()> {
 async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut app = App::new();
     app.load_profiles();
+    app.update_view();
 
     if app.accounts.is_empty() {
         ratatui::restore();
@@ -368,10 +648,21 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 continue;
             }
 
+            if app.search_active {
+                app.handle_search_key(key.code);
+                continue;
+            }
+
             match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Char('q') => break,
+                KeyCode::Esc => {
+                    if app.search.is_some() {
+                        app.search = None;
+                        app.update_view();
+                    }
+                }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if app.selected + 1 < app.accounts.len() {
+                    if app.selected + 1 < app.view_indices.len() {
                         app.selected += 1;
                     }
                 }
@@ -382,8 +673,24 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
                 KeyCode::Enter => app.switch_selected(),
                 KeyCode::Char('r') => app.refresh_all(true),
+                KeyCode::Char('b') => app.batch_refresh(),
                 KeyCode::Char('d') => app.request_delete(),
                 KeyCode::Char('n') => app.start_rename(),
+                KeyCode::Char('s') => app.cycle_sort(),
+                KeyCode::Char('c') => app.clear_marks(),
+                KeyCode::Char(' ') => app.toggle_mark(),
+                KeyCode::Char('/') => {
+                    if let Some(search) = &mut app.search {
+                        search.cursor = search.query.chars().count();
+                    } else {
+                        app.search = Some(SearchState {
+                            query: String::new(),
+                            cursor: 0,
+                        });
+                        app.update_view();
+                    }
+                    app.search_active = true;
+                }
                 _ => {}
             }
         }

@@ -22,19 +22,18 @@ pub struct AccountInfo {
     pub organizations: Vec<OrgInfo>,
 }
 
-#[allow(dead_code)]
 impl AccountInfo {
     pub fn plan_label(&self) -> String {
         let base = self.plan_type.as_deref().unwrap_or("?").to_string();
         if let Some(name) = &self.workspace_name
             && !name.is_empty()
         {
-            return format!("{base} · {name}");
+            return format!("{base} - {name}");
         }
         if let Some(org) = self.organizations.iter().find(|o| o.is_default)
             && !org.title.is_empty()
         {
-            return format!("{base} · {}", org.title);
+            return format!("{base} - {}", org.title);
         }
         base
     }

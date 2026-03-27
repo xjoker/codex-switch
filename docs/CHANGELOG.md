@@ -1,6 +1,31 @@
 # Changelog
 
-## Unreleased
+## v0.0.7 — 2026-03-27
+
+### Added
+
+- **`rename` CLI command** — `codex-switch rename <old> <new>`, previously only available in TUI
+- **Team account priority** — `codex-switch use` auto-selection gives Team plan accounts a +20 scoring bonus, preferring them when quotas are similar
+- **Alias validation** — All user-facing alias inputs are validated against a safe character set, preventing path traversal attacks
+- **Common usage scenarios in README** — Shell integration, CI automation, and optional cron-based token refresh
+- **Troubleshooting section in README** — `--debug` usage guide and issue reporting instructions
+
+### Changed
+
+- **ASCII-only terminal output** — All user-visible CLI/TUI strings now use pure ASCII characters for Windows GBK codepage compatibility
+- **`--json` scope clarified** — Help text and README now accurately state that `tui` and `open` do not support `--json`
+- **README documentation sync** — Chinese README aligned with English version (added HTTPS_PROXY example, Building section, consistent chapter ordering)
+- **Version examples updated** — README and CLI help examples updated to `0.0.7`
+
+### Fixed
+
+- **TUI refresh race condition** — Token writeback to live `auth.json` now re-checks the active profile before writing, preventing stale tokens from overwriting a freshly switched account
+- **Auth file permissions** — `auth.json` files are now created with mode `0600` and directories with `0700` on Unix, preventing other users from reading tokens
+- **Proxy credential leak** — `--debug` logging now sanitizes `user:pass` in proxy URLs to `***:***`
+- **Silent error swallowing** — Config load failures, cache write failures, and token refresh persistence failures now emit `tracing::warn!` instead of being silently ignored
+- **Clippy warnings** — Resolved 4 `if_same_then_else` warnings in color threshold logic
+- **Dead code cleanup** — Removed 2 unnecessary `#[allow(dead_code)]` annotations
+- **Rename cache cleanup** — Renaming a profile now migrates its cache entry to the new alias
 
 ## v0.0.6 — 2026-03-26
 

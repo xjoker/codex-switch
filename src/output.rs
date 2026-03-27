@@ -160,7 +160,7 @@ pub fn format_reset_time(ts: i64) -> String {
     let now = Local::now();
     let dt: DateTime<Local> = match Local.timestamp_opt(ts, 0).single() {
         Some(d) => d,
-        None => return "—".into(),
+        None => return "--".into(),
     };
     if dt <= now {
         return "expired".into();
@@ -186,7 +186,7 @@ pub fn format_reset_short(ts: i64) -> String {
     let now = Local::now();
     let dt: DateTime<Local> = match Local.timestamp_opt(ts, 0).single() {
         Some(d) => d,
-        None => return "—".into(),
+        None => return "--".into(),
     };
     if dt <= now {
         return "reset".into();

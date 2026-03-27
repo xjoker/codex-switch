@@ -32,7 +32,6 @@ struct RefreshResponse {
     id_token: Option<String>,
     access_token: Option<String>,
     refresh_token: Option<String>,
-    #[allow(dead_code)]
     error: Option<String>,
 }
 
@@ -73,8 +72,10 @@ fn extract_error_summary(err: &str) -> String {
     }
     // Fallback: first line, truncated
     let first_line = err.lines().next().unwrap_or(err);
-    if first_line.len() > 60 {
-        format!("{}…", &first_line[..60])
+    let mut chars = first_line.chars();
+    let preview: String = chars.by_ref().take(60).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
     } else {
         first_line.to_string()
     }
@@ -99,10 +100,39 @@ pub async fn fetch_usage_retried_force(
     fetch_usage_retried_inner(alias, profile_path, current_alias, true).await
 }
 
+fn persist_refreshed_tokens(alias: &str, profile_path: &Path, new_tokens: &RefreshedTokens) {
+    if let Err(err) = auth::update_tokens(
+        profile_path,
+        &new_tokens.id_token,
+        &new_tokens.access_token,
+        &new_tokens.refresh_token,
+    ) {
+        warn!(
+            "[{alias}] Failed to persist refreshed tokens to {}: {err}",
+            profile_path.display()
+        );
+    }
+
+    if crate::profile::read_current() == alias {
+        let live = auth::codex_auth_path();
+        if let Err(err) = auth::update_tokens(
+            &live,
+            &new_tokens.id_token,
+            &new_tokens.access_token,
+            &new_tokens.refresh_token,
+        ) {
+            warn!(
+                "[{alias}] Failed to persist refreshed tokens to {}: {err}",
+                live.display()
+            );
+        }
+    }
+}
+
 async fn fetch_usage_retried_inner(
     alias: &str,
     profile_path: &Path,
-    current_alias: &str,
+    _current_alias: &str,
     force: bool,
 ) -> std::result::Result<UsageInfo, UsageError> {
     if !force {
@@ -117,16 +147,21 @@ async fn fetch_usage_retried_inner(
 
     let val = auth::read_auth(profile_path).map_err(|e| {
         let detail = format!("failed to read auth file {}: {e}", profile_path.display());
-        UsageError { summary: "auth file unreadable".into(), detail }
+        UsageError {
+            summary: "auth file unreadable".into(),
+            detail,
+        }
     })?;
     let (access_token, refresh_token) = auth::extract_tokens(&val);
 
     let at = match access_token {
         Some(t) => t,
-        None => return Err(UsageError {
-            summary: "no access_token".into(),
-            detail: "no access_token in auth file".into(),
-        }),
+        None => {
+            return Err(UsageError {
+                summary: "no access_token".into(),
+                detail: "no access_token in auth file".into(),
+            });
+        }
     };
 
     let mut last_err = String::new();
@@ -139,34 +174,26 @@ async fn fetch_usage_retried_inner(
         match fetch_usage_with_refresh(alias, &at, refresh_token.as_deref()).await {
             Ok((usage, refreshed)) => {
                 if let Some(new_tokens) = refreshed {
-                    let _ = auth::update_tokens(
-                        profile_path,
-                        &new_tokens.id_token,
-                        &new_tokens.access_token,
-                        &new_tokens.refresh_token,
-                    );
-                    if alias == current_alias {
-                        let live = auth::codex_auth_path();
-                        let _ = auth::update_tokens(
-                            &live,
-                            &new_tokens.id_token,
-                            &new_tokens.access_token,
-                            &new_tokens.refresh_token,
-                        );
-                    }
+                    persist_refreshed_tokens(alias, profile_path, &new_tokens);
                 }
                 crate::cache::put(alias, &usage);
                 return Ok(usage);
             }
             Err(e) => {
                 let msg = e.to_string();
-                warn!("[{alias}] attempt {}/{MAX_RETRIES} failed: {msg}", attempt + 1);
+                warn!(
+                    "[{alias}] attempt {}/{MAX_RETRIES} failed: {msg}",
+                    attempt + 1
+                );
                 last_summary = extract_error_summary(&msg);
                 last_err = msg;
             }
         }
     }
-    Err(UsageError { summary: last_summary, detail: last_err })
+    Err(UsageError {
+        summary: last_summary,
+        detail: last_err,
+    })
 }
 
 /// Fetch usage; on 401/403 automatically refresh the token and retry once.
@@ -305,9 +332,12 @@ pub async fn validate_import_auth(
                 &refreshed.access_token,
                 &refreshed.refresh_token,
             )?;
-            let (usage, refreshed_again) =
-                fetch_usage_with_refresh(alias, &refreshed.access_token, Some(&refreshed.refresh_token))
-                    .await?;
+            let (usage, refreshed_again) = fetch_usage_with_refresh(
+                alias,
+                &refreshed.access_token,
+                Some(&refreshed.refresh_token),
+            )
+            .await?;
             if let Some(tokens) = &refreshed_again {
                 auth::apply_tokens(
                     val,
@@ -352,14 +382,13 @@ async fn do_refresh_token(
     })?;
 
     let r: RefreshResponse = serde_json::from_str(&body_text).map_err(|e| {
-        let preview = if body_text.len() > 500 {
-            format!("{}...(truncated)", &body_text[..500])
+        let preview = if body_text.len() > 200 {
+            format!("{}...(truncated)", &body_text[..200])
         } else {
             body_text.clone()
         };
-        anyhow::anyhow!(
-            "failed to parse token refresh response (HTTP {status}): {e}\n  response body: {preview}"
-        )
+        debug!("[{alias}] token refresh parse failure, raw body: {preview}");
+        anyhow::anyhow!("Failed to parse token refresh response (HTTP {status}): {e}")
     })?;
 
     if let Some(err) = &r.error {
@@ -510,7 +539,6 @@ pub async fn refresh_expiring_tokens() {
     };
 
     let now = auth::now_unix_secs();
-    let current = crate::profile::read_current();
 
     // Collect (alias, profile_path, refresh_token, expires_at) for tokens expiring soon
     let mut candidates: Vec<(String, std::path::PathBuf, String, i64)> = Vec::new();
@@ -523,7 +551,9 @@ pub async fn refresh_expiring_tokens() {
         let (access_token, refresh_token) = auth::extract_tokens(&val);
         let Some(at) = access_token else { continue };
         let Some(rt) = refresh_token else { continue };
-        let Some(exp) = crate::jwt::token_expires_at(&at) else { continue };
+        let Some(exp) = crate::jwt::token_expires_at(&at) else {
+            continue;
+        };
         let remaining = exp - now;
         if remaining < OPPORTUNISTIC_REFRESH_MARGIN {
             candidates.push((alias.clone(), path, rt, exp));
@@ -547,7 +577,6 @@ pub async fn refresh_expiring_tokens() {
     // Spawn all refreshes concurrently, bounded by total timeout
     let mut tasks = tokio::task::JoinSet::new();
     for (alias, path, rt, exp) in candidates {
-        let current = current.clone();
         tasks.spawn(async move {
             let remaining = exp - auth::now_unix_secs();
             debug!("[{alias}] token expires in {remaining}s, refreshing");
@@ -562,21 +591,7 @@ pub async fn refresh_expiring_tokens() {
 
             match do_refresh_token(&alias, &client, &rt).await {
                 Ok(new_tokens) => {
-                    let _ = auth::update_tokens(
-                        &path,
-                        &new_tokens.id_token,
-                        &new_tokens.access_token,
-                        &new_tokens.refresh_token,
-                    );
-                    if alias == current {
-                        let live = auth::codex_auth_path();
-                        let _ = auth::update_tokens(
-                            &live,
-                            &new_tokens.id_token,
-                            &new_tokens.access_token,
-                            &new_tokens.refresh_token,
-                        );
-                    }
+                    persist_refreshed_tokens(&alias, &path, &new_tokens);
                     info!("[{alias}] opportunistic token refresh succeeded");
                 }
                 Err(e) => {

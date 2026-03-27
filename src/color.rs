@@ -117,9 +117,7 @@ pub fn reset_time(s: &str, remaining_secs: i64) -> String {
     if !enabled() {
         return s.to_string();
     }
-    if remaining_secs <= 0 {
-        format!("{}", s.green())
-    } else if remaining_secs < 3600 {
+    if remaining_secs < 3600 {
         format!("{}", s.green())
     } else if remaining_secs < 14400 {
         format!("{}", s.yellow())
@@ -133,9 +131,7 @@ pub fn credits(s: &str, balance: f64, unlimited: bool) -> String {
     if !enabled() {
         return s.to_string();
     }
-    if unlimited {
-        format!("{}", s.green())
-    } else if balance >= 10.0 {
+    if unlimited || balance >= 10.0 {
         format!("{}", s.green())
     } else if balance >= 2.0 {
         format!("{}", s.yellow())

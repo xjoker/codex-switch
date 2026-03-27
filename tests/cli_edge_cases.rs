@@ -198,7 +198,10 @@ fn json_list_auto_track_keeps_stdout_machine_readable() {
 
     let stdout = parse_stdout_json(&output);
     assert_eq!(stdout["profiles"][0]["alias"], "carol");
-    assert_eq!(stdout["profiles"][0]["usage"]["error"], "no access_token in auth file");
+    assert_eq!(
+        stdout["profiles"][0]["usage"]["error"],
+        "no access_token in auth file"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Saved profile: carol"));

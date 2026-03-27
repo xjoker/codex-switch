@@ -68,6 +68,7 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
     match cmd {
         Commands::Use { alias, force } => use_cmd(alias.as_deref(), force, json).await?,
         Commands::List { force } => list_cmd(force, json).await?,
+        Commands::Rename { old, new } => rename_cmd(&old, &new, json)?,
         Commands::Delete { alias } => delete_cmd(&alias, json)?,
         Commands::Login { alias, device } => login_cmd(alias.as_deref(), device, json).await?,
         Commands::Import { path, alias } => import_cmd(&path, alias.as_deref(), json).await?,
@@ -186,10 +187,13 @@ async fn list_cmd(force: bool, json: bool) -> Result<()> {
         let sem = semaphore.clone();
         tasks.spawn(async move {
             let Ok(_permit) = sem.acquire_owned().await else {
-                return (idx, Err(usage::UsageError {
-                    summary: "limiter closed".into(),
-                    detail: "usage limiter closed".into(),
-                }));
+                return (
+                    idx,
+                    Err(usage::UsageError {
+                        summary: "limiter closed".into(),
+                        detail: "usage limiter closed".into(),
+                    }),
+                );
             };
             let path = profile::profile_auth_path(&alias);
             let usage_result = if force {
@@ -218,12 +222,12 @@ async fn list_cmd(force: bool, json: bool) -> Result<()> {
     let mut json_items = vec![];
 
     for row in rows {
-        let usage_result = row
-            .usage_result
-            .unwrap_or_else(|| Err(usage::UsageError {
+        let usage_result = row.usage_result.unwrap_or_else(|| {
+            Err(usage::UsageError {
                 summary: "unknown".into(),
                 detail: "usage result missing".into(),
-            }));
+            })
+        });
         if json {
             let ju = match &usage_result {
                 Ok(u) => usage_to_json(Ok(u)),
@@ -267,7 +271,11 @@ async fn list_cmd(force: bool, json: bool) -> Result<()> {
                     print!("  {} ", color::status_tag(tag));
                     print_usage_line(&u);
                 }
-                Err(e) => println!("  {} {}", color::status_tag("Error"), color::error(&e.summary)),
+                Err(e) => println!(
+                    "  {} {}",
+                    color::status_tag("Error"),
+                    color::error(&e.summary)
+                ),
             }
         }
     }
@@ -285,6 +293,20 @@ async fn list_cmd(force: bool, json: bool) -> Result<()> {
 }
 
 // ── delete ───────────────────────────────────────────────
+
+// ── rename ───────────────────────────────────────────────
+
+fn rename_cmd(old: &str, new: &str, json: bool) -> Result<()> {
+    profile::rename_profile(old, new)?;
+    if json {
+        print_json(&output::JsonOk {
+            ok: true,
+            alias: new.to_string(),
+            action: "renamed".into(),
+        });
+    }
+    Ok(())
+}
 
 fn delete_cmd(alias: &str, json: bool) -> Result<()> {
     profile::cmd_delete(alias)?;
@@ -312,6 +334,10 @@ fn build_auth_from_tokens(tokens: &login::LoginTokens) -> (serde_json::Value, jw
 
 async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> Result<()> {
     if let Some(a) = alias {
+        profile::validate_alias(a)?;
+    }
+
+    if let Some(a) = alias {
         let dst = profile::profile_auth_path(a);
         if dst.exists() {
             return reauth_profile(a, device, json).await;
@@ -330,7 +356,7 @@ async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> Result<()> 
             if !json {
                 println!(
                     "{}",
-                    color::success(&format!("✓ Logged in — saved as new profile: {a}"))
+                    color::success(&format!("[ok] Logged in -- saved as new profile: {a}"))
                 );
             }
             if json {
@@ -345,7 +371,7 @@ async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> Result<()> 
             if !json {
                 println!(
                     "{}",
-                    color::success(&format!("✓ Logged in — updated existing profile: {a}"))
+                    color::success(&format!("[ok] Logged in -- updated existing profile: {a}"))
                 );
             }
             if json {
@@ -366,7 +392,7 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
 
     if !json {
         println!(
-            "Re-authorizing profile '{}' ({})…",
+            "Re-authorizing profile '{}' ({})...",
             color::bold(alias),
             old_info.email.as_deref().unwrap_or("unknown email")
         );
@@ -396,7 +422,7 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
         println!(
             "{}",
             color::success(&format!(
-                "✓ Profile '{}' re-authorized (account: {})",
+                "[ok] Profile '{}' re-authorized (account: {})",
                 alias,
                 new_info.email.as_deref().unwrap_or("unknown")
             ))
@@ -426,9 +452,16 @@ async fn best_cmd(json: bool) -> Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
     let mut scored: Vec<(String, usage::UsageInfo, f64)> = Vec::with_capacity(profiles.len());
 
+    /// Team accounts get a +20 bonus so they are preferred when quotas are similar.
+    const TEAM_BONUS: f64 = 20.0;
+
     for alias in profiles {
         if let Some(cached) = cache::get(&alias) {
-            let score = usage::score(&cached);
+            let mut score = usage::score(&cached);
+            let path = profile::profile_auth_path(&alias);
+            if auth::read_account_info(&path).is_team() {
+                score += TEAM_BONUS;
+            }
             scored.push((alias, cached, score));
             continue;
         }
@@ -465,7 +498,11 @@ async fn best_cmd(json: bool) -> Result<()> {
         if let Some((alias, usage)) =
             task.map_err(|e| anyhow::anyhow!("usage worker failed: {e}"))?
         {
-            let score = usage::score(&usage);
+            let mut score = usage::score(&usage);
+            let path = profile::profile_auth_path(&alias);
+            if auth::read_account_info(&path).is_team() {
+                score += TEAM_BONUS;
+            }
             scored.push((alias, usage, score));
         }
     }
@@ -542,7 +579,7 @@ async fn import_cmd(path: &str, alias: Option<&str>, json: bool) -> Result<()> {
             println!(
                 "{}",
                 color::success(&format!(
-                    "Validated and {}: {} → profile '{}'",
+                    "Validated and {}: {} -> profile '{}'",
                     imported.action,
                     imported.source.display(),
                     imported.alias
@@ -610,7 +647,7 @@ async fn import_cmd(path: &str, alias: Option<&str>, json: bool) -> Result<()> {
 
         for item in &report.imported {
             println!(
-                "  {} {} → {} ({})",
+                "  {} {} -> {} ({})",
                 color::status_tag("OK"),
                 item.source.display(),
                 item.alias,
@@ -761,7 +798,7 @@ async fn self_update_cmd(check: bool, version: Option<&str>, json: bool) -> Resu
         println!(
             "{}",
             color::success(&format!(
-                "Updated codex-switch: v{} → v{}",
+                "Updated codex-switch: v{} -> v{}",
                 result.current_version, result.latest_version
             ))
         );
@@ -808,24 +845,36 @@ fn print_usage_line(u: &usage::UsageInfo) {
     if let Some(w) = &u.primary {
         let pct = w.used_percent.unwrap_or(0.0);
         let pct_str = format!("{pct:.0}%");
-        let remaining = w.resets_at.map(|ts| ts - crate::auth::now_unix_secs()).unwrap_or(0);
+        let remaining = w
+            .resets_at
+            .map(|ts| ts - crate::auth::now_unix_secs())
+            .unwrap_or(0);
         let reset = w
             .resets_at
             .map(format_reset_time)
             .unwrap_or_else(|| "unknown".into());
         let reset_colored = color::reset_time(&format!("(resets: {reset})"), remaining);
-        print!("5h {} used {reset_colored}", color::usage_pct(&pct_str, pct));
+        print!(
+            "5h {} used {reset_colored}",
+            color::usage_pct(&pct_str, pct)
+        );
     }
     if let Some(w) = &u.secondary {
         let pct = w.used_percent.unwrap_or(0.0);
         let pct_str = format!("{pct:.0}%");
-        let remaining = w.resets_at.map(|ts| ts - crate::auth::now_unix_secs()).unwrap_or(0);
+        let remaining = w
+            .resets_at
+            .map(|ts| ts - crate::auth::now_unix_secs())
+            .unwrap_or(0);
         let reset = w
             .resets_at
             .map(format_reset_time)
             .unwrap_or_else(|| "unknown".into());
         let reset_colored = color::reset_time(&format!("(resets: {reset})"), remaining);
-        print!("  7d {} used {reset_colored}", color::usage_pct(&pct_str, pct));
+        print!(
+            "  7d {} used {reset_colored}",
+            color::usage_pct(&pct_str, pct)
+        );
     }
     if let Some(balance) = u.credits_balance {
         let unlimited = u.unlimited_credits == Some(true);

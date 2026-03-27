@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::auth;
@@ -51,15 +52,22 @@ fn load_cache() -> CacheFile {
         .unwrap_or_default()
 }
 
-fn save_cache(cache: &CacheFile) {
+fn save_cache(cache: &CacheFile) -> Result<()> {
     let path = cache_path();
-    if let Ok(json) = serde_json::to_string(cache) {
-        // Atomic write: write to temp file then rename
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
-    }
+    let json = serde_json::to_string(cache).context("serializing cache")?;
+
+    // Atomic write: write to temp file then rename.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &json)
+        .with_context(|| format!("writing cache temp file {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| {
+        format!(
+            "renaming cache temp file {} -> {}",
+            tmp.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn to_entry(u: &UsageInfo) -> CacheEntry {
@@ -117,7 +125,21 @@ pub fn put(alias: &str, usage: &UsageInfo) {
     let _lock = CACHE_LOCK.lock().ok();
     let mut cache = load_cache();
     cache.entries.insert(alias.to_string(), to_entry(usage));
-    save_cache(&cache);
+    if let Err(err) = save_cache(&cache) {
+        tracing::warn!("Failed to write cache: {err}");
+    }
+}
+
+pub fn rename(old: &str, new: &str) -> Result<()> {
+    let _lock = CACHE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("cache lock poisoned"))?;
+    let mut cache = load_cache();
+    let Some(entry) = cache.entries.remove(old) else {
+        return Ok(());
+    };
+    cache.entries.insert(new.to_string(), entry);
+    save_cache(&cache)
 }
 
 #[cfg(test)]

@@ -141,19 +141,19 @@ pub async fn self_update(version: Option<&str>, show_progress: bool) -> Result<S
     let temp_dir = tempfile::tempdir().context("creating temporary update directory")?;
     let archive_path = temp_dir.path().join(&archive_asset.name);
     if show_progress {
-        eprintln!("Downloading {}…", archive_asset.name);
+        eprintln!("Downloading {}...", archive_asset.name);
     }
     download_file(&client, &archive_asset.browser_download_url, &archive_path).await?;
     verify_checksum(&client, &checksum_asset.browser_download_url, &archive_path).await?;
 
     let extracted_path = temp_dir.path().join(extracted_binary_name());
     if show_progress {
-        eprintln!("Extracting update package…");
+        eprintln!("Extracting update package...");
     }
     extract_binary(&archive_path, &extracted_path)?;
 
     if show_progress {
-        eprintln!("Replacing current executable…");
+        eprintln!("Replacing current executable...");
     }
     self_replace::self_replace(&extracted_path).context("replacing current executable")?;
 

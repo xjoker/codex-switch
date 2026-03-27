@@ -56,9 +56,26 @@ pub fn write_auth(path: &Path, val: &serde_json::Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating directory {}", parent.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            {
+                tracing::warn!(
+                    "Failed to set directory permissions on {}: {e}",
+                    parent.display()
+                );
+            }
+        }
     }
     let raw = serde_json::to_string_pretty(val)?;
     std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -75,7 +92,12 @@ pub fn backup_auth(path: &Path) -> Result<()> {
     let ts = now_unix_secs();
     let bak = path.with_extension(format!("json.bak.{ts}"));
     std::fs::copy(path, &bak)
-        .with_context(|| format!("backing up {} → {}", path.display(), bak.display()))?;
+        .with_context(|| format!("backing up {} -> {}", path.display(), bak.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&bak, std::fs::Permissions::from_mode(0o600));
+    }
     cleanup_old_backups(path);
     Ok(())
 }
@@ -203,9 +225,10 @@ pub fn build_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::
         .timeout(std::time::Duration::from_secs(60));
 
     if let Some(url) = proxy_url {
-        tracing::debug!("Using proxy: {url}");
+        let sanitized_url = sanitize_proxy_url(url);
+        tracing::debug!("Using proxy: {sanitized_url}");
         let mut proxy = reqwest::Proxy::all(url)
-            .map_err(|e| anyhow::anyhow!("invalid proxy URL '{url}': {e}"))?;
+            .map_err(|e| anyhow::anyhow!("invalid proxy URL '{sanitized_url}': {e}"))?;
         if let Some(no_proxy) = crate::config::resolve_no_proxy() {
             tracing::debug!("No-proxy list: {no_proxy}");
             proxy = proxy.no_proxy(reqwest::NoProxy::from_string(&no_proxy));
@@ -214,6 +237,28 @@ pub fn build_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::
     }
 
     Ok(builder.build()?)
+}
+
+fn sanitize_proxy_url(url: &str) -> String {
+    let Some(scheme_sep) = url.find("://") else {
+        return url.to_string();
+    };
+    let authority_start = scheme_sep + 3;
+    let authority_end = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|idx| authority_start + idx)
+        .unwrap_or(url.len());
+    let authority = &url[authority_start..authority_end];
+    let Some(userinfo_end) = authority.rfind('@') else {
+        return url.to_string();
+    };
+    let at_pos = authority_start + userinfo_end;
+
+    let mut sanitized = String::with_capacity(url.len());
+    sanitized.push_str(&url[..authority_start]);
+    sanitized.push_str("***:***");
+    sanitized.push_str(&url[at_pos..]);
+    sanitized
 }
 
 /// Format a reqwest error with the full source chain for diagnostics.
@@ -260,5 +305,63 @@ fn cleanup_old_backups(path: &Path) {
     let to_remove = backups.len() - MAX_BACKUPS;
     for old in &backups[..to_remove] {
         let _ = std::fs::remove_file(old);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_sanitize_proxy_url_masks_userinfo() {
+        let url = "http://user:pass@example.com:8080/path?q=1";
+
+        assert_eq!(
+            sanitize_proxy_url(url),
+            "http://***:***@example.com:8080/path?q=1"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_proxy_url_keeps_url_without_userinfo() {
+        let url = "socks5://example.com:1080";
+
+        assert_eq!(sanitize_proxy_url(url), url);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_auth_sets_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+
+        write_auth(&path, &json!({ "tokens": {} })).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_backup_auth_sets_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+
+        write_auth(&path, &json!({ "tokens": {} })).unwrap();
+        backup_auth(&path).unwrap();
+
+        let backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .find(|candidate| candidate != &path)
+            .expect("backup file should exist");
+
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }
