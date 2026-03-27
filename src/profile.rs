@@ -127,15 +127,20 @@ pub fn find_profile_by_identity(identity: &AccountIdentity) -> Option<String> {
         };
         let existing = extract_identity(&val);
 
-        if let (Some(a), Some(b)) = (&identity.account_id, &existing.account_id)
-            && a == b
+        // Match: account_id AND email both equal (same person, same workspace)
+        if let (Some(a1), Some(a2)) = (&identity.account_id, &existing.account_id)
+            && a1 == a2
+            && let (Some(e1), Some(e2)) = (&identity.email, &existing.email)
+            && e1 == e2
         {
             return Some(alias);
         }
 
+        // Fallback: email-only match (when account_id is missing on either side)
         if email_match.is_none()
             && let (Some(a), Some(b)) = (&identity.email, &existing.email)
             && a == b
+            && (identity.account_id.is_none() || existing.account_id.is_none())
         {
             email_match = Some(alias);
         }

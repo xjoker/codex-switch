@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.0.8 — 2026-03-28
+
+### Fixed
+
+- **Profile dedup incorrectly merges different users in the same Team** — `find_profile_by_identity()` previously matched on `account_id` alone, but OpenAI's `chatgpt_account_id` is a workspace-level identifier shared across all members. Users with different emails but the same Team workspace were incorrectly merged into one profile. Now requires both `account_id` AND `email` to match for dedup. ([#8](https://github.com/xjoker/codex-switch/issues/8))
+
 ## v0.0.7 — 2026-03-27
 
 ### Added
