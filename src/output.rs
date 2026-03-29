@@ -60,6 +60,7 @@ pub struct JsonBest {
     pub account: JsonAccount,
     pub usage: JsonUsage,
     pub score: f64,
+    pub mode: String,
 }
 
 #[derive(Serialize)]

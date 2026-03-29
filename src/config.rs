@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub proxy: ProxyConfig,
     pub cache: CacheConfig,
     pub network: NetworkConfig,
+    #[serde(rename = "use")]
+    pub use_cfg: UseConfig,
 }
 
 impl AppConfig {
@@ -56,6 +58,41 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self { max_concurrent: 20 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigSelectMode {
+    MaxRemaining,
+    DrainFirst,
+    RoundRobin,
+}
+
+impl Default for ConfigSelectMode {
+    fn default() -> Self {
+        Self::MaxRemaining
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct UseConfig {
+    /// Selection mode (default: max-remaining)
+    pub mode: ConfigSelectMode,
+    /// drain-first: accounts with remaining% below this threshold are deprioritized (default: 5)
+    pub min_remaining: f64,
+    /// 7d safety margin: when 7d remaining% falls below this, a scoring penalty kicks in (default: 20)
+    pub safety_margin_7d: f64,
+}
+
+impl Default for UseConfig {
+    fn default() -> Self {
+        Self {
+            mode: ConfigSelectMode::default(),
+            min_remaining: 5.0,
+            safety_margin_7d: 20.0,
+        }
     }
 }
 
@@ -107,6 +144,16 @@ pub fn resolve_proxy() -> Option<String> {
         return Some(p.clone());
     }
     None
+}
+
+/// Resolve the effective select mode: CLI flag takes precedence over config.
+pub fn resolve_select_mode(cli: Option<crate::cli::SelectMode>) -> ConfigSelectMode {
+    match cli {
+        Some(crate::cli::SelectMode::MaxRemaining) => ConfigSelectMode::MaxRemaining,
+        Some(crate::cli::SelectMode::DrainFirst) => ConfigSelectMode::DrainFirst,
+        Some(crate::cli::SelectMode::RoundRobin) => ConfigSelectMode::RoundRobin,
+        None => get().use_cfg.mode,
+    }
 }
 
 pub fn resolve_no_proxy() -> Option<String> {

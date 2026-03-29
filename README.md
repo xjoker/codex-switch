@@ -13,7 +13,7 @@ Multi-account profile manager for [OpenAI Codex CLI](https://github.com/openai/c
 - **Profile Management** — Save, switch, rename, delete Codex accounts
 - **Auto-Detection** — Automatically discovers and tracks the current `auth.json`
 - **Usage Dashboard** — Live quota monitoring (5h and 7d windows) with status indicators and per-account refresh timestamps
-- **Smart Auto-Switch** — `codex-switch use` without arguments selects the account with the most remaining quota (Team accounts are prioritized over other plan types)
+- **Smart Auto-Switch** — `codex-switch use` without arguments selects the best account using one of three [selection modes](#selection-modes) (Team accounts are prioritized over other plan types)
 - **Stale-Only Refresh** — `use`, `list`, and TUI refresh only accounts whose cached usage has expired
 - **Progress Display** — Long-running `use`, `list`, and directory `import` operations show a single-line cross-platform progress indicator
 - **Interactive TUI** — Full terminal UI with live usage data, color-coded status, and keyboard shortcuts
@@ -114,7 +114,7 @@ codex-switch self-update --check
 
 | Command | Description |
 |---------|-------------|
-| `codex-switch use [alias]` | Switch to a profile. Omit alias to auto-select the best account by quota |
+| `codex-switch use [alias] [-m mode]` | Switch to a profile. Omit alias to auto-select using the configured [selection mode](#selection-modes). `-m` overrides the default mode |
 | `codex-switch list [-f]` | List all profiles with account info, usage, and availability (`-f` force refresh) |
 | `codex-switch login [--device] [alias]` | Log in via OAuth (`--device` for headless servers). If alias exists, re-authorizes |
 | `codex-switch rename <old> <new>` | Rename a profile |
@@ -203,6 +203,11 @@ ttl = 300  # Cache TTL in seconds (default: 300)
 
 [network]
 max_concurrent = 20  # Max concurrent usage requests (default: 20)
+
+[use]
+mode = "max-remaining"      # Selection mode: max-remaining | drain-first | round-robin
+min_remaining = 5           # drain-first: demote accounts below this 5h remaining% (default: 5)
+safety_margin_7d = 20       # 7d safety margin: penalty kicks in below this remaining% (default: 20)
 ```
 
 ### Examples
@@ -293,16 +298,138 @@ If the input path is a directory, the command scans recursively for `.json` file
 
 ### Smart Auto-Switch (`codex-switch use`)
 
-When called without an alias, `codex-switch use` first consumes fresh cached entries, then only refreshes stale accounts and scores them:
+When called without an alias, `codex-switch use` scores every account and switches to the highest-scoring one. It first consumes fresh cached entries and only refreshes stale accounts.
 
-1. Weekly (7d) limit at 100% → heavily penalized (account unusable)
-2. 5h window has remaining quota → high score (1000 + remaining %)
-3. 5h window exhausted, weekly OK → medium score (based on reset time)
-4. **Team account bonus** → Team plan accounts receive a +20 scoring bonus, so they are preferred when quotas are similar
+The algorithm uses a **two-phase** approach:
+1. **Eligibility check** — accounts that are exhausted or have critically low 7d quota with distant resets are filtered out. If ALL accounts are ineligible, the best-scoring one is used as a fallback.
+2. **Scoring** — eligible accounts are ranked by 5h-based mode score + 7d health adjustment.
 
-The highest-scoring account is selected and switched to.
+**Team account bonus** — Team plan accounts receive a +20 scoring bonus in `max-remaining` and `drain-first` modes. In `round-robin` mode, team accounts are placed in a higher tier so they are always preferred over non-team accounts.
 
 > **Note:** After switching accounts, you must **restart Codex** for it to pick up the new `auth.json`. The Codex CLI reads `auth.json` at startup and does not watch for file changes.
+
+### How Scoring Works
+
+**5h determines "who to use", 7d determines "how safe it is to use them".**
+
+```
+final_score = 5h_mode_score + 7d_adjustment
+```
+
+The 5h window is the primary factor — it decides which account to use right now. The 7d window acts as a safety modifier: when weekly quota gets low, it gradually penalizes the account, but cannot completely override a strong 5h advantage. This ensures short-term usability while protecting against long-term exhaustion.
+
+#### 7d Health Adjustment (all modes)
+
+Applied additively after 5h scoring (range: -300 to 0):
+
+- **7d remaining >= safety margin (default 20%)** → no penalty (safe zone)
+- **7d remaining < safety margin** → penalty increases as remaining% drops
+- **7d resets within 48h** → penalty is reduced (up to 80% relief), since the weekly quota will recover soon
+- **7d resets far away** → full penalty, since exhausting 7d means days of lockout
+- **No 7d data** → mild penalty (-50) for unknown state
+
+The max penalty of 300 is enough to tip close 5h races but cannot override a large 5h advantage — keeping 5h as the primary decision factor.
+
+#### Eligibility Gate
+
+Accounts are marked **ineligible** when:
+- Either window is fully exhausted (≥100%), OR
+- 7d remaining < critical threshold (25% of safety margin, min 1%) AND 7d resets more than 48h away
+
+Ineligible accounts are excluded from selection unless ALL accounts are ineligible, in which case the best-scoring one is used as a last resort.
+
+### Selection Modes
+
+Three modes control how the 5h window is scored. The 7d adjustment is applied identically across all modes.
+
+| Mode | CLI flag | Description |
+|------|----------|-------------|
+| `max-remaining` | `-m max-remaining` | **Default.** Pick the account with the most remaining 5h quota |
+| `drain-first` | `-m drain-first` | Prefer accounts whose 5h reset is imminent — spend "free" quota first |
+| `round-robin` | `-m round-robin` | Rotate through eligible accounts evenly |
+
+#### `max-remaining` (default)
+
+**Strategy: maximize immediate headroom.**
+
+Selects the account with the most remaining quota in the 5h window. Simple and predictable — always gives you the account that can handle the longest session right now.
+
+5h scoring:
+1. 7d at 100% → heavily penalized (account unusable, score 0–100)
+2. 5h has remaining quota → score = `1000 + remaining%` (range 1000–1100)
+3. 5h exhausted, 7d OK → medium score based on time until 5h reset (range 0–500)
+4. No usage data → neutral score (50)
+
+**Best for:** single-account setups, or when you always want the "fullest" account.
+
+#### `drain-first`
+
+**Strategy: spend quota that will be "free" soon, preserve quota that won't.**
+
+The key insight: if an account's 5h window resets in 30 minutes, any quota you spend now is effectively free — it comes back soon regardless. Meanwhile, an account with 4 hours until reset should be saved as a reserve.
+
+5h scoring:
+1. 7d at 100% → heavily penalized (score 0–100)
+2. 5h remaining below `min_remaining` threshold (default 5%) → demoted (score 500–600). Too little quota to sustain a session, but still ranks above fully exhausted accounts
+3. 5h has remaining quota above threshold → score = `1000 + reset_urgency_bonus` (range 1000–1300). Closer to reset = higher bonus
+4. 5h exhausted → medium score based on time until reset (range 0–500)
+
+**Example with 5 accounts (all 7d healthy):**
+
+| Account | 5h Used | 5h Resets in | 5h Score | 7d Adj | Final | Why |
+|---------|---------|-------------|----------|--------|-------|-----|
+| C | 60% | 20 min | ~1280 | 0 | ~1280 | Decent quota + resets very soon → spend "free" quota |
+| D | 40% | 45 min | ~1255 | 0 | ~1255 | Good quota + resets soon → second choice |
+| A | 10% | 4h | ~1060 | 0 | ~1060 | Lots of quota but distant reset → save as reserve |
+| B | 97% | 10 min | ~597 | 0 | ~597 | Below threshold → demoted despite imminent reset |
+| E | 100% | 2h | ~380 | 0 | ~380 | Exhausted → wait for reset |
+
+**Example showing 7d impact:**
+
+| Account | 5h Used | 5h Resets | 7d Used | 7d Resets | 5h Score | 7d Adj | Final |
+|---------|---------|-----------|---------|-----------|----------|--------|-------|
+| A | 0% | 30 min | 10% | 5d | 1300 | 0 | **1300** |
+| B | 50% | 2h | 30% | 4d | 1120 | 0 | **1120** |
+| C | 0% | 30 min | 90% | 12h | 1300 | -60 | **1240** |
+| D | 0% | 30 min | 95% | 6d | 1300 | -225 | **1075** |
+
+Account D has full 5h quota but 7d is critical (5% remaining, 6 days to reset) — the -225 penalty drops it below B despite its 5h advantage.
+
+**Best for:** 3+ accounts where you want seamless rotation and maximum total throughput.
+
+#### `round-robin`
+
+**Strategy: spread wear evenly across all accounts.**
+
+Ignores quota levels (beyond eligibility). Picks the eligible account that was least recently selected by `codex-switch use`. Team accounts are placed in a higher tier and always preferred over non-team accounts.
+
+Scoring:
+1. Ineligible accounts (exhausted or 7d-critical with distant reset) → excluded
+2. Team accounts → higher tier, least recently used wins within tier
+3. Non-team accounts → lower tier, least recently used wins within tier
+
+**Best for:** large account pools where even distribution matters more than optimal quota utilization.
+
+### Configuring the Selection Mode
+
+**CLI flag (per-invocation override):**
+
+```bash
+codex-switch use -m drain-first
+codex-switch use --mode round-robin
+```
+
+**Config file (persistent default):**
+
+```toml
+# ~/.codex-switch/config.toml
+[use]
+mode = "max-remaining"      # max-remaining | drain-first | round-robin
+min_remaining = 5           # drain-first: demote accounts below this 5h remaining% (default: 5)
+safety_margin_7d = 20       # 7d safety margin: penalty kicks in below this remaining% (default: 20)
+```
+
+CLI `-m` flag always overrides the config file setting.
 
 ### Cache Behavior
 

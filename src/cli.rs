@@ -10,6 +10,16 @@ pub enum ColorMode {
     Never,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SelectMode {
+    /// Pick the account with the most remaining quota (default)
+    MaxRemaining,
+    /// Prefer accounts whose reset is imminent, saving slow-to-reset quota for later
+    DrainFirst,
+    /// Rotate through available accounts evenly
+    RoundRobin,
+}
+
 #[derive(Parser)]
 #[command(
     name = "codex-switch",
@@ -52,13 +62,16 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Switch to a profile; omit alias to auto-select the best available account
+    /// Switch to a profile; omit alias to auto-select using the configured selection mode
     Use {
-        /// Profile alias (omit to auto-select by remaining quota)
+        /// Profile alias (omit to auto-select using selection mode)
         alias: Option<String>,
         /// Force switch even if Codex processes are running
         #[arg(long)]
         force: bool,
+        /// Selection mode for auto-select (overrides config file)
+        #[arg(long, short = 'm', value_enum)]
+        mode: Option<SelectMode>,
     },
     /// List all profiles with account info, usage, and availability
     List {

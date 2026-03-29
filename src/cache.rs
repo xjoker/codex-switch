@@ -27,6 +27,9 @@ struct CacheEntry {
 #[derive(Serialize, Deserialize, Default)]
 struct CacheFile {
     entries: HashMap<String, CacheEntry>,
+    /// Tracks the last time each profile was selected by `use` (unix seconds).
+    #[serde(default)]
+    last_used: HashMap<String, i64>,
 }
 
 fn cache_path() -> PathBuf {
@@ -130,16 +133,44 @@ pub fn put(alias: &str, usage: &UsageInfo) {
     }
 }
 
+/// Get the last-used timestamp for an alias (0 if never used).
+pub fn get_last_used(alias: &str) -> i64 {
+    let _lock = CACHE_LOCK.lock().ok();
+    let cache = load_cache();
+    cache.last_used.get(alias).copied().unwrap_or(0)
+}
+
+/// Record that an alias was just selected by `use`.
+pub fn set_last_used(alias: &str) {
+    let _lock = CACHE_LOCK.lock().ok();
+    let mut cache = load_cache();
+    cache
+        .last_used
+        .insert(alias.to_string(), crate::auth::now_unix_secs());
+    if let Err(err) = save_cache(&cache) {
+        tracing::warn!("Failed to write cache (last_used): {err}");
+    }
+}
+
 pub fn rename(old: &str, new: &str) -> Result<()> {
     let _lock = CACHE_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("cache lock poisoned"))?;
     let mut cache = load_cache();
-    let Some(entry) = cache.entries.remove(old) else {
-        return Ok(());
-    };
-    cache.entries.insert(new.to_string(), entry);
-    save_cache(&cache)
+    // Migrate entries and last_used independently — either may exist without the other.
+    let mut changed = false;
+    if let Some(entry) = cache.entries.remove(old) {
+        cache.entries.insert(new.to_string(), entry);
+        changed = true;
+    }
+    if let Some(ts) = cache.last_used.remove(old) {
+        cache.last_used.insert(new.to_string(), ts);
+        changed = true;
+    }
+    if changed {
+        save_cache(&cache)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

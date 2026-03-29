@@ -66,7 +66,7 @@ async fn main() {
 
 async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
     match cmd {
-        Commands::Use { alias, force } => use_cmd(alias.as_deref(), force, json).await?,
+        Commands::Use { alias, force, mode } => use_cmd(alias.as_deref(), force, mode, json).await?,
         Commands::List { force } => list_cmd(force, json).await?,
         Commands::Rename { old, new } => rename_cmd(&old, &new, json)?,
         Commands::Delete { alias } => delete_cmd(&alias, json)?,
@@ -83,7 +83,7 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
 
 // ── use ──────────────────────────────────────────────────
 
-async fn use_cmd(alias: Option<&str>, force: bool, json: bool) -> Result<()> {
+async fn use_cmd(alias: Option<&str>, force: bool, mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
     if !force {
         let procs = process::detect_codex_processes();
         if !procs.is_empty() {
@@ -109,6 +109,7 @@ async fn use_cmd(alias: Option<&str>, force: bool, json: bool) -> Result<()> {
     match alias {
         Some(a) => {
             profile::cmd_use(a)?;
+            cache::set_last_used(a);
             if json {
                 print_json(&output::JsonOk {
                     ok: true,
@@ -117,7 +118,7 @@ async fn use_cmd(alias: Option<&str>, force: bool, json: bool) -> Result<()> {
                 });
             }
         }
-        None => best_cmd(json).await?,
+        None => best_cmd(mode, json).await?,
     }
     Ok(())
 }
@@ -433,7 +434,9 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
 
 // ── best (internal, called by `use` with no alias) ────────
 
-async fn best_cmd(json: bool) -> Result<()> {
+async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
+    use config::ConfigSelectMode;
+
     let profiles = profile::list_profiles()?;
     if profiles.is_empty() {
         if json {
@@ -444,6 +447,10 @@ async fn best_cmd(json: bool) -> Result<()> {
         return Ok(());
     }
 
+    let mode = config::resolve_select_mode(cli_mode);
+    let min_remaining = config::get().use_cfg.min_remaining;
+    let safety_7d = config::get().use_cfg.safety_margin_7d;
+
     let current = profile::read_current();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
         config::get().network.max_concurrent,
@@ -453,16 +460,32 @@ async fn best_cmd(json: bool) -> Result<()> {
     let mut scored: Vec<(String, usage::UsageInfo, f64)> = Vec::with_capacity(profiles.len());
 
     /// Team accounts get a +20 bonus so they are preferred when quotas are similar.
+    /// (Not used for round-robin, which handles team preference via tier separation.)
     const TEAM_BONUS: f64 = 20.0;
+
+    let score_fn = |alias: &str, u: &usage::UsageInfo| -> f64 {
+        let path = profile::profile_auth_path(alias);
+        let is_team = auth::read_account_info(&path).is_team();
+        match mode {
+            ConfigSelectMode::MaxRemaining => {
+                let base = usage::score(u, safety_7d);
+                base + if is_team { TEAM_BONUS } else { 0.0 }
+            }
+            ConfigSelectMode::DrainFirst => {
+                let base = usage::score_drain_first(u, min_remaining, safety_7d);
+                base + if is_team { TEAM_BONUS } else { 0.0 }
+            }
+            ConfigSelectMode::RoundRobin => {
+                // round-robin handles team preference internally via tier separation
+                usage::score_round_robin(u, cache::get_last_used(alias), is_team, safety_7d)
+            }
+        }
+    };
 
     for alias in profiles {
         if let Some(cached) = cache::get(&alias) {
-            let mut score = usage::score(&cached);
-            let path = profile::profile_auth_path(&alias);
-            if auth::read_account_info(&path).is_team() {
-                score += TEAM_BONUS;
-            }
-            scored.push((alias, cached, score));
+            let s = score_fn(&alias, &cached);
+            scored.push((alias, cached, s));
             continue;
         }
 
@@ -498,12 +521,8 @@ async fn best_cmd(json: bool) -> Result<()> {
         if let Some((alias, usage)) =
             task.map_err(|e| anyhow::anyhow!("usage worker failed: {e}"))?
         {
-            let mut score = usage::score(&usage);
-            let path = profile::profile_auth_path(&alias);
-            if auth::read_account_info(&path).is_team() {
-                score += TEAM_BONUS;
-            }
-            scored.push((alias, usage, score));
+            let s = score_fn(&alias, &usage);
+            scored.push((alias, usage, s));
         }
     }
 
@@ -520,10 +539,31 @@ async fn best_cmd(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    let (best_alias, best_usage, best_score) = scored.remove(0);
+    // Phase 1: prefer eligible accounts; fall back to all if none are eligible.
+    let mut eligible: Vec<(String, usage::UsageInfo, f64)> = scored
+        .iter()
+        .filter(|(_, u, _)| usage::is_eligible(u, safety_7d))
+        .cloned()
+        .collect();
+
+    let pool = if eligible.is_empty() {
+        &mut scored
+    } else {
+        &mut eligible
+    };
+
+    // Phase 2: sort by score and pick the best.
+    pool.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    let (best_alias, best_usage, best_score) = pool.remove(0);
 
     profile::switch_profile(&best_alias)?;
+    cache::set_last_used(&best_alias);
+
+    let mode_label = match mode {
+        ConfigSelectMode::MaxRemaining => "max-remaining",
+        ConfigSelectMode::DrainFirst => "drain-first",
+        ConfigSelectMode::RoundRobin => "round-robin",
+    };
 
     let path = profile::profile_auth_path(&best_alias);
     let info = auth::read_account_info(&path);
@@ -534,9 +574,13 @@ async fn best_cmd(json: bool) -> Result<()> {
             account: account_to_json(&info),
             usage: usage_to_json(Ok(&best_usage)),
             score: best_score,
+            mode: mode_label.to_string(),
         });
     } else {
-        println!("{}", color::success(&format!("Switched to: {best_alias}")));
+        println!(
+            "{} (mode: {mode_label})",
+            color::success(&format!("Switched to: {best_alias}"))
+        );
         print!("  ");
         print_usage_line(&best_usage);
     }
