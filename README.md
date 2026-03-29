@@ -54,7 +54,7 @@ brew install xjoker/tap/codex-switch
 CS_VERSION=0.0.9 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
 
 # Windows
-$env:CS_VERSION="0.0.8"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+$env:CS_VERSION="0.0.9"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
 ```
 
 ### From GitHub Releases (Manual)
@@ -507,6 +507,10 @@ cargo build --release --target x86_64-unknown-linux-musl
 rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
 ```
+
+## Changelog
+
+See [docs/CHANGELOG.md](docs/CHANGELOG.md) for a detailed list of changes in each release.
 
 ## License
 
