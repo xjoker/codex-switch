@@ -12,11 +12,11 @@ pub enum ColorMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SelectMode {
-    /// Pick the account with the most remaining quota (default)
+    /// Pick the account with the most remaining quota (config default)
     MaxRemaining,
     /// Prefer accounts whose reset is imminent, saving slow-to-reset quota for later
     DrainFirst,
-    /// Rotate through available accounts evenly
+    /// Rotate through eligible accounts evenly (least recently used first)
     RoundRobin,
 }
 

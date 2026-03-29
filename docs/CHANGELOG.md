@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.0.9 — 2026-03-29
+
+### Added
+
+- **Selection modes for `use` command** — Three modes control auto-select behavior via `--mode`/`-m` flag or `[use].mode` config:
+  - `max-remaining` (default): pick the account with the most remaining 5h quota
+  - `drain-first`: prefer accounts whose 5h reset is imminent — spend "free" quota first, save slow-to-reset quota as reserve. Accounts below `min_remaining` threshold (default 5%) are demoted
+  - `round-robin`: rotate through eligible accounts evenly by least-recently-used order; team accounts are preferred in a higher tier
+- **7d-aware scoring** — All scoring modes now consider the 7d (weekly) window as a safety modifier:
+  - Two-phase selection: eligibility gate filters exhausted or 7d-critical accounts, then scoring ranks the rest
+  - 7d health adjustment (max-remaining & drain-first): additive penalty (-300 to 0) when 7d remaining falls below `safety_margin_7d` (default 20%), with up to 80% relief when 7d resets within 48h
+  - Accounts with critically low 7d remaining and distant reset are marked ineligible (unless all accounts are in this state)
+- **Round-robin last-used tracking** — `cache.json` now tracks when each profile was last selected by `use`, enabling fair rotation
+- **New config options** — `[use]` section in `config.toml`:
+  - `mode` — default selection mode (default: `max-remaining`)
+  - `min_remaining` — drain-first 5h demotion threshold in % (default: 5)
+  - `safety_margin_7d` — 7d safety margin in % (default: 20)
+- **JSON output includes mode** — `codex-switch --json use` now includes the `mode` field in the response
+
+### Changed
+
+- **Explicit `use <alias>` updates round-robin history** — Manual account switches are now tracked for round-robin rotation, preventing re-selection of a just-used account
+- **Cache rename preserves last-used data** — `rename` now independently migrates both usage cache and last-used timestamps
+
 ## v0.0.8 — 2026-03-28
 
 ### Fixed

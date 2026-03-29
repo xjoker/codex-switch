@@ -51,7 +51,7 @@ brew install xjoker/tap/codex-switch
 
 ```bash
 # macOS / Linux
-CS_VERSION=0.0.8 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+CS_VERSION=0.0.9 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
 
 # Windows
 $env:CS_VERSION="0.0.8"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
@@ -162,7 +162,7 @@ codex-switch self-update --check
 codex-switch self-update
 
 # 更新到指定的新版本
-codex-switch self-update --version 0.0.8
+codex-switch self-update --version 0.0.9
 ```
 
 - Homebrew 安装不会被程序自行覆盖，请使用 `brew upgrade xjoker/tap/codex-switch`
@@ -312,12 +312,15 @@ codex-switch --debug use
 **5h 决定"用谁"，7d 决定"敢不敢用"。**
 
 ```
-最终分数 = 5h 模式分数 + 7d 调整量
+最终分数 = 5h 模式分数 + 7d 调整量   (max-remaining 和 drain-first)
+最终分数 = Team 层级 + 最久未使用      (round-robin)
 ```
 
-5h 窗口是主要因素 — 决定当前应该使用哪个账号。7d 窗口作为安全修正：当周配额偏低时，逐步惩罚该账号，但不会完全推翻一个强势的 5h 优势。这样既保证了短期可用性，又防止了长期耗尽。
+对于 `max-remaining` 和 `drain-first`，5h 窗口是主要因素 — 决定当前应该使用哪个账号。7d 窗口作为安全修正：当周配额偏低时，逐步惩罚该账号，但不会完全推翻一个强势的 5h 优势。
 
-#### 7d 健康度调整（所有模式通用）
+对于 `round-robin`，不使用 7d 调整量。取而代之的是准入门槛会过滤掉 7d 严重不足的账号，剩余合格账号按最久未使用的顺序轮换。
+
+#### 7d 健康度调整（max-remaining 和 drain-first）
 
 在 5h 评分后以加法叠加（范围：-300 到 0）：
 
@@ -339,7 +342,7 @@ codex-switch --debug use
 
 ### 选择模式
 
-三种模式控制 5h 窗口的评分方式。7d 调整在所有模式中统一应用。
+三种模式控制账号的排名方式。7d 调整应用于 `max-remaining` 和 `drain-first`；`round-robin` 仅通过准入门槛来保护 7d 配额。
 
 | 模式 | CLI 参数 | 说明 |
 |------|----------|------|
@@ -388,7 +391,7 @@ codex-switch --debug use
 | 账号 | 5h 已用 | 5h 重置 | 7d 已用 | 7d 重置 | 5h 分数 | 7d 调整 | 最终 |
 |------|---------|---------|---------|---------|---------|---------|------|
 | A | 0% | 30 分钟 | 10% | 5 天 | 1300 | 0 | **1300** |
-| B | 50% | 2 小时 | 30% | 4 天 | 1120 | 0 | **1120** |
+| B | 50% | 2 小时 | 30% | 4 天 | 1180 | 0 | **1180** |
 | C | 0% | 30 分钟 | 90% | 12 小时 | 1300 | -60 | **1240** |
 | D | 0% | 30 分钟 | 95% | 6 天 | 1300 | -225 | **1075** |
 

@@ -51,7 +51,7 @@ brew install xjoker/tap/codex-switch
 
 ```bash
 # macOS / Linux
-CS_VERSION=0.0.8 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+CS_VERSION=0.0.9 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
 
 # Windows
 $env:CS_VERSION="0.0.8"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
@@ -163,7 +163,7 @@ codex-switch self-update --check
 codex-switch self-update
 
 # Update to a specific newer version
-codex-switch self-update --version 0.0.8
+codex-switch self-update --version 0.0.9
 ```
 
 - Homebrew installs are not self-overwritten. Use `brew upgrade xjoker/tap/codex-switch`.
@@ -313,12 +313,15 @@ The algorithm uses a **two-phase** approach:
 **5h determines "who to use", 7d determines "how safe it is to use them".**
 
 ```
-final_score = 5h_mode_score + 7d_adjustment
+final_score = 5h_mode_score + 7d_adjustment   (max-remaining & drain-first)
+final_score = team_tier + least_recently_used   (round-robin)
 ```
 
-The 5h window is the primary factor — it decides which account to use right now. The 7d window acts as a safety modifier: when weekly quota gets low, it gradually penalizes the account, but cannot completely override a strong 5h advantage. This ensures short-term usability while protecting against long-term exhaustion.
+For `max-remaining` and `drain-first`, the 5h window is the primary factor — it decides which account to use right now. The 7d window acts as a safety modifier: when weekly quota gets low, it gradually penalizes the account, but cannot completely override a strong 5h advantage.
 
-#### 7d Health Adjustment (all modes)
+For `round-robin`, the 7d adjustment is not used. Instead, the eligibility gate filters out 7d-critical accounts, and remaining eligible accounts are rotated by least-recently-used order.
+
+#### 7d Health Adjustment (max-remaining & drain-first)
 
 Applied additively after 5h scoring (range: -300 to 0):
 
@@ -340,7 +343,7 @@ Ineligible accounts are excluded from selection unless ALL accounts are ineligib
 
 ### Selection Modes
 
-Three modes control how the 5h window is scored. The 7d adjustment is applied identically across all modes.
+Three modes control how accounts are ranked. The 7d adjustment is applied to `max-remaining` and `drain-first`; `round-robin` relies solely on the eligibility gate for 7d protection.
 
 | Mode | CLI flag | Description |
 |------|----------|-------------|
@@ -389,7 +392,7 @@ The key insight: if an account's 5h window resets in 30 minutes, any quota you s
 | Account | 5h Used | 5h Resets | 7d Used | 7d Resets | 5h Score | 7d Adj | Final |
 |---------|---------|-----------|---------|-----------|----------|--------|-------|
 | A | 0% | 30 min | 10% | 5d | 1300 | 0 | **1300** |
-| B | 50% | 2h | 30% | 4d | 1120 | 0 | **1120** |
+| B | 50% | 2h | 30% | 4d | 1180 | 0 | **1180** |
 | C | 0% | 30 min | 90% | 12h | 1300 | -60 | **1240** |
 | D | 0% | 30 min | 95% | 6d | 1300 | -225 | **1075** |
 
