@@ -42,7 +42,7 @@ futures = { version = "0.3", default-features = false, features = ["executor"] }
 supports-color = "3"
 owo-colors = "4"
 tar = "0.4"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [profile.release]
 strip = true
