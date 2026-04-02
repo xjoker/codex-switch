@@ -474,6 +474,7 @@ When a usage query returns HTTP 401/403, the tool automatically attempts to refr
 - File manager opens via `explorer.exe`
 - Terminal: works with Windows Terminal, PowerShell, and cmd.exe
 - TUI rendering uses Windows Console API via `crossterm`
+- **Recommended terminal: [Windows Terminal](https://aka.ms/terminal).** Git Bash (mintty) has known compatibility issues with TUI rendering — use Windows Terminal or PowerShell instead
 
 ## JSON Output
 

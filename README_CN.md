@@ -473,6 +473,7 @@ CLI `-m` 参数始终覆盖配置文件中的设置。
 - 文件管理器通过 `explorer.exe` 打开
 - 终端：支持 Windows Terminal、PowerShell 和 cmd.exe
 - TUI 通过 `crossterm` 使用 Windows Console API 渲染
+- **推荐终端：[Windows Terminal](https://aka.ms/terminal)。** Git Bash（mintty）与 TUI 渲染存在已知兼容性问题，请使用 Windows Terminal 或 PowerShell
 
 ## JSON 输出
 
