@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.0.10 — 2026-04-02
+
+### Changed
+
+- **Dependency upgrades** — Bumped `rand` 0.9→0.10, `sha2` 0.10→0.11, `toml` 1.1.0→1.1.1, `zip` 2.4→8.4
+- **Windows terminal recommendation** — README now recommends Windows Terminal over Git Bash (mintty) for TUI, due to known crossterm compatibility issues
+
+### Fixed
+
+- **Clippy warnings** — Replaced manual `Default` impl with `#[derive(Default)]` on `ConfigSelectMode`; used `RangeInclusive::contains` in test assertion
+
 ## v0.0.9 — 2026-03-29
 
 ### Added
