@@ -61,18 +61,13 @@ impl Default for NetworkConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConfigSelectMode {
+    #[default]
     MaxRemaining,
     DrainFirst,
     RoundRobin,
-}
-
-impl Default for ConfigSelectMode {
-    fn default() -> Self {
-        Self::MaxRemaining
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

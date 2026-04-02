@@ -1109,7 +1109,7 @@ mod tests {
         let sb = score_drain_first(&b, 5.0, 20.0);
 
         assert!(sb > sa, "drain-first should demote below-threshold: {sb} > {sa}");
-        assert!(sa >= 500.0 && sa <= 600.0, "demoted score in 500-600 range: {sa}");
+        assert!((500.0..=600.0).contains(&sa), "demoted score in 500-600 range: {sa}");
     }
 
     #[test]
