@@ -268,6 +268,15 @@ impl App {
         self.set_status(format!("Refreshing {count} marked account(s)..."), 3);
     }
 
+    /// Returns true if the account's 5h window is already active (has a reset time).
+    fn is_already_warmed(&self, alias: &str) -> bool {
+        self.accounts.iter().any(|a| {
+            a.alias == alias
+                && matches!(&a.usage, UsageStatus::Loaded(u)
+                    if u.primary.as_ref().and_then(|w| w.resets_at).is_some())
+        })
+    }
+
     pub fn warmup_selected(&mut self) {
         let entry = match self
             .selected_account_idx()
@@ -277,13 +286,26 @@ impl App {
             None => return,
         };
         let alias = entry.alias.clone();
+        if self.is_already_warmed(&alias) {
+            self.set_status(format!("{alias} already active, skipped"), 4);
+            return;
+        }
         self.spawn_warmup(alias.clone());
         self.set_status(format!("Warming up {alias}..."), 10);
     }
 
     pub fn warmup_all(&mut self) {
-        let aliases: Vec<String> = self.accounts.iter().map(|a| a.alias.clone()).collect();
+        let aliases: Vec<String> = self
+            .accounts
+            .iter()
+            .filter(|a| {
+                !matches!(&a.usage, UsageStatus::Loaded(u)
+                    if u.primary.as_ref().and_then(|w| w.resets_at).is_some())
+            })
+            .map(|a| a.alias.clone())
+            .collect();
         if aliases.is_empty() {
+            self.set_status("All accounts already active".into(), 4);
             return;
         }
         let count = aliases.len();

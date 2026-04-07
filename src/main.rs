@@ -1157,12 +1157,45 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
     }
 
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(aliases.len());
+
+    // Filter out accounts whose 5h window is already active (has a reset time).
+    let mut to_warmup = Vec::new();
+    for alias in &aliases {
+        let already_active = cache::get(alias)
+            .and_then(|u| u.primary)
+            .and_then(|w| w.resets_at)
+            .is_some();
+        if already_active {
+            if json {
+                results.push(serde_json::json!({"alias": alias, "ok": true, "skipped": true}));
+            } else {
+                user_println(&format!(
+                    "  {} {}",
+                    color::dim(alias),
+                    color::dim("already active, skipped")
+                ));
+            }
+        } else {
+            to_warmup.push(alias.clone());
+        }
+    }
+
+    if to_warmup.is_empty() {
+        if json {
+            results.sort_by(|a, b| {
+                a["alias"].as_str().unwrap_or("").cmp(b["alias"].as_str().unwrap_or(""))
+            });
+            print_json(&serde_json::json!({"ok": true, "results": results}));
+        }
+        return Ok(());
+    }
+
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
         config::get().network.max_concurrent,
     ));
 
     let mut tasks = tokio::task::JoinSet::new();
-    for alias in aliases {
+    for alias in to_warmup {
         let path = profile::profile_auth_path(&alias);
         let sem = semaphore.clone();
         tasks.spawn(async move {
