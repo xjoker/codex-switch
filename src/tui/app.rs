@@ -78,6 +78,7 @@ pub struct App {
     pub result_sender: tokio::sync::mpsc::Sender<(String, Result<UsageInfo, UsageError>)>,
     pub pending_warmup: tokio::sync::mpsc::Receiver<(String, Result<(), String>)>,
     pub warmup_sender: tokio::sync::mpsc::Sender<(String, Result<(), String>)>,
+    pub warming_up: BTreeSet<String>,
     pub confirm: Option<ConfirmAction>,
     pub rename: Option<RenameState>,
     pub usage_limiter: Arc<Semaphore>,
@@ -101,6 +102,7 @@ impl App {
             result_sender: tx,
             pending_warmup: warmup_rx,
             warmup_sender: warmup_tx,
+            warming_up: BTreeSet::new(),
             confirm: None,
             rename: None,
             usage_limiter: Arc::new(Semaphore::new(crate::config::get().network.max_concurrent)),
@@ -286,7 +288,10 @@ impl App {
         self.set_status(format!("Warming up {count} account(s)..."), 10);
     }
 
-    fn spawn_warmup(&self, alias: String) {
+    fn spawn_warmup(&mut self, alias: String) {
+        if !self.warming_up.insert(alias.clone()) {
+            return; // already in-flight for this alias
+        }
         let path = profile_auth_path(&alias);
         let tx = self.warmup_sender.clone();
         let limiter = self.usage_limiter.clone();
@@ -302,6 +307,7 @@ impl App {
     pub fn poll_warmup_results(&mut self) {
         let mut to_refresh = std::collections::BTreeSet::<String>::new();
         while let Ok((alias, result)) = self.pending_warmup.try_recv() {
+            self.warming_up.remove(&alias);
             match result {
                 Ok(()) => {
                     self.set_status(format!("Warmed up {alias} — refreshing usage..."), 4);
