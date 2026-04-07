@@ -110,9 +110,7 @@ pub async fn check_for_dev_update() -> Result<Option<UpdateInfo>> {
 
 pub async fn self_update(version: Option<&str>, show_progress: bool) -> Result<SelfUpdateResult> {
     let install_source = detect_install_source();
-    // If the user is currently on a dev build, allow direct update even on
-    // Homebrew so they can return to a stable release.
-    if install_source == InstallSource::Homebrew && !is_dev_version(current_version()) {
+    if install_source == InstallSource::Homebrew {
         anyhow::bail!(
             "Homebrew-managed install detected. Run `{}` instead.",
             install_source.upgrade_hint()
@@ -205,11 +203,12 @@ pub async fn self_update(version: Option<&str>, show_progress: bool) -> Result<S
 /// same `X.Y.Z-dev` each time, but the underlying binary may be newer).
 /// Switching from dev→stable uses the normal `self_update` path.
 pub async fn self_update_dev(show_progress: bool) -> Result<SelfUpdateResult> {
-    // Dev channel bypasses Homebrew detection — allow Homebrew users to
-    // install dev builds.  The binary will be replaced in-place; running
-    // `codex-switch self-update` (without --dev) later will restore the
-    // latest stable release via the same direct-install path.
     let install_source = detect_install_source();
+    if install_source == InstallSource::Homebrew {
+        anyhow::bail!(
+            "codex-switch is installed via Homebrew. Please run `brew uninstall codex-switch` first, then use the install script or `self-update --dev` again."
+        );
+    }
 
     let current_version = current_version().to_string();
     let release = fetch_release(Some("dev"))

@@ -39,6 +39,17 @@ case "$ARCH" in
   *)               error "Unsupported architecture: $ARCH" ;;
 esac
 
+# Check for Homebrew-installed codex-switch
+BREW_BIN="$(command -v codex-switch 2>/dev/null || true)"
+if [ -n "$BREW_BIN" ]; then
+  RESOLVED="$(readlink -f "$BREW_BIN" 2>/dev/null || realpath "$BREW_BIN" 2>/dev/null || echo "$BREW_BIN")"
+  case "$RESOLVED" in
+    */Cellar/codex-switch/*|*/Homebrew/*)
+      error "codex-switch is installed via Homebrew ($BREW_BIN). Please run 'brew uninstall codex-switch' first, then re-run this installer."
+      ;;
+  esac
+fi
+
 ASSET_NAME="cs-${PLATFORM}-${ARCH_NAME}.tar.gz"
 
 # Get release URL
