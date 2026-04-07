@@ -115,6 +115,7 @@ codex-switch self-update --check
 |------|------|
 | `codex-switch use [别名] [-m 模式]` | 切换账号。不带别名则按配置的[选择模式](#选择模式)自动选择最优账号。`-m` 覆盖默认模式 |
 | `codex-switch list [-f]` | 显示所有账号信息、用量和可用状态（`-f` 强制刷新，忽略缓存） |
+| `codex-switch warmup [别名]` | 发送最小请求以触发 5h/7d 配额窗口倒计时。不带别名则预热所有账号 |
 | `codex-switch login [--device] [别名]` | OAuth 登录（`--device` 用于无浏览器的服务器）。若别名已存在则重新授权 |
 | `codex-switch rename <旧别名> <新别名>` | 重命名账号 |
 | `codex-switch delete <别名>` | 删除账号 |
@@ -145,6 +146,8 @@ codex-switch self-update --check
 | `s` | 切换排序（名称/配额/状态） |
 | `Space` | 标记/取消标记账号 |
 | `b` | 批量刷新已标记账号 |
+| `w` | 预热选中账号（触发配额窗口倒计时） |
+| `W` | 预热所有账号 |
 | `c` | 清除所有标记 |
 | `n` | 重命名选中账号 |
 | `d` | 删除选中账号（需确认） |

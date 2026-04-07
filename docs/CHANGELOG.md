@@ -4,17 +4,29 @@
 
 ### Added
 
-- **Startup auth change detection** — On launch, codex-switch now compares the live `~/.codex/auth.json` against all saved profiles. If a new account is detected (e.g., user ran `codex login`), prompts to save as a new profile. If tokens were refreshed for an existing account, prompts to update the corresponding profile
-- **Non-interactive safety** — When stdin is not a TTY (pipes, cron, CI), startup detection informs the user but never silently mutates state. EOF on stdin is treated as rejection
+- **`warmup` command** — `codex-switch warmup [alias]` sends a minimal Codex request (`ping`) to activate the 5h/7d quota window countdown for a fresh account. Omit alias to warm up all saved profiles concurrently. Supports `--json` output with per-account results and a top-level `ok` field
+- **TUI warmup** — Press `w` to warm up the selected account or `W` to warm up all accounts. Usage is automatically refreshed after warmup completes
+- **Startup auth change detection** — On launch, codex-switch compares the live `~/.codex/auth.json` against all saved profiles. If a new account is detected (e.g., the user ran `codex login`), it prompts to save as a new profile. If tokens were refreshed for an existing account, it prompts to update the corresponding profile
+- **Non-interactive safety** — When stdin is not a TTY (pipes, cron, CI), startup detection informs without silently mutating state. EOF on stdin is treated as rejection
 
 ### Changed
 
+- **TUI usage gauges redesigned** — Bars now use block characters (`█` used, `░` remaining) with a `|` pace marker and an `XX% used / YY% left` suffix for clearer at-a-glance quota visibility. The pace marker label (`↑ pace`) is right-aligned alongside `resets in …` on row 2, and is suppressed automatically when there is not enough terminal width to avoid overlap
+- **JSON usage output extended** — `JsonWindow` now includes `remaining_percent`, `pace_percent`, and `over_pace` fields (all `skip_serializing_if = None`; existing fields are unchanged)
 - **Linux static linking** — Linux release binaries now use musl (static linking) instead of glibc, eliminating `GLIBC_2.xx not found` errors on older distributions. ARM64 Linux builds use `cross` for proper musl cross-compilation
+- **Cargo package name** — The crate `name` field in `Cargo.toml` changed from `cs` to `codex-switch`. The binary name was already `codex-switch` and is unaffected; only `cargo install`/source build workflows that referenced the old package name need updating
 
 ### Fixed
 
-- **Empty `account_id` treated as present** — `/tokens/account_id: ""` was not filtered, preventing the email-only identity fallback from triggering. Now empty strings are treated as `None`, consistent with JWT claims filtering
-- **`list` respects startup detection** — When the startup auth change check has already handled detection, `list` no longer runs `auto_track_current()` a second time, preventing silent saves after the user explicitly declined
+- **Gauge row-2 text overlap** — When the quota window is nearly expired and the pace marker sits near the right edge, `resets in …` is now right-aligned and `↑ pace` is only shown when there is space, preventing the two strings from running together
+- **Zero-width bar crash** — On extremely narrow terminals where `bar_width` computes to 0, the gauge now skips bar rendering entirely and shows only the reset time, instead of placing a pace marker at an out-of-bounds position
+- **Warmup `--json` double output** — On partial failure, `warmup_cmd` previously emitted a results object then let `main()` emit a second error object. Now a single `{"ok": false, "results": […]}` object is printed and the process exits with code 1
+- **Warmup UTF-8 truncation panic** — HTTP error bodies were truncated by byte index, which panicked on multi-byte UTF-8 characters. Now truncated by Unicode scalar count via `chars().take(160)`
+- **TUI warmup rate limiting** — `warmup_all` (`W`) now respects `network.max_concurrent` via the shared `usage_limiter` semaphore, consistent with usage fetch behaviour
+- **TUI warmup dedup and stale refresh** — Rapid `w`/`W` presses no longer trigger multiple forced refreshes for the same account. On warmup success the account always gets a fresh usage fetch so the newly opened quota window appears immediately
+- **`auto_track_current` current pointer sync** — When `auth.json` matches an existing saved profile but the `current` file points elsewhere, the pointer is now updated automatically instead of being left stale
+- **Empty `account_id` treated as present** — `/tokens/account_id: ""` was not filtered, preventing the email-only identity fallback. Empty strings are now treated as `None`, consistent with JWT claims filtering
+- **`list` respects startup detection** — When startup auth detection already handled the live `auth.json`, `list` no longer runs `auto_track_current()` a second time, preventing silent saves after an explicit user rejection
 
 ## v0.0.10 — 2026-04-02
 

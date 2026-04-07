@@ -116,6 +116,7 @@ codex-switch self-update --check
 |---------|-------------|
 | `codex-switch use [alias] [-m mode]` | Switch to a profile. Omit alias to auto-select using the configured [selection mode](#selection-modes). `-m` overrides the default mode |
 | `codex-switch list [-f]` | List all profiles with account info, usage, and availability (`-f` force refresh) |
+| `codex-switch warmup [alias]` | Send a minimal request to start the 5h/7d quota window countdown. Omit alias to warm up all profiles |
 | `codex-switch login [--device] [alias]` | Log in via OAuth (`--device` for headless servers). If alias exists, re-authorizes |
 | `codex-switch rename <old> <new>` | Rename a profile |
 | `codex-switch delete <alias>` | Delete a profile |
@@ -146,6 +147,8 @@ codex-switch self-update --check
 | `s` | Cycle sort mode (name / quota / status) |
 | `Space` | Mark / unmark account for batch operations |
 | `b` | Batch refresh marked accounts |
+| `w` | Warm up selected account (trigger quota window countdown) |
+| `W` | Warm up all accounts |
 | `c` | Clear all marks |
 | `n` | Rename selected profile |
 | `d` | Delete selected profile (with confirmation) |
@@ -279,7 +282,13 @@ If the issue persists, please [open an issue](https://github.com/xjoker/codex-sw
 
 ### Auto-Detection
 
-When you run `codex-switch list` or `codex-switch tui`, the tool checks if the live `~/.codex/auth.json` belongs to an untracked account. If so, it automatically saves it as a new profile (using the email username as alias).
+On every interactive launch, codex-switch compares the live `~/.codex/auth.json` against all saved profiles:
+
+- **New account detected** (e.g., you ran `codex login`) — prompts to save as a new profile
+- **Tokens refreshed** for an existing account — prompts to update that profile
+- **Non-interactive environments** (pipes, cron, CI) — reports the change but never mutates state silently
+
+When you run `codex-switch list` or `codex-switch tui`, the tool also checks if the live auth.json belongs to an untracked account and automatically saves it as a new profile (using the email username as alias).
 
 ### Deduplication
 
