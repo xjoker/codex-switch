@@ -314,10 +314,10 @@ impl App {
         }
         for alias in to_refresh {
             if let Some(idx) = self.accounts.iter().position(|a| a.alias == alias) {
-                if !matches!(self.accounts[idx].usage, UsageStatus::Loading) {
-                    self.accounts[idx].usage = UsageStatus::Idle;
-                    self.fetch_usage_for(idx, true);
-                }
+                // Always force a fresh fetch after warmup — reset to Idle even if currently
+                // Loading, so the post-warmup fetch reflects the newly opened quota window.
+                self.accounts[idx].usage = UsageStatus::Idle;
+                self.fetch_usage_for(idx, true);
             }
         }
     }

@@ -289,9 +289,19 @@ pub fn auto_track_current() -> bool {
         Err(_) => return false,
     };
     let identity = extract_identity(&val);
-    if find_profile_by_identity(&identity).is_none()
-        && let Ok(SaveAction::Created(a)) = cmd_save(None)
-    {
+
+    if let Some(matching) = find_profile_by_identity(&identity) {
+        // Profile already exists — sync the current pointer if it's out of date.
+        let current = read_current();
+        if current != matching {
+            if let Err(e) = write_current(&matching) {
+                tracing::debug!("auto_track_current: could not sync current pointer: {e}");
+            }
+        }
+        return false;
+    }
+
+    if let Ok(SaveAction::Created(a)) = cmd_save(None) {
         user_println(&format!("Auto-saved current account as profile: {a}"));
         return true;
     }

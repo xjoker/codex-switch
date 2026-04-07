@@ -1174,9 +1174,13 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
         results.sort_by(|a, b| {
             a["alias"].as_str().unwrap_or("").cmp(b["alias"].as_str().unwrap_or(""))
         });
-        print_json(&serde_json::json!({"results": results}));
-    }
-    if had_error {
+        // Embed overall status in JSON so callers get a single valid object.
+        // Use std::process::exit to signal failure without a second JSON error line.
+        print_json(&serde_json::json!({"ok": !had_error, "results": results}));
+        if had_error {
+            std::process::exit(1);
+        }
+    } else if had_error {
         anyhow::bail!("one or more warmup operations failed");
     }
     Ok(())
