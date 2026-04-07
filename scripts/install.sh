@@ -2,7 +2,10 @@
 set -euo pipefail
 
 # codex-switch installer for macOS and Linux
-# Usage: curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+# Usage:
+#   curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+#   curl -fsSL .../install.sh | bash -s -- --dev          # install latest dev build
+#   CS_VERSION=0.0.11 curl -fsSL .../install.sh | bash    # install specific version
 
 REPO="xjoker/codex-switch"
 INSTALL_DIR="/usr/local/bin"
@@ -10,6 +13,15 @@ BINARY_NAME="codex-switch"
 
 info()  { printf '\033[0;34m[info]\033[0m  %s\n' "$*"; }
 error() { printf '\033[0;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Parse arguments
+USE_DEV=false
+for arg in "$@"; do
+  case "$arg" in
+    --dev) USE_DEV=true ;;
+    *)     error "Unknown argument: $arg" ;;
+  esac
+done
 
 # Detect OS and architecture
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -29,12 +41,17 @@ esac
 
 ASSET_NAME="cs-${PLATFORM}-${ARCH_NAME}.tar.gz"
 
-# Get latest release URL (or use specified version)
-VERSION="${CS_VERSION:-latest}"
-if [ "$VERSION" = "latest" ]; then
-  DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
+# Get release URL
+if [ "$USE_DEV" = true ]; then
+  VERSION="dev"
+  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/dev/${ASSET_NAME}"
 else
-  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET_NAME}"
+  VERSION="${CS_VERSION:-latest}"
+  if [ "$VERSION" = "latest" ]; then
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
+  else
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET_NAME}"
+  fi
 fi
 
 info "Detected: ${PLATFORM}/${ARCH_NAME}"

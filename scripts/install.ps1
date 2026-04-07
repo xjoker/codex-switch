@@ -1,5 +1,8 @@
 # codex-switch installer for Windows
-# Usage: irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+# Usage:
+#   irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+#   $env:CS_DEV="1"; irm .../install.ps1 | iex           # install latest dev build
+#   $env:CS_VERSION="0.0.11"; irm .../install.ps1 | iex   # install specific version
 
 $ErrorActionPreference = "Stop"
 $Repo = "xjoker/codex-switch"
@@ -9,12 +12,18 @@ $BinaryName = "codex-switch.exe"
 $Arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") { "arm64" } else { "amd64" }
 $AssetName = "cs-windows-${Arch}.zip"
 
-# Determine version
-$Version = if ($env:CS_VERSION) { $env:CS_VERSION } else { "latest" }
-if ($Version -eq "latest") {
-    $DownloadUrl = "https://github.com/$Repo/releases/latest/download/$AssetName"
+# Determine version / channel
+$UseDev = $env:CS_DEV -eq "1"
+if ($UseDev) {
+    $Version = "dev"
+    $DownloadUrl = "https://github.com/$Repo/releases/download/dev/$AssetName"
 } else {
-    $DownloadUrl = "https://github.com/$Repo/releases/download/v$Version/$AssetName"
+    $Version = if ($env:CS_VERSION) { $env:CS_VERSION } else { "latest" }
+    if ($Version -eq "latest") {
+        $DownloadUrl = "https://github.com/$Repo/releases/latest/download/$AssetName"
+    } else {
+        $DownloadUrl = "https://github.com/$Repo/releases/download/v$Version/$AssetName"
+    }
 }
 
 Write-Host "[info]  Detected: windows/$Arch" -ForegroundColor Blue

@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+      - "dev"
 
 permissions:
   contents: write
@@ -17,16 +18,30 @@ jobs:
     outputs:
       version: ${{ steps.parse.outputs.version }}
       prerelease: ${{ steps.parse.outputs.prerelease }}
+      is_dev: ${{ steps.parse.outputs.is_dev }}
     steps:
+      - uses: actions/checkout@v6
       - name: Parse tag
         id: parse
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
-          if [[ "$TAG" == *-* ]]; then
+          RAW_TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$RAW_TAG" == "dev" ]]; then
+            # dev tag: use base version from Cargo.toml with -dev suffix
+            BASE=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            # Strip any existing pre-release suffix (e.g. "0.0.11-dev" -> "0.0.11")
+            BASE="${BASE%%-*}"
+            echo "version=${BASE}-dev" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "is_dev=true" >> "$GITHUB_OUTPUT"
           else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            TAG="${RAW_TAG#v}"
+            echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "is_dev=false" >> "$GITHUB_OUTPUT"
+            if [[ "$TAG" == *-* ]]; then
+              echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
   build:
@@ -165,7 +180,45 @@ jobs:
           cp scripts/install.sh artifacts/install.sh
           cp scripts/install.ps1 artifacts/install.ps1
 
-      - name: Create GitHub Release
+      - name: Delete existing dev release
+        if: needs.meta.outputs.is_dev == 'true'
+        run: gh release delete dev --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-create dev tag at current commit
+        if: needs.meta.outputs.is_dev == 'true'
+        run: |
+          git tag -f dev "$GITHUB_SHA"
+          git push -f origin dev
+
+      - name: Generate dev release body
+        if: needs.meta.outputs.is_dev == 'true'
+        id: dev_body
+        run: |
+          cat > dev_body.md << EOF
+          Development build from \`master\` at ${{ github.sha }}.
+
+          **This is a pre-release build for testing.** Use \`codex-switch self-update --dev\` to install, or \`codex-switch self-update\` to return to the latest stable release.
+
+          Version: \`${{ needs.meta.outputs.version }}\`
+          EOF
+
+      - name: Create GitHub Release (dev)
+        if: needs.meta.outputs.is_dev == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: "dev (${{ needs.meta.outputs.version }})"
+          prerelease: true
+          body_path: dev_body.md
+          files: |
+            artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release (stable)
+        if: needs.meta.outputs.is_dev != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.meta.outputs.version }}

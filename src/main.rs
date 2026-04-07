@@ -93,8 +93,8 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         Commands::Delete { alias } => delete_cmd(&alias, json)?,
         Commands::Login { alias, device } => login_cmd(alias.as_deref(), device, json).await?,
         Commands::Import { path, alias } => import_cmd(&path, alias.as_deref(), json).await?,
-        Commands::SelfUpdate { check, version } => {
-            self_update_cmd(check, version.as_deref(), json).await?
+        Commands::SelfUpdate { check, version, dev } => {
+            self_update_cmd(check, version.as_deref(), dev, json).await?
         }
         Commands::Warmup { alias } => warmup_cmd(alias.as_deref(), json).await?,
         Commands::Tui => tui::run_tui().await?,
@@ -890,10 +890,14 @@ async fn import_one_file(
 
 // ── self-update ──────────────────────────────────────────
 
-async fn self_update_cmd(check: bool, version: Option<&str>, json: bool) -> Result<()> {
+async fn self_update_cmd(check: bool, version: Option<&str>, dev: bool, json: bool) -> Result<()> {
     if check {
         let current_version = update::current_version().to_string();
-        let result = update::check_for_update(true).await?;
+        let result = if dev {
+            update::check_for_dev_update().await?
+        } else {
+            update::check_for_update(true).await?
+        };
 
         if json {
             let (latest_version, update_available, install_source) = match &result {
@@ -922,31 +926,50 @@ async fn self_update_cmd(check: bool, version: Option<&str>, json: bool) -> Resu
 
         match result {
             Some(info) => {
+                let channel = if dev { " (dev)" } else { "" };
                 println!(
                     "{}",
                     color::warn(&format!(
-                        "New version available: v{} (current v{}). Run `{}`.",
+                        "New version available{channel}: v{} (current v{}). Run `{}`.",
                         info.latest_version,
                         info.current_version,
-                        info.install_source.upgrade_hint()
+                        if dev {
+                            "codex-switch self-update --dev"
+                        } else {
+                            info.install_source.upgrade_hint()
+                        }
                     ))
                 );
             }
             None => {
-                println!(
-                    "{}",
-                    color::success(&format!(
-                        "Already up to date: v{}",
-                        update::current_version()
-                    ))
-                );
+                let current = update::current_version();
+                if dev && update::is_dev_version(current) {
+                    println!(
+                        "{}",
+                        color::success(&format!("Already on latest dev: v{current}"))
+                    );
+                } else if dev {
+                    println!(
+                        "{}",
+                        color::success("No dev release found on GitHub.")
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        color::success(&format!("Already up to date: v{current}"))
+                    );
+                }
             }
         }
         return Ok(());
     }
 
-    let result =
-        update::self_update(version, !json && update::should_show_download_progress()).await?;
+    let show_progress = !json && update::should_show_download_progress();
+    let result = if dev {
+        update::self_update_dev(show_progress).await?
+    } else {
+        update::self_update(version, show_progress).await?
+    };
 
     if json {
         print_json(&output::JsonSelfUpdate {
@@ -966,10 +989,11 @@ async fn self_update_cmd(check: bool, version: Option<&str>, json: bool) -> Resu
     }
 
     if result.updated {
+        let channel = if dev { " (dev)" } else { "" };
         println!(
             "{}",
             color::success(&format!(
-                "Updated codex-switch: v{} -> v{}",
+                "Updated codex-switch{channel}: v{} -> v{}",
                 result.current_version, result.latest_version
             ))
         );

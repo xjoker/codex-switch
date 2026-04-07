@@ -58,6 +58,7 @@ struct UpdateCache {
 #[derive(Debug, Clone, Deserialize)]
 struct GithubRelease {
     tag_name: String,
+    name: Option<String>,
     assets: Vec<GithubAsset>,
 }
 
@@ -81,9 +82,37 @@ pub async fn check_for_update(force: bool) -> Result<Option<UpdateInfo>> {
     }))
 }
 
+/// Check whether a dev release exists on GitHub.
+///
+/// For dev builds, we always report as "available" since the tag is reused and
+/// the binary may have been rebuilt even if the version string hasn't changed.
+pub async fn check_for_dev_update() -> Result<Option<UpdateInfo>> {
+    let current_version = current_version().to_string();
+    let release = match fetch_release(Some("dev")).await {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+    // Extract version from release name like "dev (0.0.11-dev)" or fall back
+    // to a generic "dev" label.
+    let dev_version = release
+        .name
+        .as_deref()
+        .and_then(|n| n.strip_prefix("dev ("))
+        .and_then(|n| n.strip_suffix(')'))
+        .unwrap_or("dev")
+        .to_string();
+    Ok(Some(UpdateInfo {
+        current_version,
+        latest_version: dev_version,
+        install_source: detect_install_source(),
+    }))
+}
+
 pub async fn self_update(version: Option<&str>, show_progress: bool) -> Result<SelfUpdateResult> {
     let install_source = detect_install_source();
-    if install_source == InstallSource::Homebrew {
+    // If the user is currently on a dev build, allow direct update even on
+    // Homebrew so they can return to a stable release.
+    if install_source == InstallSource::Homebrew && !is_dev_version(current_version()) {
         anyhow::bail!(
             "Homebrew-managed install detected. Run `{}` instead.",
             install_source.upgrade_hint()
@@ -168,6 +197,75 @@ pub async fn self_update(version: Option<&str>, show_progress: bool) -> Result<S
         install_source,
         updated: true,
     })
+}
+
+/// Install the dev build from the `dev` GitHub Release tag.
+///
+/// Unlike stable updates, dev→dev always reinstalls (the version string is the
+/// same `X.Y.Z-dev` each time, but the underlying binary may be newer).
+/// Switching from dev→stable uses the normal `self_update` path.
+pub async fn self_update_dev(show_progress: bool) -> Result<SelfUpdateResult> {
+    // Dev channel bypasses Homebrew detection — allow Homebrew users to
+    // install dev builds.  The binary will be replaced in-place; running
+    // `codex-switch self-update` (without --dev) later will restore the
+    // latest stable release via the same direct-install path.
+    let install_source = detect_install_source();
+
+    let current_version = current_version().to_string();
+    let release = fetch_release(Some("dev"))
+        .await
+        .context("fetching dev release from GitHub")?;
+    let dev_version = normalize_version(&release.tag_name);
+
+    let client =
+        crate::auth::build_http_client().context("building HTTP client for self-update")?;
+    let archive_name = asset_name();
+    let archive_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == archive_name)
+        .cloned()
+        .with_context(|| format!("dev release does not contain asset '{archive_name}'"))?;
+    let checksum_name = format!("{archive_name}.sha256");
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == checksum_name)
+        .cloned()
+        .with_context(|| format!("dev release does not contain checksum asset '{checksum_name}'"))?;
+
+    let temp_dir = tempfile::tempdir().context("creating temporary update directory")?;
+    let archive_path = temp_dir.path().join(&archive_asset.name);
+    if show_progress {
+        eprintln!("Downloading {} (dev)...", archive_asset.name);
+    }
+    download_file(&client, &archive_asset.browser_download_url, &archive_path).await?;
+    verify_checksum(&client, &checksum_asset.browser_download_url, &archive_path).await?;
+
+    let extracted_path = temp_dir.path().join(extracted_binary_name());
+    if show_progress {
+        eprintln!("Extracting update package...");
+    }
+    extract_binary(&archive_path, &extracted_path)?;
+
+    if show_progress {
+        eprintln!("Replacing current executable...");
+    }
+    self_replace::self_replace(&extracted_path).context("replacing current executable")?;
+
+    Ok(SelfUpdateResult {
+        current_version,
+        latest_version: dev_version,
+        install_source,
+        updated: true,
+    })
+}
+
+/// Returns true if the given version string contains a pre-release component
+/// (e.g. `0.0.11-dev`).
+pub fn is_dev_version(version: &str) -> bool {
+    let normalized = normalize_version(version);
+    normalized.contains("-dev")
 }
 
 pub fn detect_install_source() -> InstallSource {
@@ -393,6 +491,10 @@ fn release_target() -> String {
 
 fn release_tag(version: &str) -> String {
     let version = version.trim();
+    // The dev channel uses the bare tag "dev", not "vdev".
+    if version == "dev" {
+        return "dev".to_string();
+    }
     if version.starts_with('v') {
         version.to_string()
     } else {
@@ -483,5 +585,36 @@ mod tests {
             release_api_url(Some("0.1.0")),
             "https://api.github.com/repos/xjoker/codex-switch/releases/tags/v0.1.0"
         );
+    }
+
+    #[test]
+    fn release_tag_dev_has_no_v_prefix() {
+        assert_eq!(release_tag("dev"), "dev");
+        assert_eq!(release_tag("0.1.0"), "v0.1.0");
+        assert_eq!(release_tag("v0.1.0"), "v0.1.0");
+    }
+
+    #[test]
+    fn release_api_url_dev_uses_dev_tag() {
+        assert_eq!(
+            release_api_url(Some("dev")),
+            "https://api.github.com/repos/xjoker/codex-switch/releases/tags/dev"
+        );
+    }
+
+    #[test]
+    fn is_dev_version_detects_prerelease() {
+        assert!(is_dev_version("0.0.11-dev"));
+        assert!(is_dev_version("0.0.11-dev+abc1234"));
+        assert!(!is_dev_version("0.0.11"));
+        assert!(!is_dev_version("0.1.0"));
+    }
+
+    #[test]
+    fn dev_version_is_less_than_stable_in_semver() {
+        // Ensures that `self_update` (stable) sees a stable release as
+        // "newer" when the user is on a dev build.
+        assert!(is_newer_version("0.0.11", "0.0.11-dev"));
+        assert!(!is_newer_version("0.0.11-dev", "0.0.11"));
     }
 }
