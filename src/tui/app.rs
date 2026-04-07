@@ -76,11 +76,13 @@ pub struct App {
     pub status_expiry: Option<Instant>,
     pub pending_results: tokio::sync::mpsc::Receiver<(String, Result<UsageInfo, UsageError>)>,
     pub result_sender: tokio::sync::mpsc::Sender<(String, Result<UsageInfo, UsageError>)>,
-    pub pending_warmup: tokio::sync::mpsc::Receiver<(String, Result<(), String>)>,
-    pub warmup_sender: tokio::sync::mpsc::Sender<(String, Result<(), String>)>,
-    /// Tracks in-flight warmup tasks: alias → start time.
-    /// Entries are removed on result delivery or after WARMUP_TASK_TIMEOUT.
-    pub warmup_since: HashMap<String, Instant>,
+    pub pending_warmup: tokio::sync::mpsc::Receiver<(u64, String, Result<(), String>)>,
+    pub warmup_sender: tokio::sync::mpsc::Sender<(u64, String, Result<(), String>)>,
+    /// Tracks in-flight warmup tasks: task_id → (alias, start_time).
+    /// Each spawn gets a unique `warmup_next_id`; results are matched by ID
+    /// so a late-arriving result from a timed-out task cannot clear a newer task.
+    pub warmup_tasks: HashMap<u64, (String, Instant)>,
+    pub warmup_next_id: u64,
     pub confirm: Option<ConfirmAction>,
     pub rename: Option<RenameState>,
     pub usage_limiter: Arc<Semaphore>,
@@ -104,7 +106,8 @@ impl App {
             result_sender: tx,
             pending_warmup: warmup_rx,
             warmup_sender: warmup_tx,
-            warmup_since: HashMap::new(),
+            warmup_tasks: HashMap::new(),
+            warmup_next_id: 0,
             confirm: None,
             rename: None,
             usage_limiter: Arc::new(Semaphore::new(crate::config::get().network.max_concurrent)),
@@ -291,10 +294,14 @@ impl App {
     }
 
     fn spawn_warmup(&mut self, alias: String) {
-        if self.warmup_since.contains_key(&alias) {
-            return; // already in-flight for this alias
+        // Skip if this alias already has an in-flight warmup task.
+        if self.warmup_tasks.values().any(|(a, _)| *a == alias) {
+            return;
         }
-        self.warmup_since.insert(alias.clone(), Instant::now());
+        let task_id = self.warmup_next_id;
+        self.warmup_next_id += 1;
+        self.warmup_tasks
+            .insert(task_id, (alias.clone(), Instant::now()));
         let path = profile_auth_path(&alias);
         let tx = self.warmup_sender.clone();
         let limiter = self.usage_limiter.clone();
@@ -303,14 +310,18 @@ impl App {
             let result = crate::warmup::warmup_account(&alias, &path)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send((alias, result)).await;
+            let _ = tx.send((task_id, alias, result)).await;
         });
     }
 
     pub fn poll_warmup_results(&mut self) {
         let mut to_refresh = std::collections::BTreeSet::<String>::new();
-        while let Ok((alias, result)) = self.pending_warmup.try_recv() {
-            self.warmup_since.remove(&alias);
+        while let Ok((task_id, alias, result)) = self.pending_warmup.try_recv() {
+            // Only accept results whose task_id is still tracked.
+            // A timed-out task's late result is silently ignored.
+            if self.warmup_tasks.remove(&task_id).is_none() {
+                continue;
+            }
             match result {
                 Ok(()) => {
                     self.set_status(format!("Warmed up {alias} — refreshing usage..."), 4);
@@ -664,11 +675,12 @@ impl App {
             self.status_expiry = None;
         }
 
-        // Remove warmup entries that have been in-flight too long (task panic / channel drop).
+        // Evict warmup tasks that have been in-flight too long (panic / channel drop).
+        // Late-arriving results for evicted IDs are ignored in poll_warmup_results.
         const WARMUP_TASK_TIMEOUT: Duration = Duration::from_secs(60);
         let now = Instant::now();
-        self.warmup_since
-            .retain(|_, started| now.duration_since(*started) < WARMUP_TASK_TIMEOUT);
+        self.warmup_tasks
+            .retain(|_, (_, started)| now.duration_since(*started) < WARMUP_TASK_TIMEOUT);
     }
 }
 

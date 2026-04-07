@@ -114,7 +114,30 @@ pub fn extract_identity(auth: &serde_json::Value) -> AccountIdentity {
     }
 }
 
-/// Find an existing profile matching the given identity (account_id > email).
+/// Find a profile with a strict match: both account_id AND email must be present and equal.
+/// Used by `auto_track_current` to avoid silently syncing on ambiguous email-only matches.
+pub fn find_profile_by_identity_exact(identity: &AccountIdentity) -> Option<String> {
+    let (Some(target_id), Some(target_email)) = (&identity.account_id, &identity.email) else {
+        return None; // identity itself is incomplete — no exact match possible
+    };
+    let profiles = list_profiles().ok()?;
+    for alias in profiles {
+        let path = profile_auth_path(&alias);
+        let val = match read_auth(&path) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let existing = extract_identity(&val);
+        if let (Some(eid), Some(eemail)) = (&existing.account_id, &existing.email) {
+            if eid == target_id && eemail == target_email {
+                return Some(alias);
+            }
+        }
+    }
+    None
+}
+
+/// Find an existing profile matching the given identity (account_id+email > email-only).
 pub fn find_profile_by_identity(identity: &AccountIdentity) -> Option<String> {
     let profiles = list_profiles().ok()?;
     let mut email_match: Option<String> = None;
@@ -290,14 +313,19 @@ pub fn auto_track_current() -> bool {
     };
     let identity = extract_identity(&val);
 
-    if let Some(matching) = find_profile_by_identity(&identity) {
-        // Profile already exists — sync the current pointer if it's out of date.
+    if let Some(matching) = find_profile_by_identity_exact(&identity) {
+        // Exact match (account_id + email) — safe to sync the current pointer.
         let current = read_current();
         if current != matching {
             if let Err(e) = write_current(&matching) {
                 tracing::debug!("auto_track_current: could not sync current pointer: {e}");
             }
         }
+        return false;
+    }
+    // Email-only matches are ambiguous (same email, different workspace) —
+    // fall through to cmd_save which will prompt the user if interactive.
+    if find_profile_by_identity(&identity).is_some() {
         return false;
     }
 
