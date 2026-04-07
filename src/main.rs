@@ -1148,6 +1148,7 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
         });
     }
 
+    let mut had_error = false;
     while let Some(res) = tasks.join_next().await {
         let (alias, result) = res.context("warmup task panicked")?;
         match &result {
@@ -1164,6 +1165,7 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
                 } else {
                     user_println(&format!("  {} failed: {}", color::error(&alias), e));
                 }
+                had_error = true;
             }
         }
     }
@@ -1173,6 +1175,9 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
             a["alias"].as_str().unwrap_or("").cmp(b["alias"].as_str().unwrap_or(""))
         });
         print_json(&serde_json::json!({"results": results}));
+    }
+    if had_error {
+        anyhow::bail!("one or more warmup operations failed");
     }
     Ok(())
 }

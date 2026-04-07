@@ -1,5 +1,5 @@
 [package]
-name = "cs"
+name = "codex-switch"
 version = "0.0.11"
 edition = "2024"
 rust-version = "1.88"

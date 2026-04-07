@@ -32,6 +32,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
     // Minimal valid Responses API body — 1-token input, streaming enabled.
     let body = serde_json::json!({
         "model": WARMUP_MODEL,
+        "instructions": "You are a helpful assistant.",
         "input": [{
             "type": "message",
             "role": "user",
@@ -41,7 +42,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
         "tool_choice": "auto",
         "parallel_tool_calls": false,
         "stream": true,
-        "store": true,
+        "store": false,
         "include": []
     });
 
@@ -73,12 +74,12 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
             Ok(())
         }
         401 => bail!(
-            "{alias}: authentication failed — token may be expired (run `cs list` to refresh)"
+            "{alias}: authentication failed — token may be expired (run `codex-switch list` to refresh)"
         ),
         429 => bail!("{alias}: rate limited"),
         code => {
             let text = resp.text().await.unwrap_or_default();
-            let snippet = &text[..text.len().min(160)];
+            let snippet: String = text.chars().take(160).collect();
             bail!("{alias}: HTTP {code} — {snippet}")
         }
     }

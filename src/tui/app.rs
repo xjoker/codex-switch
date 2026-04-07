@@ -289,7 +289,9 @@ impl App {
     fn spawn_warmup(&self, alias: String) {
         let path = profile_auth_path(&alias);
         let tx = self.warmup_sender.clone();
+        let limiter = self.usage_limiter.clone();
         tokio::spawn(async move {
+            let _permit = limiter.acquire().await;
             let result = crate::warmup::warmup_account(&alias, &path)
                 .await
                 .map_err(|e| e.to_string());
@@ -298,12 +300,12 @@ impl App {
     }
 
     pub fn poll_warmup_results(&mut self) {
-        let mut to_refresh: Vec<String> = vec![];
+        let mut to_refresh = std::collections::BTreeSet::<String>::new();
         while let Ok((alias, result)) = self.pending_warmup.try_recv() {
             match result {
                 Ok(()) => {
                     self.set_status(format!("Warmed up {alias} — refreshing usage..."), 4);
-                    to_refresh.push(alias);
+                    to_refresh.insert(alias);
                 }
                 Err(e) => {
                     self.set_status(format!("Warmup failed ({alias}): {e}"), 6);
@@ -312,8 +314,10 @@ impl App {
         }
         for alias in to_refresh {
             if let Some(idx) = self.accounts.iter().position(|a| a.alias == alias) {
-                self.accounts[idx].usage = UsageStatus::Idle;
-                self.fetch_usage_for(idx, true);
+                if !matches!(self.accounts[idx].usage, UsageStatus::Loading) {
+                    self.accounts[idx].usage = UsageStatus::Idle;
+                    self.fetch_usage_for(idx, true);
+                }
             }
         }
     }

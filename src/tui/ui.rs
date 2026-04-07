@@ -476,6 +476,17 @@ fn render_usage_gauge(
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
 
+    // L2: if bar_width is 0 (extremely narrow terminal), skip bar rendering entirely
+    if bar_width == 0 {
+        let reset_area = Rect { y: area.y + 1, height: 1, ..area };
+        let reset_text = format!("resets in {reset_str}");
+        f.render_widget(
+            Paragraph::new(reset_text).style(Style::default().fg(reset_color(remaining_secs))),
+            reset_area,
+        );
+        return;
+    }
+
     let pace_pos = pace.map(|p| {
         ((p / 100.0) * bar_width as f64)
             .round()
@@ -532,10 +543,11 @@ fn render_usage_gauge(
     let row2 = if let Some(pp) = pace_pos {
         let arrow_offset = label_text.len() + pp;
         let total_width = reset_area.width as usize;
-        let pace_label = "\u{2191} pace"; // ↑ pace
+        let pace_label = "\u{2191} pace"; // ↑ pace  (display width = 6, byte len = 8)
+        const PACE_LABEL_DISPLAY_WIDTH: usize = 6;
         // Right-align reset text; only show pace label if there's room for both
         let reset_start = total_width.saturating_sub(reset_text.len());
-        let pace_end = arrow_offset + pace_label.len();
+        let pace_end = arrow_offset + PACE_LABEL_DISPLAY_WIDTH;
 
         if pace_end + 2 <= reset_start {
             Line::from(vec![
