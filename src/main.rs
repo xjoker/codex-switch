@@ -65,9 +65,28 @@ async fn main() {
 }
 
 async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
+    // Startup auth change detection — skip for commands that manage auth themselves
+    let auth_handled = if !json {
+        let should_check = !matches!(
+            &cmd,
+            Commands::Login { .. }
+                | Commands::Import { .. }
+                | Commands::SelfUpdate { .. }
+                | Commands::Tui
+                | Commands::Open
+        );
+        if should_check {
+            check_auth_change()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     match cmd {
         Commands::Use { alias, force, mode } => use_cmd(alias.as_deref(), force, mode, json).await?,
-        Commands::List { force } => list_cmd(force, json).await?,
+        Commands::List { force } => list_cmd(force, json, auth_handled).await?,
         Commands::Rename { old, new } => rename_cmd(&old, &new, json)?,
         Commands::Delete { alias } => delete_cmd(&alias, json)?,
         Commands::Login { alias, device } => login_cmd(alias.as_deref(), device, json).await?,
@@ -79,6 +98,88 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         Commands::Open => open_cmd()?,
     }
     Ok(())
+}
+
+// ── startup auth change detection ────────────────────────
+
+/// Returns true if auth change was detected (regardless of user's accept/reject).
+/// This lets callers (e.g. `list`) skip their own `auto_track_current()`.
+fn check_auth_change() -> bool {
+    use std::io::{self, IsTerminal};
+
+    let change = profile::detect_auth_change();
+    if matches!(change, profile::AuthChange::NoChange) {
+        return false;
+    }
+
+    // Non-interactive stdin — don't prompt, don't silently mutate state
+    if !io::stdin().is_terminal() {
+        match &change {
+            profile::AuthChange::NewAccount => {
+                let info = auth::read_account_info(&auth::codex_auth_path());
+                let label = info.email.as_deref().unwrap_or("unknown");
+                user_println(&format!(
+                    "Detected new account ({label}) in auth.json (use `codex-switch list` interactively to save)."
+                ));
+            }
+            profile::AuthChange::TokensUpdated { alias } => {
+                user_println(&format!(
+                    "auth.json credentials changed for profile '{alias}' (use `codex-switch list` interactively to update)."
+                ));
+            }
+            profile::AuthChange::NoChange => unreachable!(),
+        }
+        return true;
+    }
+
+    match change {
+        profile::AuthChange::NewAccount => {
+            let info = auth::read_account_info(&auth::codex_auth_path());
+            let label = info.email.as_deref().unwrap_or("unknown");
+            user_println(&format!(
+                "Detected new account ({label}) in auth.json — not in any saved profile."
+            ));
+            if confirm("Save as a new profile? [Y/n] ") {
+                match profile::cmd_save(None) {
+                    Ok(action) => user_println(&format!(
+                        "Profile {}: {}",
+                        action.action(),
+                        action.alias()
+                    )),
+                    Err(e) => eprintln!("{}", color::error(&format!("Failed to save: {e}"))),
+                }
+            }
+        }
+        profile::AuthChange::TokensUpdated { alias } => {
+            let info = auth::read_account_info(&auth::codex_auth_path());
+            let label = info.email.as_deref().unwrap_or("unknown");
+            user_println(&format!(
+                "auth.json credentials changed for account '{alias}' ({label})."
+            ));
+            if confirm(&format!("Update profile '{alias}'? [Y/n] ")) {
+                match profile::update_profile_from_live(&alias) {
+                    Ok(()) => user_println(&format!("Profile '{alias}' updated.")),
+                    Err(e) => eprintln!("{}", color::error(&format!("Failed to update: {e}"))),
+                }
+            }
+        }
+        profile::AuthChange::NoChange => unreachable!(),
+    }
+    true
+}
+
+/// Prompt the user for Y/n confirmation. Returns false on EOF or explicit "n"/"no".
+fn confirm(prompt: &str) -> bool {
+    use std::io::{self, Write as _};
+
+    eprint!("{}", color::dim(prompt));
+    io::stderr().flush().ok();
+    let mut input = String::new();
+    match io::stdin().read_line(&mut input) {
+        Ok(0) => false, // EOF
+        Ok(_) => !matches!(input.trim().to_lowercase().as_str(), "n" | "no"),
+        Err(_) => false,
+    }
 }
 
 // ── use ──────────────────────────────────────────────────
@@ -125,8 +226,10 @@ async fn use_cmd(alias: Option<&str>, force: bool, mode: Option<cli::SelectMode>
 
 // ── list (all profiles + usage, concurrent) ──────────────
 
-async fn list_cmd(force: bool, json: bool) -> Result<()> {
-    profile::auto_track_current();
+async fn list_cmd(force: bool, json: bool, auth_already_handled: bool) -> Result<()> {
+    if !auth_already_handled {
+        profile::auto_track_current();
+    }
 
     let profiles = profile::list_profiles()?;
     if profiles.is_empty() {

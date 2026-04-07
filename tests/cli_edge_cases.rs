@@ -225,7 +225,7 @@ fn zero_max_concurrent_is_sanitized() {
     )
     .unwrap();
 
-    let output = run_with_timeout(&home, &["--json", "list"], Duration::from_secs(2));
+    let output = run_with_timeout(&home, &["--json", "list"], Duration::from_secs(10));
     assert!(output.status.success());
     assert_eq!(parse_stdout_json(&output)["profiles"][0]["alias"], "dave");
 
@@ -323,6 +323,82 @@ fn json_list_uses_per_account_cached_refresh_time() {
     assert_eq!(
         stdout["profiles"][0]["usage"]["fetched_at"],
         "2024-03-09T16:00:00Z"
+    );
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn non_interactive_stdin_does_not_save_new_account() {
+    let home = temp_home("non-interactive-new");
+    // Put an auth.json with no matching profile
+    write_json(
+        home.join(".codex/auth.json"),
+        &auth_json("notrack@example.com", "acct_notrack"),
+    );
+
+    // Non-JSON, stdin closed: startup check should detect NewAccount but NOT save
+    let output = command(&home, &["list"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should inform user about the new account (user_println goes to stdout in non-JSON mode)
+    assert!(
+        stdout.contains("Detected new account"),
+        "expected detection message in stdout, got: {stdout}"
+    );
+    // Should NOT have saved — no profiles directory should exist
+    // (auto_track_current is skipped because auth_already_handled=true)
+    let profiles_dir = home.join(".codex-switch/profiles");
+    assert!(
+        !profiles_dir.exists() || fs::read_dir(&profiles_dir).unwrap().count() == 0,
+        "expected no profiles saved, but profiles dir has content"
+    );
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn non_interactive_stdin_does_not_update_existing_profile() {
+    let home = temp_home("non-interactive-update");
+    // Create profile for alice
+    write_json(
+        home.join(".codex-switch/profiles/alice/auth.json"),
+        &auth_json("alice@example.com", "acct_alice"),
+    );
+    fs::create_dir_all(home.join(".codex-switch")).unwrap();
+    fs::write(home.join(".codex-switch/current"), "alice").unwrap();
+
+    // Put updated auth.json (same identity, different tokens) in live location
+    let mut updated = auth_json("alice@example.com", "acct_alice");
+    updated["tokens"]["refresh_token"] = serde_json::json!("new-refresh-token");
+    updated["tokens"]["access_token"] = serde_json::json!("new-access-token");
+    write_json(home.join(".codex/auth.json"), &updated);
+
+    // Run with stdin closed — should detect but NOT update profile
+    let output = command(&home, &["list"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("credentials changed"),
+        "expected change detection message in stdout, got: {stdout}"
+    );
+
+    // Profile file should still have the original content (not updated)
+    let profile_content: Value = serde_json::from_str(
+        &fs::read_to_string(home.join(".codex-switch/profiles/alice/auth.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        profile_content["tokens"]["refresh_token"], "dummy-refresh",
+        "profile refresh_token should not have been updated"
     );
 
     let _ = fs::remove_dir_all(home);

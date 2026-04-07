@@ -51,10 +51,10 @@ brew install xjoker/tap/codex-switch
 
 ```bash
 # macOS / Linux
-CS_VERSION=0.0.10 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+CS_VERSION=0.0.11 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
 
 # Windows
-$env:CS_VERSION="0.0.10"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+$env:CS_VERSION="0.0.11"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
 ```
 
 ### 手动下载
@@ -162,7 +162,7 @@ codex-switch self-update --check
 codex-switch self-update
 
 # 更新到指定的新版本
-codex-switch self-update --version 0.0.10
+codex-switch self-update --version 0.0.11
 ```
 
 - Homebrew 安装不会被程序自行覆盖，请使用 `brew upgrade xjoker/tap/codex-switch`

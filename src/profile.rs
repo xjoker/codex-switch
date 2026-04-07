@@ -216,6 +216,59 @@ pub struct ImportReport {
     pub skipped: Vec<ImportFailure>,
 }
 
+// ── Startup auth change detection ─────────────────────────
+
+#[derive(Debug)]
+pub enum AuthChange {
+    /// Live auth.json belongs to a completely new account.
+    NewAccount,
+    /// Live auth.json matches an existing profile's identity but tokens differ.
+    TokensUpdated { alias: String },
+    /// No actionable change.
+    NoChange,
+}
+
+/// Compare live auth.json against all saved profiles.
+/// - Exact SHA256 match → NoChange
+/// - Identity match (email + account_id) but different content → TokensUpdated
+/// - No identity match → NewAccount
+pub fn detect_auth_change() -> AuthChange {
+    let auth_path = codex_auth_path();
+    if !auth_path.exists() {
+        return AuthChange::NoChange;
+    }
+    let val = match read_auth(&auth_path) {
+        Ok(v) => v,
+        Err(_) => return AuthChange::NoChange,
+    };
+
+    // Exact file match — nothing changed
+    if find_matching_profile(&auth_path).is_some() {
+        return AuthChange::NoChange;
+    }
+
+    let identity = extract_identity(&val);
+    if identity.email.is_none() && identity.account_id.is_none() {
+        return AuthChange::NoChange;
+    }
+
+    match find_profile_by_identity(&identity) {
+        Some(alias) => AuthChange::TokensUpdated { alias },
+        None => AuthChange::NewAccount,
+    }
+}
+
+/// Copy the live auth.json into an existing profile's directory and mark it current.
+pub fn update_profile_from_live(alias: &str) -> Result<()> {
+    let src = codex_auth_path();
+    let val = read_auth(&src)?;
+    let dst = profile_auth_path(alias);
+    ensure_profile_parent(&dst)?;
+    write_auth(&dst, &val)?;
+    write_current(alias)?;
+    Ok(())
+}
+
 // ── Auto-track ────────────────────────────────────────────
 
 /// If the live auth.json belongs to an untracked account, auto-save it.
@@ -642,5 +695,307 @@ mod tests {
         }
 
         assert_invalid_alias(rename_profile("valid-alias", ""), "alias cannot be empty");
+    }
+
+    // ── detect_auth_change tests ─────────────────────────────
+
+    fn make_jwt(email: &str, account_id: &str) -> String {
+        let claims = serde_json::json!({
+            "email": email,
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": "plus",
+                "chatgpt_account_id": account_id,
+                "chatgpt_user_id": format!("user_{account_id}"),
+                "organizations": [],
+            }
+        });
+        let json = serde_json::to_vec(&claims).unwrap();
+        let encoded = {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+            URL_SAFE_NO_PAD.encode(json)
+        };
+        format!("x.{encoded}.y")
+    }
+
+    /// Build a realistic auth.json matching the format produced by `login::build_auth_json`.
+    fn realistic_auth_json(
+        email: &str,
+        account_id: &str,
+        access_token: &str,
+        refresh_token: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": make_jwt(email, account_id),
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "account_id": account_id,
+            },
+            "last_refresh": "2026-04-07T00:00:00Z"
+        })
+    }
+
+    // ── Basic branch coverage ────────────────────────────────
+
+    #[test]
+    fn detect_no_auth_file_returns_no_change() {
+        let _env = TestEnv::new();
+        assert!(matches!(
+            super::detect_auth_change(),
+            super::AuthChange::NoChange
+        ));
+    }
+
+    #[test]
+    fn detect_corrupt_auth_file_returns_no_change() {
+        let env = TestEnv::new();
+        let live = crate::auth::codex_auth_path();
+        let parent = live.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+        std::fs::write(&live, "{invalid json!!!").unwrap();
+        assert!(matches!(
+            super::detect_auth_change(),
+            super::AuthChange::NoChange
+        ));
+        drop(env);
+    }
+
+    #[test]
+    fn detect_exact_match_returns_no_change() {
+        let _env = TestEnv::new();
+        let val = realistic_auth_json("test@example.com", "acct_1", "acc_a", "ref_a");
+        let live = crate::auth::codex_auth_path();
+        crate::auth::write_auth(&live, &val).unwrap();
+        super::cmd_save(Some("test-profile")).unwrap();
+        assert!(matches!(
+            super::detect_auth_change(),
+            super::AuthChange::NoChange
+        ));
+    }
+
+    #[test]
+    fn detect_new_account_when_no_profiles_exist() {
+        let _env = TestEnv::new();
+        let val = realistic_auth_json("new@example.com", "acct_new", "acc_x", "ref_x");
+        let live = crate::auth::codex_auth_path();
+        crate::auth::write_auth(&live, &val).unwrap();
+        assert!(matches!(
+            super::detect_auth_change(),
+            super::AuthChange::NewAccount
+        ));
+    }
+
+    #[test]
+    fn detect_new_account_when_different_identity() {
+        let _env = TestEnv::new();
+        let alice = realistic_auth_json("alice@example.com", "acct_alice", "acc_1", "ref_1");
+        let live = crate::auth::codex_auth_path();
+        crate::auth::write_auth(&live, &alice).unwrap();
+        super::cmd_save(Some("alice")).unwrap();
+        // Different person
+        let bob = realistic_auth_json("bob@example.com", "acct_bob", "acc_2", "ref_2");
+        crate::auth::write_auth(&live, &bob).unwrap();
+        assert!(matches!(
+            super::detect_auth_change(),
+            super::AuthChange::NewAccount
+        ));
+    }
+
+    // ── Token update scenarios (real refresh patterns) ───────
+
+    #[test]
+    fn detect_tokens_updated_refresh_token_changed() {
+        let _env = TestEnv::new();
+        let val = realistic_auth_json("user@example.com", "acct_u", "acc_old", "ref_old");
+        let live = crate::auth::codex_auth_path();
+        crate::auth::write_auth(&live, &val).unwrap();
+        super::cmd_save(Some("user-profile")).unwrap();
+        // Re-login: new refresh_token
+        let updated = realistic_auth_json("user@example.com", "acct_u", "acc_old", "ref_new");
+        crate::auth::write_auth(&live, &updated).unwrap();
+        match super::detect_auth_change() {
+            super::AuthChange::TokensUpdated { alias } => assert_eq!(alias, "user-profile"),
+            other => panic!("expected TokensUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_tokens_updated_only_access_token_changed() {
+        let _env = TestEnv::new();
+        // Simulates token refresh where only access_token rotates (refresh_token reused)
+        let val = realistic_auth_json("user@example.com", "acct_u", "acc_old", "ref_same");
+        let live = crate::auth::codex_auth_path();
+        crate::auth::write_auth(&live, &val).unwrap();
+        super::cmd_save(Some("user-profile")).unwrap();
+        let updated = realistic_auth_json("user@example.com", "acct_u", "acc_new", "ref_same");
+        crate::auth::write_auth(&live, &updated).unwrap();
+        match super::detect_auth_change() {
+            super::AuthChange::TokensUpdated { alias } => assert_eq!(alias, "user-profile"),
+            other => panic!("expected TokensUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_tokens_updated_only_last_refresh_timestamp_changed() {
+        let _env = TestEnv::new();
+        // Simulates codex CLI updating only the last_refresh timestamp
+        let val = realistic_auth_json("user@example.com", "acct_u", "acc_1", "ref_1");
+        let live = crate::auth::codex_auth_path();
+        crate::auth::write_auth(&live, &val).unwrap();
+        super::cmd_save(Some("ts-profile")).unwrap();
+        // Same tokens, different timestamp
+        let mut updated = realistic_auth_json("user@example.com", "acct_u", "acc_1", "ref_1");
+        updated["last_refresh"] = serde_json::json!("2026-04-08T12:00:00Z");
+        crate::auth::write_auth(&live, &updated).unwrap();
+        match super::detect_auth_change() {
+            super::AuthChange::TokensUpdated { alias } => assert_eq!(alias, "ts-profile"),
+            other => panic!("expected TokensUpdated, got {other:?}"),
+        }
+    }
+
+    // ── Identity matching edge cases ─────────────────────────
+
+    #[test]
+    fn detect_tokens_updated_email_case_insensitive() {
+        let _env = TestEnv::new();
+        let val = realistic_auth_json("User@Example.COM", "acct_u", "acc_1", "ref_1");
+        let live = crate::auth::codex_auth_path();
+        crate::auth::write_auth(&live, &val).unwrap();
+        super::cmd_save(Some("case-profile")).unwrap();
+        // Same email different case, new token
+        let updated = realistic_auth_json("user@example.com", "acct_u", "acc_2", "ref_2");
+        crate::auth::write_auth(&live, &updated).unwrap();
+        match super::detect_auth_change() {
+            super::AuthChange::TokensUpdated { alias } => assert_eq!(alias, "case-profile"),
+            other => panic!("expected TokensUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_tokens_updated_email_only_fallback_when_account_id_missing() {
+        let _env = TestEnv::new();
+        // Profile saved with account_id
+        let val = realistic_auth_json("fallback@example.com", "acct_fb", "acc_1", "ref_1");
+        let live = crate::auth::codex_auth_path();
+        crate::auth::write_auth(&live, &val).unwrap();
+        super::cmd_save(Some("fb-profile")).unwrap();
+        // Live auth.json has no account_id in JWT claims (email-only match)
+        let claims_no_id = serde_json::json!({
+            "email": "fallback@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": "plus",
+                "organizations": [],
+            }
+        });
+        let json_bytes = serde_json::to_vec(&claims_no_id).unwrap();
+        let encoded = {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+            URL_SAFE_NO_PAD.encode(json_bytes)
+        };
+        let jwt_no_id = format!("x.{encoded}.y");
+        // account_id is empty string — should be treated as None after fix
+        let updated = serde_json::json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": jwt_no_id,
+                "access_token": "acc_new",
+                "refresh_token": "ref_new",
+                "account_id": "",
+            },
+            "last_refresh": "2026-04-08T00:00:00Z"
+        });
+        crate::auth::write_auth(&live, &updated).unwrap();
+        match super::detect_auth_change() {
+            super::AuthChange::TokensUpdated { alias } => assert_eq!(alias, "fb-profile"),
+            other => panic!("expected TokensUpdated via email fallback, got {other:?}"),
+        }
+    }
+
+    // ── update_profile_from_live ─────────────────────────────
+
+    #[test]
+    fn update_profile_from_live_syncs_content_and_preserves_others() {
+        let _env = TestEnv::new();
+        let live = crate::auth::codex_auth_path();
+
+        // Create two profiles
+        let alice = realistic_auth_json("alice@example.com", "acct_a", "acc_a1", "ref_a1");
+        crate::auth::write_auth(&live, &alice).unwrap();
+        super::cmd_save(Some("alice")).unwrap();
+        let bob = realistic_auth_json("bob@example.com", "acct_b", "acc_b1", "ref_b1");
+        crate::auth::write_auth(&live, &bob).unwrap();
+        super::cmd_save(Some("bob")).unwrap();
+
+        // Update live with new alice tokens
+        let alice_updated =
+            realistic_auth_json("alice@example.com", "acct_a", "acc_a2", "ref_a2");
+        crate::auth::write_auth(&live, &alice_updated).unwrap();
+        super::update_profile_from_live("alice").unwrap();
+
+        // Verify: alice's profile file content matches updated live
+        let profile_val =
+            crate::auth::read_auth(&super::profile_auth_path("alice")).unwrap();
+        assert_eq!(profile_val["tokens"]["access_token"], "acc_a2");
+        assert_eq!(profile_val["tokens"]["refresh_token"], "ref_a2");
+        assert_eq!(profile_val["OPENAI_API_KEY"], serde_json::Value::Null);
+
+        // Verify: bob's profile was NOT modified
+        let bob_val =
+            crate::auth::read_auth(&super::profile_auth_path("bob")).unwrap();
+        assert_eq!(bob_val["tokens"]["access_token"], "acc_b1");
+
+        // Verify: current marker updated
+        assert_eq!(super::read_current(), "alice");
+    }
+
+    // ── Failure paths ────────────────────────────────────────
+
+    #[test]
+    fn update_profile_from_live_fails_when_no_auth_file() {
+        let _env = TestEnv::new();
+        // No live auth.json exists
+        let result = super::update_profile_from_live("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detect_no_identity_in_jwt_returns_no_change() {
+        let _env = TestEnv::new();
+        // auth.json with no email in JWT, no account_id in claims,
+        // and empty account_id in tokens (should be filtered to None)
+        let empty_claims = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": "plus",
+                "organizations": [],
+            }
+        });
+        let json_bytes = serde_json::to_vec(&empty_claims).unwrap();
+        let encoded = {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+            URL_SAFE_NO_PAD.encode(json_bytes)
+        };
+        let jwt_empty = format!("x.{encoded}.y");
+        let val = serde_json::json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": jwt_empty,
+                "access_token": "acc_x",
+                "refresh_token": "ref_x",
+                "account_id": "",
+            },
+            "last_refresh": "2026-04-07T00:00:00Z"
+        });
+        let live = crate::auth::codex_auth_path();
+        crate::auth::write_auth(&live, &val).unwrap();
+        assert!(matches!(
+            super::detect_auth_change(),
+            super::AuthChange::NoChange
+        ));
     }
 }

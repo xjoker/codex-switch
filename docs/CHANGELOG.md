@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.0.11 — 2026-04-07
+
+### Added
+
+- **Startup auth change detection** — On launch, codex-switch now compares the live `~/.codex/auth.json` against all saved profiles. If a new account is detected (e.g., user ran `codex login`), prompts to save as a new profile. If tokens were refreshed for an existing account, prompts to update the corresponding profile
+- **Non-interactive safety** — When stdin is not a TTY (pipes, cron, CI), startup detection informs the user but never silently mutates state. EOF on stdin is treated as rejection
+
+### Changed
+
+- **Linux static linking** — Linux release binaries now use musl (static linking) instead of glibc, eliminating `GLIBC_2.xx not found` errors on older distributions. ARM64 Linux builds use `cross` for proper musl cross-compilation
+
+### Fixed
+
+- **Empty `account_id` treated as present** — `/tokens/account_id: ""` was not filtered, preventing the email-only identity fallback from triggering. Now empty strings are treated as `None`, consistent with JWT claims filtering
+- **`list` respects startup detection** — When the startup auth change check has already handled detection, `list` no longer runs `auto_track_current()` a second time, preventing silent saves after the user explicitly declined
+
 ## v0.0.10 — 2026-04-02
 
 ### Changed

@@ -55,6 +55,7 @@ pub fn parse_account_info(auth: &Value) -> AccountInfo {
     let account_id_from_tokens = auth
         .pointer("/tokens/account_id")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
 
     let claims = decode_jwt_payload(id_token).unwrap_or_default();

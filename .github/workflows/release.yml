@@ -35,11 +35,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux
-          - target: x86_64-unknown-linux-gnu
+          # Linux (musl — static linking, no glibc dependency)
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: cs-linux-amd64
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: cs-linux-arm64
           # macOS
@@ -66,12 +66,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install musl tools (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          sudo apt-get install -y musl-tools
+
+      - name: Install cross (Linux ARM64 musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Inject version into Cargo.toml
         shell: bash
@@ -84,7 +87,13 @@ jobs:
           grep '^version' Cargo.toml
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+        shell: bash
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
