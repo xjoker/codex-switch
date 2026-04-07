@@ -927,17 +927,20 @@ async fn self_update_cmd(check: bool, version: Option<&str>, dev: bool, json: bo
         match result {
             Some(info) => {
                 let channel = if dev { " (dev)" } else { "" };
+                let hint = if dev {
+                    if info.install_source == update::InstallSource::Homebrew {
+                        "brew uninstall codex-switch` first, then `codex-switch self-update --dev"
+                    } else {
+                        "codex-switch self-update --dev"
+                    }
+                } else {
+                    info.install_source.upgrade_hint()
+                };
                 println!(
                     "{}",
                     color::warn(&format!(
-                        "New version available{channel}: v{} (current v{}). Run `{}`.",
-                        info.latest_version,
-                        info.current_version,
-                        if dev {
-                            "codex-switch self-update --dev"
-                        } else {
-                            info.install_source.upgrade_hint()
-                        }
+                        "New version available{channel}: v{} (current v{}). Run `{hint}`.",
+                        info.latest_version, info.current_version,
                     ))
                 );
             }
@@ -1158,13 +1161,14 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
 
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(aliases.len());
 
-    // Filter out accounts whose 5h window is already active (has a reset time).
+    // Filter out accounts whose 5h window is still active (reset time in the future).
+    let now = auth::now_unix_secs();
     let mut to_warmup = Vec::new();
     for alias in &aliases {
         let already_active = cache::get(alias)
             .and_then(|u| u.primary)
             .and_then(|w| w.resets_at)
-            .is_some();
+            .is_some_and(|t| t > now);
         if already_active {
             if json {
                 results.push(serde_json::json!({"alias": alias, "ok": true, "skipped": true}));

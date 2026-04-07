@@ -268,12 +268,13 @@ impl App {
         self.set_status(format!("Refreshing {count} marked account(s)..."), 3);
     }
 
-    /// Returns true if the account's 5h window is already active (has a reset time).
+    /// Returns true if the account's 5h window is still active (reset time in the future).
     fn is_already_warmed(&self, alias: &str) -> bool {
+        let now = crate::auth::now_unix_secs();
         self.accounts.iter().any(|a| {
             a.alias == alias
                 && matches!(&a.usage, UsageStatus::Loaded(u)
-                    if u.primary.as_ref().and_then(|w| w.resets_at).is_some())
+                    if u.primary.as_ref().and_then(|w| w.resets_at).is_some_and(|t| t > now))
         })
     }
 
@@ -295,12 +296,13 @@ impl App {
     }
 
     pub fn warmup_all(&mut self) {
+        let now = crate::auth::now_unix_secs();
         let aliases: Vec<String> = self
             .accounts
             .iter()
             .filter(|a| {
                 !matches!(&a.usage, UsageStatus::Loaded(u)
-                    if u.primary.as_ref().and_then(|w| w.resets_at).is_some())
+                    if u.primary.as_ref().and_then(|w| w.resets_at).is_some_and(|t| t > now))
             })
             .map(|a| a.alias.clone())
             .collect();
