@@ -1,0 +1,85 @@
+use std::path::Path;
+
+use anyhow::{Result, bail};
+use tracing::debug;
+
+/// Codex responses endpoint (ChatGPT auth mode).
+const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+
+/// Model used for the warmup request.
+/// Update if OpenAI renames the model (check `openai/codex` source for current slug).
+pub const WARMUP_MODEL: &str = "gpt-5.2-codex";
+
+/// Send a minimal completion request to trigger the quota window countdown for a profile.
+///
+/// The 5-hour and 7-day windows only start after the first real API call.
+/// This sends the lightest valid request ("ping") and discards the response body,
+/// which is enough for the server to stamp the window start time.
+pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
+    let val = crate::auth::read_auth(profile_path)
+        .map_err(|e| anyhow::anyhow!("{alias}: cannot read auth: {e}"))?;
+
+    let (at, _rt) = crate::auth::extract_tokens(&val);
+    let access_token = at
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{alias}: no access_token in profile"))?;
+
+    let info = crate::auth::read_account_info(profile_path);
+    let account_id = info.account_id;
+
+    let client = crate::auth::build_http_client()?;
+
+    // Minimal valid Responses API body — 1-token input, streaming enabled.
+    let body = serde_json::json!({
+        "model": WARMUP_MODEL,
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "ping"}]
+        }],
+        "tools": [],
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "stream": true,
+        "store": true,
+        "include": []
+    });
+
+    let mut builder = client
+        .post(RESPONSES_URL)
+        .bearer_auth(&access_token)
+        .header("Content-Type", "application/json");
+
+    if let Some(ref acct_id) = account_id {
+        builder = builder.header("ChatGPT-Account-Id", acct_id);
+    }
+
+    debug!("[{alias}] warmup POST → {RESPONSES_URL}");
+
+    let mut resp = builder
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| crate::auth::format_reqwest_error("warmup request failed", &e))?;
+
+    let status = resp.status();
+    debug!("[{alias}] warmup status: {status}");
+
+    match status.as_u16() {
+        200 => {
+            // Quota window is triggered server-side on request receipt.
+            // Read one chunk to confirm streaming started, then drop.
+            let _ = resp.chunk().await;
+            Ok(())
+        }
+        401 => bail!(
+            "{alias}: authentication failed — token may be expired (run `cs list` to refresh)"
+        ),
+        429 => bail!("{alias}: rate limited"),
+        code => {
+            let text = resp.text().await.unwrap_or_default();
+            let snippet = &text[..text.len().min(160)];
+            bail!("{alias}: HTTP {code} — {snippet}")
+        }
+    }
+}

@@ -119,6 +119,17 @@ pub enum Commands {
         #[arg(long)]
         version: Option<String>,
     },
+    /// Send a minimal request to activate the quota window countdown for one or all profiles
+    ///
+    /// Fresh accounts show no reset timer until their first real request.
+    /// This command triggers that timer without running a real task.
+    #[command(
+        after_help = "Examples:\n  codex-switch warmup          # warmup all profiles\n  codex-switch warmup myalias  # warmup a specific profile"
+    )]
+    Warmup {
+        /// Profile alias to warm up (omit to warm up all profiles)
+        alias: Option<String>,
+    },
     /// Launch the interactive TUI
     Tui,
     /// Open the ~/.codex-switch directory in the system file manager

@@ -13,6 +13,7 @@ mod profile;
 mod tui;
 mod update;
 mod usage;
+mod warmup;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -95,6 +96,7 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         Commands::SelfUpdate { check, version } => {
             self_update_cmd(check, version.as_deref(), json).await?
         }
+        Commands::Warmup { alias } => warmup_cmd(alias.as_deref(), json).await?,
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => open_cmd()?,
     }
@@ -1105,4 +1107,72 @@ fn print_usage_line(u: &usage::UsageInfo) {
         };
         println!("  {}", color::credits(&text, balance, unlimited));
     }
+}
+
+// ── warmup ────────────────────────────────────────────────
+
+async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
+    let aliases: Vec<String> = match alias {
+        Some(a) => {
+            let path = profile::profile_auth_path(a);
+            if !path.exists() {
+                anyhow::bail!("profile '{}' not found", a);
+            }
+            vec![a.to_string()]
+        }
+        None => profile::list_profiles()?,
+    };
+
+    if aliases.is_empty() {
+        if json {
+            print_json(&serde_json::json!({"results": []}));
+        } else {
+            user_println("(no saved profiles)");
+        }
+        return Ok(());
+    }
+
+    let mut results: Vec<serde_json::Value> = Vec::with_capacity(aliases.len());
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+        config::get().network.max_concurrent,
+    ));
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for alias in aliases {
+        let path = profile::profile_auth_path(&alias);
+        let sem = semaphore.clone();
+        tasks.spawn(async move {
+            let _permit = sem.acquire().await;
+            let result = warmup::warmup_account(&alias, &path).await;
+            (alias, result)
+        });
+    }
+
+    while let Some(res) = tasks.join_next().await {
+        let (alias, result) = res.context("warmup task panicked")?;
+        match &result {
+            Ok(()) => {
+                if json {
+                    results.push(serde_json::json!({"alias": alias, "ok": true}));
+                } else {
+                    user_println(&format!("  {} {}", color::success(&alias), color::dim("warmed up")));
+                }
+            }
+            Err(e) => {
+                if json {
+                    results.push(serde_json::json!({"alias": alias, "ok": false, "error": e.to_string()}));
+                } else {
+                    user_println(&format!("  {} failed: {}", color::error(&alias), e));
+                }
+            }
+        }
+    }
+
+    if json {
+        results.sort_by(|a, b| {
+            a["alias"].as_str().unwrap_or("").cmp(b["alias"].as_str().unwrap_or(""))
+        });
+        print_json(&serde_json::json!({"results": results}));
+    }
+    Ok(())
 }

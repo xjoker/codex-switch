@@ -76,6 +76,8 @@ pub struct App {
     pub status_expiry: Option<Instant>,
     pub pending_results: tokio::sync::mpsc::Receiver<(String, Result<UsageInfo, UsageError>)>,
     pub result_sender: tokio::sync::mpsc::Sender<(String, Result<UsageInfo, UsageError>)>,
+    pub pending_warmup: tokio::sync::mpsc::Receiver<(String, Result<(), String>)>,
+    pub warmup_sender: tokio::sync::mpsc::Sender<(String, Result<(), String>)>,
     pub confirm: Option<ConfirmAction>,
     pub rename: Option<RenameState>,
     pub usage_limiter: Arc<Semaphore>,
@@ -84,6 +86,7 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let (warmup_tx, warmup_rx) = tokio::sync::mpsc::channel(64);
         App {
             accounts: vec![],
             selected: 0,
@@ -96,6 +99,8 @@ impl App {
             status_expiry: None,
             pending_results: rx,
             result_sender: tx,
+            pending_warmup: warmup_rx,
+            warmup_sender: warmup_tx,
             confirm: None,
             rename: None,
             usage_limiter: Arc::new(Semaphore::new(crate::config::get().network.max_concurrent)),
@@ -254,6 +259,63 @@ impl App {
         }
         self.update_view();
         self.set_status(format!("Refreshing {count} marked account(s)..."), 3);
+    }
+
+    pub fn warmup_selected(&mut self) {
+        let entry = match self
+            .selected_account_idx()
+            .and_then(|idx| self.accounts.get(idx))
+        {
+            Some(e) => e,
+            None => return,
+        };
+        let alias = entry.alias.clone();
+        self.spawn_warmup(alias.clone());
+        self.set_status(format!("Warming up {alias}..."), 10);
+    }
+
+    pub fn warmup_all(&mut self) {
+        let aliases: Vec<String> = self.accounts.iter().map(|a| a.alias.clone()).collect();
+        if aliases.is_empty() {
+            return;
+        }
+        let count = aliases.len();
+        for alias in aliases {
+            self.spawn_warmup(alias);
+        }
+        self.set_status(format!("Warming up {count} account(s)..."), 10);
+    }
+
+    fn spawn_warmup(&self, alias: String) {
+        let path = profile_auth_path(&alias);
+        let tx = self.warmup_sender.clone();
+        tokio::spawn(async move {
+            let result = crate::warmup::warmup_account(&alias, &path)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send((alias, result)).await;
+        });
+    }
+
+    pub fn poll_warmup_results(&mut self) {
+        let mut to_refresh: Vec<String> = vec![];
+        while let Ok((alias, result)) = self.pending_warmup.try_recv() {
+            match result {
+                Ok(()) => {
+                    self.set_status(format!("Warmed up {alias} — refreshing usage..."), 4);
+                    to_refresh.push(alias);
+                }
+                Err(e) => {
+                    self.set_status(format!("Warmup failed ({alias}): {e}"), 6);
+                }
+            }
+        }
+        for alias in to_refresh {
+            if let Some(idx) = self.accounts.iter().position(|a| a.alias == alias) {
+                self.accounts[idx].usage = UsageStatus::Idle;
+                self.fetch_usage_for(idx, true);
+            }
+        }
     }
 
     fn get_5h_used_pct(&self, idx: usize) -> f64 {
@@ -622,6 +684,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
 
     loop {
         app.poll_results();
+        app.poll_warmup_results();
         app.tick();
 
         terminal
@@ -678,6 +741,8 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 KeyCode::Char('n') => app.start_rename(),
                 KeyCode::Char('s') => app.cycle_sort(),
                 KeyCode::Char('c') => app.clear_marks(),
+                KeyCode::Char('w') => app.warmup_selected(),
+                KeyCode::Char('W') => app.warmup_all(),
                 KeyCode::Char(' ') => app.toggle_mark(),
                 KeyCode::Char('/') => {
                     if let Some(search) = &mut app.search {
