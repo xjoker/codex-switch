@@ -259,12 +259,18 @@ pub fn detect_auth_change() -> AuthChange {
 }
 
 /// Copy the live auth.json into an existing profile's directory and mark it current.
+/// The profile is written in canonical format. The live file is also normalized
+/// (best-effort) to ensure SHA256 consistency; failure to normalize live is non-fatal.
 pub fn update_profile_from_live(alias: &str) -> Result<()> {
     let src = codex_auth_path();
     let val = read_auth(&src)?;
     let dst = profile_auth_path(alias);
     ensure_profile_parent(&dst)?;
     write_auth(&dst, &val)?;
+    // Best-effort: normalize live file to match profile (same key ordering)
+    if let Err(e) = write_auth(&src, &val) {
+        tracing::debug!("Could not normalize live auth.json: {e}");
+    }
     write_current(alias)?;
     Ok(())
 }
@@ -301,6 +307,10 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
     }
 
     let val = read_auth(&src)?;
+    // Best-effort: normalize live file to canonical formatting for SHA256 consistency
+    if let Err(e) = write_auth(&src, &val) {
+        tracing::debug!("Could not normalize live auth.json: {e}");
+    }
     let identity = extract_identity(&val);
 
     let existing = find_profile_by_identity(&identity);

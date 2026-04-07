@@ -22,6 +22,11 @@ pub struct JsonWindow {
     pub used_percent: f64,
     pub resets_at: Option<i64>,
     pub resets_in_seconds: Option<i64>,
+    pub remaining_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pace_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub over_pace: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -29,8 +34,8 @@ pub struct JsonWindow {
 pub enum JsonUsage {
     Ok {
         fetched_at: String,
-        primary: Option<JsonWindow>,
-        secondary: Option<JsonWindow>,
+        primary: Option<Box<JsonWindow>>,
+        secondary: Option<Box<JsonWindow>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         credits_balance: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,13 +124,18 @@ pub fn account_to_json(info: &AccountInfo) -> JsonAccount {
     }
 }
 
-fn window_to_json(w: &WindowUsage, label: &str) -> JsonWindow {
+fn window_to_json(w: &WindowUsage, label: &str, window_secs: i64) -> JsonWindow {
     let resets_in_seconds = w.resets_at.map(|ts| ts - crate::auth::now_unix_secs());
+    let used = w.used_percent.unwrap_or(0.0);
+    let pace = crate::usage::pace_percent(w, window_secs);
     JsonWindow {
         label: label.to_string(),
-        used_percent: w.used_percent.unwrap_or(0.0),
+        used_percent: used,
         resets_at: w.resets_at,
         resets_in_seconds,
+        remaining_percent: (100.0 - used).max(0.0),
+        pace_percent: pace,
+        over_pace: pace.map(|p| used > p),
     }
 }
 
@@ -141,8 +151,14 @@ pub fn usage_to_json(result: Result<&UsageInfo, &str>) -> JsonUsage {
                 .unwrap_or_else(|| Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
             JsonUsage::Ok {
                 fetched_at,
-                primary: u.primary.as_ref().map(|w| window_to_json(w, "5h")),
-                secondary: u.secondary.as_ref().map(|w| window_to_json(w, "7d")),
+                primary: u
+                    .primary
+                    .as_ref()
+                    .map(|w| Box::new(window_to_json(w, "5h", crate::usage::WINDOW_5H_SECS))),
+                secondary: u
+                    .secondary
+                    .as_ref()
+                    .map(|w| Box::new(window_to_json(w, "7d", crate::usage::WINDOW_7D_SECS))),
                 credits_balance: u.credits_balance,
                 unlimited_credits: u.unlimited_credits,
             }

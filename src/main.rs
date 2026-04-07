@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Commands};
 use output::{
-    MessageMode, ProgressReporter, account_to_json, format_reset_time, print_error, print_json,
+    MessageMode, ProgressReporter, account_to_json, print_error, print_json,
     usage_to_json, user_println,
 };
 use tracing_subscriber::EnvFilter;
@@ -66,7 +66,7 @@ async fn main() {
 
 async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
     // Startup auth change detection — skip for commands that manage auth themselves
-    let auth_handled = if !json {
+    let auth_check = if !json {
         let should_check = !matches!(
             &cmd,
             Commands::Login { .. }
@@ -78,11 +78,12 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         if should_check {
             check_auth_change()
         } else {
-            false
+            AuthCheckResult::NoChange
         }
     } else {
-        false
+        AuthCheckResult::NoChange
     };
+    let auth_handled = !matches!(auth_check, AuthCheckResult::NoChange);
 
     match cmd {
         Commands::Use { alias, force, mode } => use_cmd(alias.as_deref(), force, mode, json).await?,
@@ -97,19 +98,35 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => open_cmd()?,
     }
+
+    // If startup check actually synced the profile, re-sync after command execution
+    // to capture any token refreshes that happened during the command.
+    if matches!(auth_check, AuthCheckResult::Synced) {
+        let current = profile::read_current();
+        if !current.is_empty() && profile::find_matching_profile(&auth::codex_auth_path()).is_none()
+        {
+            let _ = profile::update_profile_from_live(&current);
+        }
+    }
+
     Ok(())
 }
 
 // ── startup auth change detection ────────────────────────
 
-/// Returns true if auth change was detected (regardless of user's accept/reject).
-/// This lets callers (e.g. `list`) skip their own `auto_track_current()`.
-fn check_auth_change() -> bool {
+#[derive(Debug)]
+enum AuthCheckResult {
+    NoChange,
+    Detected,  // change detected but not synced (non-interactive or user declined)
+    Synced,    // change detected and user accepted the sync
+}
+
+fn check_auth_change() -> AuthCheckResult {
     use std::io::{self, IsTerminal};
 
     let change = profile::detect_auth_change();
     if matches!(change, profile::AuthChange::NoChange) {
-        return false;
+        return AuthCheckResult::NoChange;
     }
 
     // Non-interactive stdin — don't prompt, don't silently mutate state
@@ -129,8 +146,10 @@ fn check_auth_change() -> bool {
             }
             profile::AuthChange::NoChange => unreachable!(),
         }
-        return true;
+        return AuthCheckResult::Detected;
     }
+
+    let mut synced = false;
 
     match change {
         profile::AuthChange::NewAccount => {
@@ -141,11 +160,14 @@ fn check_auth_change() -> bool {
             ));
             if confirm("Save as a new profile? [Y/n] ") {
                 match profile::cmd_save(None) {
-                    Ok(action) => user_println(&format!(
-                        "Profile {}: {}",
-                        action.action(),
-                        action.alias()
-                    )),
+                    Ok(action) => {
+                        user_println(&format!(
+                            "Profile {}: {}",
+                            action.action(),
+                            action.alias()
+                        ));
+                        synced = true;
+                    }
                     Err(e) => eprintln!("{}", color::error(&format!("Failed to save: {e}"))),
                 }
             }
@@ -158,14 +180,22 @@ fn check_auth_change() -> bool {
             ));
             if confirm(&format!("Update profile '{alias}'? [Y/n] ")) {
                 match profile::update_profile_from_live(&alias) {
-                    Ok(()) => user_println(&format!("Profile '{alias}' updated.")),
+                    Ok(()) => {
+                        user_println(&format!("Profile '{alias}' updated."));
+                        synced = true;
+                    }
                     Err(e) => eprintln!("{}", color::error(&format!("Failed to update: {e}"))),
                 }
             }
         }
         profile::AuthChange::NoChange => unreachable!(),
     }
-    true
+
+    if synced {
+        AuthCheckResult::Synced
+    } else {
+        AuthCheckResult::Detected
+    }
 }
 
 /// Prompt the user for Y/n confirmation. Returns false on EOF or explicit "n"/"no".
@@ -356,7 +386,7 @@ async fn list_cmd(force: bool, json: bool, auth_already_handled: bool) -> Result
             };
             print!("{mark} {alias_str}");
             if let Some(email) = &row.info.email {
-                print!(" {}", color::dim(&format!("({email})")));
+                print!("  {}", color::dim(email));
             }
             if row.info.plan_type.is_some() {
                 print!(
@@ -366,21 +396,14 @@ async fn list_cmd(force: bool, json: bool, auth_already_handled: bool) -> Result
             }
             println!();
             match usage_result {
-                Ok(u) => {
-                    let tag = if usage::is_available(&u) {
-                        "OK"
-                    } else {
-                        "Limited"
-                    };
-                    print!("  {} ", color::status_tag(tag));
-                    print_usage_line(&u);
-                }
+                Ok(u) => print_usage_line(&u),
                 Err(e) => println!(
                     "  {} {}",
-                    color::status_tag("Error"),
+                    color::error("!!"),
                     color::error(&e.summary)
                 ),
             }
+            println!(); // blank line between accounts
         }
     }
 
@@ -684,7 +707,6 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
             "{} (mode: {mode_label})",
             color::success(&format!("Switched to: {best_alias}"))
         );
-        print!("  ");
         print_usage_line(&best_usage);
     }
 
@@ -988,39 +1010,90 @@ fn open_cmd() -> Result<()> {
 
 // ── text output helpers ───────────────────────────────────
 
+fn term_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80)
+}
+
+/// Render a progress bar without outer brackets.
+/// `=` for used portion, `-` for remaining, `|` for pace marker.
+fn render_progress_bar(used_pct: f64, pace_pct: Option<f64>, bar_width: usize) -> String {
+    let used_pos = ((used_pct / 100.0) * bar_width as f64)
+        .round()
+        .clamp(0.0, bar_width as f64) as usize;
+    let pace_pos = pace_pct.map(|p| {
+        ((p / 100.0) * bar_width as f64)
+            .round()
+            .clamp(0.0, (bar_width.saturating_sub(1)) as f64) as usize
+    });
+
+    let mut bar = String::with_capacity(bar_width);
+    for i in 0..bar_width {
+        if pace_pos == Some(i) {
+            bar.push('|');
+        } else if i < used_pos {
+            bar.push('=');
+        } else {
+            bar.push('-');
+        }
+    }
+    bar
+}
+
+/// Format relative reset time: "~2h17m" or "~4d18h"
+fn format_reset_short_relative(w: &usage::WindowUsage) -> String {
+    let Some(resets_at) = w.resets_at else {
+        return "--".into();
+    };
+    let remaining_secs = (resets_at - crate::auth::now_unix_secs()).max(0) as u64;
+    if remaining_secs == 0 {
+        return "expired".into();
+    }
+    if remaining_secs < 3600 {
+        format!("~{}m", remaining_secs / 60)
+    } else if remaining_secs < 86400 {
+        format!("~{}h{}m", remaining_secs / 3600, (remaining_secs % 3600) / 60)
+    } else {
+        format!("~{}d{}h", remaining_secs / 86400, (remaining_secs % 86400) / 3600)
+    }
+}
+
 fn print_usage_line(u: &usage::UsageInfo) {
+    let width = term_width();
+    // Each line: "  5h  bar  XXX% left  ~Xh" ≈ bar_width + 30
+    let bar_width = if width >= 80 {
+        16
+    } else if width >= 60 {
+        10
+    } else {
+        6
+    };
+
     if let Some(w) = &u.primary {
         let pct = w.used_percent.unwrap_or(0.0);
-        let pct_str = format!("{pct:.0}%");
-        let remaining = w
-            .resets_at
-            .map(|ts| ts - crate::auth::now_unix_secs())
-            .unwrap_or(0);
-        let reset = w
-            .resets_at
-            .map(format_reset_time)
-            .unwrap_or_else(|| "unknown".into());
-        let reset_colored = color::reset_time(&format!("(resets: {reset})"), remaining);
-        print!(
-            "5h {} used {reset_colored}",
-            color::usage_pct(&pct_str, pct)
+        let remaining_pct = (100.0 - pct).max(0.0);
+        let pace = usage::pace_percent(w, usage::WINDOW_5H_SECS);
+        let bar = render_progress_bar(pct, pace, bar_width);
+        let reset = format_reset_short_relative(w);
+        println!(
+            "  5h  {}  {}   {}",
+            color::usage_pct(&bar, pct),
+            color::usage_pct(&format!("{remaining_pct:>3.0}% left"), pct),
+            color::dim(&reset),
         );
     }
     if let Some(w) = &u.secondary {
         let pct = w.used_percent.unwrap_or(0.0);
-        let pct_str = format!("{pct:.0}%");
-        let remaining = w
-            .resets_at
-            .map(|ts| ts - crate::auth::now_unix_secs())
-            .unwrap_or(0);
-        let reset = w
-            .resets_at
-            .map(format_reset_time)
-            .unwrap_or_else(|| "unknown".into());
-        let reset_colored = color::reset_time(&format!("(resets: {reset})"), remaining);
-        print!(
-            "  7d {} used {reset_colored}",
-            color::usage_pct(&pct_str, pct)
+        let remaining_pct = (100.0 - pct).max(0.0);
+        let pace = usage::pace_percent(w, usage::WINDOW_7D_SECS);
+        let bar = render_progress_bar(pct, pace, bar_width);
+        let reset = format_reset_short_relative(w);
+        println!(
+            "  7d  {}  {}   {}",
+            color::usage_pct(&bar, pct),
+            color::usage_pct(&format!("{remaining_pct:>3.0}% left"), pct),
+            color::dim(&reset),
         );
     }
     if let Some(balance) = u.credits_balance {
@@ -1030,7 +1103,6 @@ fn print_usage_line(u: &usage::UsageInfo) {
         } else {
             format!("credits: ${balance:.2}")
         };
-        print!("  {}", color::credits(&text, balance, unlimited));
+        println!("  {}", color::credits(&text, balance, unlimited));
     }
-    println!();
 }

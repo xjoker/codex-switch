@@ -23,6 +23,20 @@ pub struct UsageInfo {
     pub unlimited_credits: Option<bool>,
 }
 
+/// Window durations in seconds (used for pace calculation).
+pub const WINDOW_5H_SECS: i64 = 5 * 3600;
+pub const WINDOW_7D_SECS: i64 = 7 * 86400;
+
+/// Calculate pace: the expected used_percent if consumption were even across the window.
+/// Returns None if resets_at is unavailable.
+pub fn pace_percent(w: &WindowUsage, window_secs: i64) -> Option<f64> {
+    let resets_at = w.resets_at?;
+    let now = auth::now_unix_secs();
+    let remaining_secs = (resets_at - now).max(0) as f64;
+    let elapsed_secs = (window_secs as f64 - remaining_secs).clamp(0.0, window_secs as f64);
+    Some((elapsed_secs / window_secs as f64 * 100.0).clamp(0.0, 100.0))
+}
+
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(1);

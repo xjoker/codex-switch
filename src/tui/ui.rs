@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
 };
 
 use super::app::{App, UsageStatus};
@@ -132,13 +132,13 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                         .primary
                         .as_ref()
                         .and_then(|w| w.used_percent)
-                        .map(|p| format!("{:.0}%", p.min(100.0)))
+                        .map(|p| format!("{:.0}%", (100.0 - p).max(0.0)))
                         .unwrap_or_else(|| "--".into());
                     let p7 = u
                         .secondary
                         .as_ref()
                         .and_then(|w| w.used_percent)
-                        .map(|p| format!("{:.0}%", p.min(100.0)))
+                        .map(|p| format!("{:.0}%", (100.0 - p).max(0.0)))
                         .unwrap_or_else(|| "--".into());
                     let r5_ts = u.primary.as_ref().and_then(|w| w.resets_at);
                     let r5 = r5_ts.map(format_reset_short).unwrap_or_else(|| "--".into());
@@ -341,68 +341,12 @@ fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
     let mut idx = 0;
 
     if let Some(w) = &u.primary {
-        let pct = w.used_percent.unwrap_or(0.0).min(100.0) as u16;
-        let reset_str = w
-            .resets_at
-            .map(format_reset_time)
-            .unwrap_or_else(|| "--".into());
-        let remaining = w.resets_at.map(|ts| ts - now).unwrap_or(0);
-
-        // Row 1: gauge bar (1 line height)
-        let gauge_area = Rect {
-            height: 1,
-            ..layout[idx]
-        };
-        let gauge = Gauge::default()
-            .block(Block::default())
-            .gauge_style(gauge_style(pct))
-            .percent(pct)
-            .label(format!("5h  {pct}% used"));
-        f.render_widget(gauge, gauge_area);
-
-        // Row 2: reset time with color
-        let reset_area = Rect {
-            y: layout[idx].y + 1,
-            height: 1,
-            ..layout[idx]
-        };
-        let reset_line = Line::from(vec![
-            Span::styled("  resets: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(reset_str, Style::default().fg(reset_color(remaining))),
-        ]);
-        f.render_widget(Paragraph::new(reset_line), reset_area);
+        render_usage_gauge(f, w, "5h", crate::usage::WINDOW_5H_SECS, now, layout[idx]);
         idx += 1;
     }
 
     if let Some(w) = &u.secondary {
-        let pct = w.used_percent.unwrap_or(0.0).min(100.0) as u16;
-        let reset_str = w
-            .resets_at
-            .map(format_reset_time)
-            .unwrap_or_else(|| "--".into());
-        let remaining = w.resets_at.map(|ts| ts - now).unwrap_or(0);
-
-        let gauge_area = Rect {
-            height: 1,
-            ..layout[idx]
-        };
-        let gauge = Gauge::default()
-            .block(Block::default())
-            .gauge_style(gauge_style(pct))
-            .percent(pct)
-            .label(format!("7d  {pct}% used"));
-        f.render_widget(gauge, gauge_area);
-
-        let reset_area = Rect {
-            y: layout[idx].y + 1,
-            height: 1,
-            ..layout[idx]
-        };
-        let reset_line = Line::from(vec![
-            Span::styled("  resets: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(reset_str, Style::default().fg(reset_color(remaining))),
-        ]);
-        f.render_widget(Paragraph::new(reset_line), reset_area);
+        render_usage_gauge(f, w, "7d", crate::usage::WINDOW_7D_SECS, now, layout[idx]);
         idx += 1;
     }
 
@@ -499,20 +443,135 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-// ── Style helpers ─────────────────────────────────────────
+/// Render a single usage gauge (5h or 7d) with block chars and pace marker.
+fn render_usage_gauge(
+    f: &mut Frame,
+    w: &crate::usage::WindowUsage,
+    label: &str,
+    window_secs: i64,
+    now: i64,
+    area: Rect,
+) {
+    let used = w.used_percent.unwrap_or(0.0).min(100.0);
+    let remaining_pct = (100.0 - used).max(0.0);
+    let pace = crate::usage::pace_percent(w, window_secs);
+    let over = pace.is_some_and(|p| used > p);
+    let reset_str = w
+        .resets_at
+        .map(format_reset_time)
+        .unwrap_or_else(|| "--".into());
+    let remaining_secs = w.resets_at.map(|ts| ts - now).unwrap_or(0);
 
-fn usage_color(pct: f64) -> Color {
-    if pct >= 90.0 {
-        Color::Red
-    } else if pct >= 70.0 {
-        Color::Yellow
+    // Row 1: block-char bar  "5h  ████████░░|░░░░░░░  25% used  75% left"
+    let gauge_area = Rect { height: 1, ..area };
+    let label_text = format!("{label}  ");
+    let suffix = format!("  {used:.0}% used  {remaining_pct:.0}% left");
+    let bar_width = (gauge_area.width as usize)
+        .saturating_sub(label_text.len())
+        .saturating_sub(suffix.len());
+
+    let used_style = Style::default().fg(if over { Color::Yellow } else { Color::Green });
+    let remaining_style = Style::default().fg(remaining_color(remaining_pct));
+    let pace_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+
+    let pace_pos = pace.map(|p| {
+        ((p / 100.0) * bar_width as f64)
+            .round()
+            .clamp(0.0, bar_width.saturating_sub(1) as f64) as usize
+    });
+    let used_pos = ((used / 100.0) * bar_width as f64)
+        .round()
+        .clamp(0.0, bar_width as f64) as usize;
+
+    let mut spans = vec![Span::styled(label_text.clone(), Style::default().fg(Color::White))];
+
+    if let Some(pp) = pace_pos {
+        let before_used = pp.min(used_pos);
+        let before_remaining = pp.saturating_sub(used_pos);
+        let after_used = used_pos.saturating_sub(pp + 1);
+        let after_remaining = bar_width.saturating_sub(pp + 1 + after_used);
+
+        if before_used > 0 {
+            spans.push(Span::styled("█".repeat(before_used), used_style));
+        }
+        if before_remaining > 0 {
+            spans.push(Span::styled("░".repeat(before_remaining), remaining_style));
+        }
+        spans.push(Span::styled("|", pace_style));
+        if after_used > 0 {
+            spans.push(Span::styled("█".repeat(after_used), used_style));
+        }
+        if after_remaining > 0 {
+            spans.push(Span::styled("░".repeat(after_remaining), remaining_style));
+        }
     } else {
-        Color::Green
+        if used_pos > 0 {
+            spans.push(Span::styled("█".repeat(used_pos), used_style));
+        }
+        if bar_width > used_pos {
+            spans.push(Span::styled("░".repeat(bar_width - used_pos), remaining_style));
+        }
     }
+
+    let suffix_color = if over { Color::Yellow } else { Color::DarkGray };
+    spans.push(Span::styled(suffix, Style::default().fg(suffix_color)));
+
+    f.render_widget(Paragraph::new(Line::from(spans)), gauge_area);
+
+    // Row 2: "↑ pace" at pace position, reset time right-aligned
+    let reset_area = Rect {
+        y: area.y + 1,
+        height: 1,
+        ..area
+    };
+    let reset_text = format!("resets in {reset_str}");
+    let reset_style = Style::default().fg(reset_color(remaining_secs));
+
+    let row2 = if let Some(pp) = pace_pos {
+        let arrow_offset = label_text.len() + pp;
+        let total_width = reset_area.width as usize;
+        let pace_label = "\u{2191} pace"; // ↑ pace
+        // Right-align reset text; only show pace label if there's room for both
+        let reset_start = total_width.saturating_sub(reset_text.len());
+        let pace_end = arrow_offset + pace_label.len();
+
+        if pace_end + 2 <= reset_start {
+            Line::from(vec![
+                Span::raw(" ".repeat(arrow_offset)),
+                Span::styled(pace_label, Style::default().fg(Color::DarkGray)),
+                Span::raw(" ".repeat(reset_start - pace_end)),
+                Span::styled(reset_text, reset_style),
+            ])
+        } else {
+            // Not enough room — skip pace label, right-align reset only
+            Line::from(vec![
+                Span::raw(" ".repeat(reset_start)),
+                Span::styled(reset_text, reset_style),
+            ])
+        }
+    } else {
+        Line::from(vec![
+            Span::raw(" ".repeat(label_text.len())),
+            Span::styled(reset_text, reset_style),
+        ])
+    };
+
+    f.render_widget(Paragraph::new(row2), reset_area);
 }
 
-fn gauge_style(pct: u16) -> Style {
-    Style::default().fg(usage_color(pct as f64))
+// ── Style helpers ─────────────────────────────────────────
+
+/// Color for remaining percentage: green > 30%, yellow > 10%, red <= 10%
+fn remaining_color(remaining_pct: f64) -> Color {
+    if remaining_pct > 30.0 {
+        Color::Green
+    } else if remaining_pct > 10.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
 }
 
 fn plan_color(plan: Option<&str>, is_selected: bool) -> Style {
@@ -552,9 +611,9 @@ fn credits_color(balance: f64, unlimited: bool) -> Color {
     }
 }
 
-fn usage_pct_style(pct_str: &str, is_selected: bool) -> Style {
-    let fg = match pct_str.trim_end_matches('%').parse::<f64>() {
-        Ok(n) => usage_color(n),
+fn usage_pct_style(remaining_pct_str: &str, is_selected: bool) -> Style {
+    let fg = match remaining_pct_str.trim_end_matches('%').parse::<f64>() {
+        Ok(n) => remaining_color(n),
         Err(_) => Color::DarkGray,
     };
     let s = Style::default().fg(fg);
