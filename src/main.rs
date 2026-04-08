@@ -108,7 +108,12 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
     // to capture any token refreshes that happened during the command.
     if matches!(auth_check, AuthCheckResult::Synced) {
         let current = profile::read_current();
-        if !current.is_empty() && profile::find_matching_profile(&auth::codex_auth_path()).is_none()
+        if !current.is_empty()
+            && auth::codex_auth_path()
+                .ok()
+                .as_ref()
+                .and_then(|p| profile::find_matching_profile(p))
+                .is_none()
         {
             let _ = profile::update_profile_from_live(&current);
         }
@@ -138,7 +143,7 @@ fn check_auth_change() -> AuthCheckResult {
     if !io::stdin().is_terminal() {
         match &change {
             profile::AuthChange::NewAccount => {
-                let info = auth::read_account_info(&auth::codex_auth_path());
+                let info = auth::codex_auth_path().map(|p| auth::read_account_info(&p)).unwrap_or_default();
                 let label = info.email.as_deref().unwrap_or("unknown");
                 user_println(&format!(
                     "Detected new account ({label}) in auth.json (use `codex-switch list` interactively to save)."
@@ -158,7 +163,7 @@ fn check_auth_change() -> AuthCheckResult {
 
     match change {
         profile::AuthChange::NewAccount => {
-            let info = auth::read_account_info(&auth::codex_auth_path());
+            let info = auth::codex_auth_path().map(|p| auth::read_account_info(&p)).unwrap_or_default();
             let label = info.email.as_deref().unwrap_or("unknown");
             user_println(&format!(
                 "Detected new account ({label}) in auth.json — not in any saved profile."
@@ -178,7 +183,7 @@ fn check_auth_change() -> AuthCheckResult {
             }
         }
         profile::AuthChange::TokensUpdated { alias } => {
-            let info = auth::read_account_info(&auth::codex_auth_path());
+            let info = auth::codex_auth_path().map(|p| auth::read_account_info(&p)).unwrap_or_default();
             let label = info.email.as_deref().unwrap_or("unknown");
             user_println(&format!(
                 "auth.json credentials changed for account '{alias}' ({label})."
@@ -245,7 +250,7 @@ async fn use_cmd(alias: Option<&str>, force: bool, mode: Option<cli::SelectMode>
     match alias {
         Some(a) => {
             profile::cmd_use(a)?;
-            cache::set_last_used(a);
+            cache::set_last_used(a)?;
             if json {
                 print_json(&output::JsonOk {
                     ok: true,
@@ -291,20 +296,26 @@ async fn list_cmd(force: bool, json: bool, auth_already_handled: bool) -> Result
 
     let mut rows: Vec<ListRow> = profiles
         .into_iter()
-        .map(|name| {
-            let path = profile::profile_auth_path(&name);
+        .filter_map(|name| {
+            let path = match profile::profile_auth_path(&name) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("[{name}] failed to resolve profile path: {e}");
+                    return None;
+                }
+            };
             let info = auth::read_account_info(&path);
             let usage_result = if force {
                 None
             } else {
                 cache::get(&name).map(Ok)
             };
-            ListRow {
+            Some(ListRow {
                 is_current: name == current,
                 name,
                 info,
                 usage_result,
-            }
+            })
         })
         .collect();
 
@@ -334,7 +345,18 @@ async fn list_cmd(force: bool, json: bool, auth_already_handled: bool) -> Result
                     }),
                 );
             };
-            let path = profile::profile_auth_path(&alias);
+            let path = match profile::profile_auth_path(&alias) {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        idx,
+                        Err(usage::UsageError {
+                            summary: format!("path error: {e}"),
+                            detail: format!("failed to resolve profile path: {e}"),
+                        }),
+                    );
+                }
+            };
             let usage_result = if force {
                 usage::fetch_usage_retried_force(&alias, &path, &current).await
             } else {
@@ -470,7 +492,7 @@ async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> Result<()> 
     }
 
     if let Some(a) = alias {
-        let dst = profile::profile_auth_path(a);
+        let dst = profile::profile_auth_path(a)?;
         if dst.exists() {
             return reauth_profile(a, device, json).await;
         }
@@ -519,7 +541,7 @@ async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> Result<()> 
 }
 
 async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
-    let dst = profile::profile_auth_path(alias);
+    let dst = profile::profile_auth_path(alias)?;
     let old_info = auth::read_account_info(&dst);
 
     if !json {
@@ -539,7 +561,7 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
     auth::write_auth(&dst, &auth_val)?;
 
     if profile::read_current() == alias {
-        let live = auth::codex_auth_path();
+        let live = auth::codex_auth_path()?;
         auth::backup_auth(&live)?;
         auth::write_auth(&live, &auth_val)?;
     }
@@ -595,8 +617,9 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
     const TEAM_BONUS: f64 = 20.0;
 
     let score_fn = |alias: &str, u: &usage::UsageInfo| -> f64 {
-        let path = profile::profile_auth_path(alias);
-        let is_team = auth::read_account_info(&path).is_team();
+        let is_team = profile::profile_auth_path(alias)
+            .map(|p| auth::read_account_info(&p).is_team())
+            .unwrap_or(false);
         match mode {
             ConfigSelectMode::MaxRemaining => {
                 let base = usage::score(u, safety_7d);
@@ -626,7 +649,13 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
             let Ok(_permit) = sem.acquire_owned().await else {
                 return None;
             };
-            let path = profile::profile_auth_path(&alias);
+            let path = match profile::profile_auth_path(&alias) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("[{alias}] failed to resolve profile path: {e}");
+                    return None;
+                }
+            };
             match usage::fetch_usage_retried(&alias, &path, &current).await {
                 Ok(u) => Some((alias, u)),
                 Err(e) => {
@@ -688,7 +717,7 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
     let (best_alias, best_usage, best_score) = pool.remove(0);
 
     profile::switch_profile(&best_alias)?;
-    cache::set_last_used(&best_alias);
+    cache::set_last_used(&best_alias)?;
 
     let mode_label = match mode {
         ConfigSelectMode::MaxRemaining => "max-remaining",
@@ -696,7 +725,7 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
         ConfigSelectMode::RoundRobin => "round-robin",
     };
 
-    let path = profile::profile_auth_path(&best_alias);
+    let path = profile::profile_auth_path(&best_alias)?;
     let info = auth::read_account_info(&path);
 
     if json {
@@ -1039,7 +1068,7 @@ async fn self_update_cmd(
 // ── open ─────────────────────────────────────────────────
 
 fn open_cmd() -> Result<()> {
-    let dir = auth::app_home();
+    let dir = auth::app_home()?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating directory {}", dir.display()))?;
     #[cfg(target_os = "macos")]
@@ -1167,7 +1196,7 @@ fn print_usage_line(u: &usage::UsageInfo) {
 async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
     let aliases: Vec<String> = match alias {
         Some(a) => {
-            let path = profile::profile_auth_path(a);
+            let path = profile::profile_auth_path(a)?;
             if !path.exists() {
                 anyhow::bail!("profile '{}' not found", a);
             }
@@ -1228,9 +1257,20 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
         config::get().network.max_concurrent,
     ));
 
+    let mut had_error = false;
     let mut tasks = tokio::task::JoinSet::new();
     for alias in to_warmup {
-        let path = profile::profile_auth_path(&alias);
+        let path = match profile::profile_auth_path(&alias) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("[{alias}] failed to resolve profile path: {e}");
+                if json {
+                    results.push(serde_json::json!({"alias": alias, "ok": false, "error": e.to_string()}));
+                }
+                had_error = true;
+                continue;
+            }
+        };
         let sem = semaphore.clone();
         tasks.spawn(async move {
             let _permit = sem.acquire().await;
@@ -1239,7 +1279,6 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
         });
     }
 
-    let mut had_error = false;
     while let Some(res) = tasks.join_next().await {
         let (alias, result) = res.context("warmup task panicked")?;
         match &result {

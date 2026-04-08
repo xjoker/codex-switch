@@ -14,6 +14,7 @@
 
 ### Changed
 
+- **TUI mark-aware operations unified** — `r` (refresh) and `w` (warmup) now operate on marked accounts when marks exist, or all accounts when none are marked. Separate `b` (batch refresh) and `W` (warmup all) keys removed
 - **TUI usage gauges redesigned** — Bars now use block characters (`█` used, `░` remaining) with a `|` pace marker and an `XX% used / YY% left` suffix for clearer at-a-glance quota visibility. The pace marker label (`↑ pace`) is right-aligned alongside `resets in …` on row 2, and is suppressed automatically when there is not enough terminal width to avoid overlap
 - **JSON usage output extended** — `JsonWindow` now includes `remaining_percent`, `pace_percent`, and `over_pace` fields (all `skip_serializing_if = None`; existing fields are unchanged)
 - **Linux static linking** — Linux release binaries now use musl (static linking) instead of glibc, eliminating `GLIBC_2.xx not found` errors on older distributions. ARM64 Linux builds use `cross` for proper musl cross-compilation
@@ -33,6 +34,14 @@
 - **Dev update 404 handling** — `check_for_dev_update` now uses proper HTTP status code detection instead of string matching; network errors are propagated while 404 (no dev release) returns `None`
 - **Dev update redundant reinstall** — `self_update_dev` now compares versions before downloading, avoiding re-download when already on the latest dev build
 - **Dev version extraction safety** — `extract_release_version` only attempts dev name parsing when `tag_name == "dev"`, preventing false matches on stable releases
+- **Cache lock poisoning silent bypass** — `CACHE_LOCK.lock().ok()` silently dropped poisoned locks; now propagates error via `map_err`
+- **Token refresh ignored OAuth error field** — `do_refresh_token` logged `error` field as warning but continued parsing tokens; now bails immediately
+- **`make_unique_alias` infinite loop** — Long aliases near `MAX_ALIAS_LEN` caused suffix truncation to produce the same candidate forever; now capped at 1000 retries
+- **Home directory fallback to `.`** — `codex_auth_path()` and `app_home()` fell back to current directory when `dirs::home_dir()` returned `None`; now returns an error
+- **Warmup with expired tokens** — Warmup used stored `access_token` without refresh, failing with 401 for expired tokens; now pre-refreshes expiring tokens and retries on 401/403
+- **TUI round-robin state drift** — TUI switches did not update `cache.last_used`, causing round-robin to diverge from CLI behavior
+- **TUI profile load errors silenced** — `list_profiles()` errors were swallowed via `unwrap_or_default()`; now logs a warning
+- **Version comparison silent failure** — `compare_versions` returned `None` on unparseable semver without logging; `self-update` would report "already up to date" instead of flagging the issue
 
 ## v0.0.10 — 2026-04-02
 

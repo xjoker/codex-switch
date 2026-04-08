@@ -12,8 +12,8 @@ use crate::output::{user_print, user_println};
 
 const MAX_ALIAS_LEN: usize = 64;
 
-pub fn profile_auth_path(alias: &str) -> PathBuf {
-    profiles_dir().join(alias).join("auth.json")
+pub fn profile_auth_path(alias: &str) -> Result<PathBuf> {
+    Ok(profiles_dir()?.join(alias).join("auth.json"))
 }
 
 pub fn validate_alias(alias: &str) -> Result<()> {
@@ -36,7 +36,7 @@ pub fn validate_alias(alias: &str) -> Result<()> {
 }
 
 pub fn list_profiles() -> Result<Vec<String>> {
-    let dir = profiles_dir();
+    let dir = profiles_dir()?;
     if !dir.exists() {
         return Ok(vec![]);
     }
@@ -51,7 +51,8 @@ pub fn list_profiles() -> Result<Vec<String>> {
 }
 
 pub fn read_current() -> String {
-    std::fs::read_to_string(current_file())
+    current_file()
+        .and_then(|p| std::fs::read_to_string(p).map_err(Into::into))
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
@@ -69,8 +70,8 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
 }
 
 fn ensure_profile_parent(path: &Path) -> Result<()> {
-    ensure_private_dir(&app_home())?;
-    ensure_private_dir(&profiles_dir())?;
+    ensure_private_dir(&app_home()?)?;
+    ensure_private_dir(&profiles_dir()?)?;
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
     }
@@ -78,7 +79,7 @@ fn ensure_profile_parent(path: &Path) -> Result<()> {
 }
 
 fn write_current(alias: &str) -> Result<()> {
-    let path = current_file();
+    let path = current_file()?;
     if let Some(p) = path.parent() {
         ensure_private_dir(p)?;
     }
@@ -91,8 +92,9 @@ pub fn find_matching_profile(auth_path: &Path) -> Option<String> {
     let hash = crate::auth::sha256_file(auth_path)?;
     let profiles = list_profiles().ok()?;
     profiles.into_iter().find(|alias| {
-        let p = profile_auth_path(alias);
-        crate::auth::sha256_file(&p)
+        profile_auth_path(alias)
+            .ok()
+            .and_then(|p| crate::auth::sha256_file(&p))
             .map(|h| h == hash)
             .unwrap_or(false)
     })
@@ -122,7 +124,10 @@ pub fn find_profile_by_identity_exact(identity: &AccountIdentity) -> Option<Stri
     };
     let profiles = list_profiles().ok()?;
     for alias in profiles {
-        let path = profile_auth_path(&alias);
+        let path = match profile_auth_path(&alias) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         let val = match read_auth(&path) {
             Ok(v) => v,
             Err(_) => continue,
@@ -143,7 +148,10 @@ pub fn find_profile_by_identity(identity: &AccountIdentity) -> Option<String> {
     let mut email_match: Option<String> = None;
 
     for alias in profiles {
-        let path = profile_auth_path(&alias);
+        let path = match profile_auth_path(&alias) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         let val = match read_auth(&path) {
             Ok(v) => v,
             Err(_) => continue,
@@ -256,7 +264,10 @@ pub enum AuthChange {
 /// - Identity match (email + account_id) but different content → TokensUpdated
 /// - No identity match → NewAccount
 pub fn detect_auth_change() -> AuthChange {
-    let auth_path = codex_auth_path();
+    let auth_path = match codex_auth_path() {
+        Ok(p) => p,
+        Err(_) => return AuthChange::NoChange,
+    };
     if !auth_path.exists() {
         return AuthChange::NoChange;
     }
@@ -285,9 +296,9 @@ pub fn detect_auth_change() -> AuthChange {
 /// The profile is written in canonical format. The live file is also normalized
 /// (best-effort) to ensure SHA256 consistency; failure to normalize live is non-fatal.
 pub fn update_profile_from_live(alias: &str) -> Result<()> {
-    let src = codex_auth_path();
+    let src = codex_auth_path()?;
     let val = read_auth(&src)?;
-    let dst = profile_auth_path(alias);
+    let dst = profile_auth_path(alias)?;
     ensure_profile_parent(&dst)?;
     write_auth(&dst, &val)?;
     // Best-effort: normalize live file to match profile (same key ordering)
@@ -303,7 +314,10 @@ pub fn update_profile_from_live(alias: &str) -> Result<()> {
 /// If the live auth.json belongs to an untracked account, auto-save it.
 /// Returns true if a new profile was created.
 pub fn auto_track_current() -> bool {
-    let src = codex_auth_path();
+    let src = match codex_auth_path() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
     if !src.exists() {
         return false;
     }
@@ -339,7 +353,7 @@ pub fn auto_track_current() -> bool {
 // ── Command implementations ───────────────────────────────
 
 pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
-    let src = codex_auth_path();
+    let src = codex_auth_path()?;
     if !src.exists() {
         return Err(CsError::NoAuthFile(src.display().to_string()).into());
     }
@@ -357,7 +371,7 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
         Some(a) => a.to_string(),
         None => {
             if let Some(ref existing_alias) = existing {
-                let dst = profile_auth_path(existing_alias);
+                let dst = profile_auth_path(existing_alias)?;
                 ensure_profile_parent(&dst)?;
                 write_auth(&dst, &val)?;
                 write_current(existing_alias)?;
@@ -375,7 +389,7 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
     if alias.is_some()
         && let Some(existing_alias) = existing
     {
-        let dst = profile_auth_path(&existing_alias);
+        let dst = profile_auth_path(&existing_alias)?;
         ensure_profile_parent(&dst)?;
         write_auth(&dst, &val)?;
         write_current(&existing_alias)?;
@@ -391,11 +405,11 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
 
     // New profile
     validate_alias(&resolved_alias)?;
-    let dst = profile_auth_path(&resolved_alias);
+    let dst = profile_auth_path(&resolved_alias)?;
     if dst.exists() {
-        let unique = make_unique_alias(&resolved_alias);
+        let unique = make_unique_alias(&resolved_alias)?;
         validate_alias(&unique)?;
-        let unique_path = profile_auth_path(&unique);
+        let unique_path = profile_auth_path(&unique)?;
         ensure_profile_parent(&unique_path)?;
         write_auth(&unique_path, &val)?;
         write_current(&unique)?;
@@ -412,28 +426,32 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
     Ok(SaveAction::Created(resolved_alias))
 }
 
-fn make_unique_alias(base: &str) -> String {
-    let mut n = 2;
+fn make_unique_alias(base: &str) -> Result<String> {
+    const MAX_RETRIES: u32 = 1000;
+    let mut n: u32 = 2;
     loop {
         let suffix = format!("_{n}");
         let prefix_len = MAX_ALIAS_LEN.saturating_sub(suffix.len());
         let prefix = base.chars().take(prefix_len).collect::<String>();
         let candidate = format!("{prefix}{suffix}");
-        if !profile_auth_path(&candidate).exists() {
-            return candidate;
+        if !profile_auth_path(&candidate)?.exists() {
+            return Ok(candidate);
         }
         n += 1;
+        if n > MAX_RETRIES {
+            anyhow::bail!("could not generate a unique alias for '{base}' after {MAX_RETRIES} attempts");
+        }
     }
 }
 
 pub fn cmd_use(alias: &str) -> Result<()> {
     validate_alias(alias)?;
-    let src = profile_auth_path(alias);
+    let src = profile_auth_path(alias)?;
     if !src.exists() {
         return Err(CsError::NotFound(alias.to_string()).into());
     }
 
-    let dst = codex_auth_path();
+    let dst = codex_auth_path()?;
 
     if dst.exists() && find_matching_profile(&dst).is_none() {
         user_print(
@@ -459,11 +477,11 @@ pub fn cmd_use(alias: &str) -> Result<()> {
 
 pub fn switch_profile(alias: &str) -> Result<()> {
     validate_alias(alias)?;
-    let src = profile_auth_path(alias);
+    let src = profile_auth_path(alias)?;
     if !src.exists() {
         return Err(CsError::NotFound(alias.to_string()).into());
     }
-    let dst = codex_auth_path();
+    let dst = codex_auth_path()?;
     backup_auth(&dst)?;
     let val = read_auth(&src)?;
     write_auth(&dst, &val)?;
@@ -473,7 +491,7 @@ pub fn switch_profile(alias: &str) -> Result<()> {
 
 pub fn cmd_delete(alias: &str) -> Result<()> {
     validate_alias(alias)?;
-    let dir = profiles_dir().join(alias);
+    let dir = profiles_dir()?.join(alias);
     if !dir.exists() {
         return Err(CsError::NotFound(alias.to_string()).into());
     }
@@ -533,7 +551,7 @@ pub fn save_imported_auth_value(
     let identity = extract_identity(&val);
 
     if let Some(existing) = find_profile_by_identity(&identity) {
-        let dst = profile_auth_path(&existing);
+        let dst = profile_auth_path(&existing)?;
         ensure_profile_parent(&dst)?;
         write_auth(&dst, &val)?;
         return Ok(SaveAction::Updated(existing));
@@ -544,14 +562,14 @@ pub fn save_imported_auth_value(
         .or_else(|| identity.email.as_deref().map(alias_from_email))
         .unwrap_or_else(|| "account".to_string());
     validate_alias(&alias)?;
-    let alias = if profile_auth_path(&alias).exists() {
-        make_unique_alias(&alias)
+    let alias = if profile_auth_path(&alias)?.exists() {
+        make_unique_alias(&alias)?
     } else {
         alias
     };
     validate_alias(&alias)?;
 
-    let dst = profile_auth_path(&alias);
+    let dst = profile_auth_path(&alias)?;
     ensure_profile_parent(&dst)?;
     write_auth(&dst, &val)?;
     Ok(SaveAction::Created(alias))
@@ -560,11 +578,11 @@ pub fn save_imported_auth_value(
 pub fn rename_profile(old_alias: &str, new_alias: &str) -> Result<()> {
     validate_alias(old_alias)?;
     validate_alias(new_alias)?;
-    let old_dir = profiles_dir().join(old_alias);
+    let old_dir = profiles_dir()?.join(old_alias);
     if !old_dir.exists() {
         return Err(CsError::NotFound(old_alias.to_string()).into());
     }
-    let new_dir = profiles_dir().join(new_alias);
+    let new_dir = profiles_dir()?.join(new_alias);
     if new_dir.exists() {
         anyhow::bail!("profile '{new_alias}' already exists");
     }
@@ -589,7 +607,7 @@ pub fn save_auth_value(val: serde_json::Value, hint_alias: Option<&str>) -> Resu
     let identity = extract_identity(&val);
 
     if let Some(existing) = find_profile_by_identity(&identity) {
-        let dst = profile_auth_path(&existing);
+        let dst = profile_auth_path(&existing)?;
         ensure_profile_parent(&dst)?;
         write_auth(&dst, &val)?;
         write_current(&existing)?;
@@ -602,17 +620,17 @@ pub fn save_auth_value(val: serde_json::Value, hint_alias: Option<&str>) -> Resu
         .unwrap_or_else(|| "account".to_string());
     validate_alias(&alias)?;
 
-    let alias = if profile_auth_path(&alias).exists() {
-        make_unique_alias(&alias)
+    let alias = if profile_auth_path(&alias)?.exists() {
+        make_unique_alias(&alias)?
     } else {
         alias
     };
     validate_alias(&alias)?;
 
-    let auth_dst = codex_auth_path();
+    let auth_dst = codex_auth_path()?;
     write_auth(&auth_dst, &val)?;
 
-    let profile_dst = profile_auth_path(&alias);
+    let profile_dst = profile_auth_path(&alias)?;
     ensure_profile_parent(&profile_dst)?;
     write_auth(&profile_dst, &val)?;
     write_current(&alias)?;
@@ -732,7 +750,7 @@ mod tests {
     #[test]
     fn rename_profile_rejects_invalid_new_alias() {
         let _env = TestEnv::new();
-        let old_dir = super::profiles_dir().join("valid-alias");
+        let old_dir = super::profiles_dir().unwrap().join("valid-alias");
         std::fs::create_dir_all(&old_dir).unwrap();
 
         for alias in ["../escape", "with/slash"] {
@@ -798,7 +816,7 @@ mod tests {
     #[test]
     fn detect_corrupt_auth_file_returns_no_change() {
         let env = TestEnv::new();
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         let parent = live.parent().unwrap();
         std::fs::create_dir_all(parent).unwrap();
         #[cfg(unix)]
@@ -818,7 +836,7 @@ mod tests {
     fn detect_exact_match_returns_no_change() {
         let _env = TestEnv::new();
         let val = realistic_auth_json("test@example.com", "acct_1", "acc_a", "ref_a");
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         crate::auth::write_auth(&live, &val).unwrap();
         super::cmd_save(Some("test-profile")).unwrap();
         assert!(matches!(
@@ -831,7 +849,7 @@ mod tests {
     fn detect_new_account_when_no_profiles_exist() {
         let _env = TestEnv::new();
         let val = realistic_auth_json("new@example.com", "acct_new", "acc_x", "ref_x");
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         crate::auth::write_auth(&live, &val).unwrap();
         assert!(matches!(
             super::detect_auth_change(),
@@ -843,7 +861,7 @@ mod tests {
     fn detect_new_account_when_different_identity() {
         let _env = TestEnv::new();
         let alice = realistic_auth_json("alice@example.com", "acct_alice", "acc_1", "ref_1");
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         crate::auth::write_auth(&live, &alice).unwrap();
         super::cmd_save(Some("alice")).unwrap();
         // Different person
@@ -861,7 +879,7 @@ mod tests {
     fn detect_tokens_updated_refresh_token_changed() {
         let _env = TestEnv::new();
         let val = realistic_auth_json("user@example.com", "acct_u", "acc_old", "ref_old");
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         crate::auth::write_auth(&live, &val).unwrap();
         super::cmd_save(Some("user-profile")).unwrap();
         // Re-login: new refresh_token
@@ -878,7 +896,7 @@ mod tests {
         let _env = TestEnv::new();
         // Simulates token refresh where only access_token rotates (refresh_token reused)
         let val = realistic_auth_json("user@example.com", "acct_u", "acc_old", "ref_same");
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         crate::auth::write_auth(&live, &val).unwrap();
         super::cmd_save(Some("user-profile")).unwrap();
         let updated = realistic_auth_json("user@example.com", "acct_u", "acc_new", "ref_same");
@@ -894,7 +912,7 @@ mod tests {
         let _env = TestEnv::new();
         // Simulates codex CLI updating only the last_refresh timestamp
         let val = realistic_auth_json("user@example.com", "acct_u", "acc_1", "ref_1");
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         crate::auth::write_auth(&live, &val).unwrap();
         super::cmd_save(Some("ts-profile")).unwrap();
         // Same tokens, different timestamp
@@ -913,7 +931,7 @@ mod tests {
     fn detect_tokens_updated_email_case_insensitive() {
         let _env = TestEnv::new();
         let val = realistic_auth_json("User@Example.COM", "acct_u", "acc_1", "ref_1");
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         crate::auth::write_auth(&live, &val).unwrap();
         super::cmd_save(Some("case-profile")).unwrap();
         // Same email different case, new token
@@ -930,7 +948,7 @@ mod tests {
         let _env = TestEnv::new();
         // Profile saved with account_id
         let val = realistic_auth_json("fallback@example.com", "acct_fb", "acc_1", "ref_1");
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         crate::auth::write_auth(&live, &val).unwrap();
         super::cmd_save(Some("fb-profile")).unwrap();
         // Live auth.json has no account_id in JWT claims (email-only match)
@@ -970,7 +988,7 @@ mod tests {
     #[test]
     fn update_profile_from_live_syncs_content_and_preserves_others() {
         let _env = TestEnv::new();
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
 
         // Create two profiles
         let alice = realistic_auth_json("alice@example.com", "acct_a", "acc_a1", "ref_a1");
@@ -988,14 +1006,14 @@ mod tests {
 
         // Verify: alice's profile file content matches updated live
         let profile_val =
-            crate::auth::read_auth(&super::profile_auth_path("alice")).unwrap();
+            crate::auth::read_auth(&super::profile_auth_path("alice").unwrap()).unwrap();
         assert_eq!(profile_val["tokens"]["access_token"], "acc_a2");
         assert_eq!(profile_val["tokens"]["refresh_token"], "ref_a2");
         assert_eq!(profile_val["OPENAI_API_KEY"], serde_json::Value::Null);
 
         // Verify: bob's profile was NOT modified
         let bob_val =
-            crate::auth::read_auth(&super::profile_auth_path("bob")).unwrap();
+            crate::auth::read_auth(&super::profile_auth_path("bob").unwrap()).unwrap();
         assert_eq!(bob_val["tokens"]["access_token"], "acc_b1");
 
         // Verify: current marker updated
@@ -1039,7 +1057,7 @@ mod tests {
             },
             "last_refresh": "2026-04-07T00:00:00Z"
         });
-        let live = crate::auth::codex_auth_path();
+        let live = crate::auth::codex_auth_path().unwrap();
         crate::auth::write_auth(&live, &val).unwrap();
         assert!(matches!(
             super::detect_auth_change(),

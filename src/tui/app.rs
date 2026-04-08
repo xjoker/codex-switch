@@ -8,6 +8,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::Semaphore;
 
 use crate::auth;
+use crate::cache;
 use crate::jwt::AccountInfo;
 use crate::profile::{
     cmd_delete, list_profiles, profile_auth_path, read_current, rename_profile, switch_profile,
@@ -115,20 +116,26 @@ impl App {
     }
 
     pub fn load_profiles(&mut self) {
-        let profiles = list_profiles().unwrap_or_default();
+        let profiles = list_profiles().unwrap_or_else(|e| {
+            tracing::warn!("failed to load profiles: {e}");
+            Vec::new()
+        });
         let current = read_current();
         self.accounts = profiles
             .into_iter()
-            .map(|alias| {
-                let path = profile_auth_path(&alias);
+            .filter_map(|alias| {
+                let path = match profile_auth_path(&alias) {
+                    Ok(p) => p,
+                    Err(_) => return None,
+                };
                 let info = auth::read_account_info(&path);
                 let is_current = alias == current;
-                AccountEntry {
+                Some(AccountEntry {
                     alias,
                     info,
                     usage: UsageStatus::Idle,
                     is_current,
-                }
+                })
             })
             .collect();
         self.marked
@@ -322,7 +329,14 @@ impl App {
         self.warmup_next_id += 1;
         self.warmup_tasks
             .insert(task_id, (alias.clone(), Instant::now()));
-        let path = profile_auth_path(&alias);
+        let path = match profile_auth_path(&alias) {
+            Ok(p) => p,
+            Err(e) => {
+                self.warmup_tasks.remove(&task_id);
+                self.set_status(format!("Path error for {alias}: {e}"), 5);
+                return;
+            }
+        };
         let tx = self.warmup_sender.clone();
         let limiter = self.usage_limiter.clone();
         tokio::spawn(async move {
@@ -396,7 +410,13 @@ impl App {
         }
 
         let alias = entry.alias.clone();
-        let path = profile_auth_path(&alias);
+        let path = match profile_auth_path(&alias) {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_status(format!("Path error for {alias}: {e}"), 5);
+                return;
+            }
+        };
         let current = read_current();
         let limiter = self.usage_limiter.clone();
 
@@ -473,6 +493,7 @@ impl App {
             let alias = entry.alias.clone();
             match switch_profile(&alias) {
                 Ok(()) => {
+                    let _ = cache::set_last_used(&alias);
                     let current = read_current();
                     for a in &mut self.accounts {
                         a.is_current = a.alias == current;

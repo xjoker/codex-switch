@@ -91,12 +91,18 @@ impl Default for UseConfig {
     }
 }
 
-pub fn config_path() -> PathBuf {
-    app_home().join("config.toml")
+pub fn config_path() -> anyhow::Result<PathBuf> {
+    Ok(app_home()?.join("config.toml"))
 }
 
 fn load_from_file() -> AppConfig {
-    let path = config_path();
+    let path = match config_path() {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!("Failed to determine config path: {err}");
+            return AppConfig::default();
+        }
+    };
     if !path.exists() {
         return AppConfig::default();
     }

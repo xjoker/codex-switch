@@ -550,18 +550,21 @@ fn update_ttl_secs() -> i64 {
         .unwrap_or(UPDATE_TTL_SECS)
 }
 
-fn update_cache_path() -> PathBuf {
-    crate::auth::app_home().join("update-check.json")
+fn update_cache_path() -> anyhow::Result<PathBuf> {
+    Ok(crate::auth::app_home()?.join("update-check.json"))
 }
 
 fn load_update_cache() -> Option<UpdateCache> {
-    let path = update_cache_path();
+    let path = update_cache_path().ok()?;
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
 fn save_update_cache(cache: &UpdateCache) {
-    let path = update_cache_path();
+    let path = match update_cache_path() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -581,9 +584,21 @@ fn is_older_version(candidate: &str, current: &str) -> bool {
 }
 
 fn compare_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
-    let left = Version::parse(&normalize_version(left)).ok()?;
-    let right = Version::parse(&normalize_version(right)).ok()?;
-    Some(left.cmp(&right))
+    let left_parsed = match Version::parse(&normalize_version(left)) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("failed to parse version '{left}': {e}");
+            return None;
+        }
+    };
+    let right_parsed = match Version::parse(&normalize_version(right)) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("failed to parse version '{right}': {e}");
+            return None;
+        }
+    };
+    Some(left_parsed.cmp(&right_parsed))
 }
 
 #[cfg(test)]

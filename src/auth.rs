@@ -14,31 +14,30 @@ pub(crate) const ISSUER: &str = "https://auth.openai.com";
 pub(crate) const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
 /// ~/.codex/auth.json (or $CODEX_HOME/auth.json)
-pub fn codex_auth_path() -> PathBuf {
+pub fn codex_auth_path() -> Result<PathBuf> {
     if let Ok(home) = std::env::var("CODEX_HOME") {
-        return PathBuf::from(home).join("auth.json");
+        return Ok(PathBuf::from(home).join("auth.json"));
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".codex")
-        .join("auth.json")
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
+    Ok(home.join(".codex").join("auth.json"))
 }
 
 /// ~/.codex-switch/
-pub fn app_home() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".codex-switch")
+pub fn app_home() -> Result<PathBuf> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
+    Ok(home.join(".codex-switch"))
 }
 
 /// ~/.codex-switch/profiles/
-pub fn profiles_dir() -> PathBuf {
-    app_home().join("profiles")
+pub fn profiles_dir() -> Result<PathBuf> {
+    Ok(app_home()?.join("profiles"))
 }
 
 /// ~/.codex-switch/current
-pub fn current_file() -> PathBuf {
-    app_home().join("current")
+pub fn current_file() -> Result<PathBuf> {
+    Ok(app_home()?.join("current"))
 }
 
 pub fn read_auth(path: &Path) -> Result<serde_json::Value> {

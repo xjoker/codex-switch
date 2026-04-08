@@ -32,8 +32,8 @@ struct CacheFile {
     last_used: HashMap<String, i64>,
 }
 
-fn cache_path() -> PathBuf {
-    auth::app_home().join("cache.json")
+fn cache_path() -> Result<PathBuf> {
+    Ok(auth::app_home()?.join("cache.json"))
 }
 
 fn now_secs() -> u64 {
@@ -48,7 +48,10 @@ fn ttl() -> u64 {
 }
 
 fn load_cache() -> CacheFile {
-    let path = cache_path();
+    let path = match cache_path() {
+        Ok(p) => p,
+        Err(_) => return CacheFile::default(),
+    };
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -56,7 +59,7 @@ fn load_cache() -> CacheFile {
 }
 
 fn save_cache(cache: &CacheFile) -> Result<()> {
-    let path = cache_path();
+    let path = cache_path()?;
     let json = serde_json::to_string(cache).context("serializing cache")?;
 
     // Atomic write: write to temp file then rename.
@@ -114,7 +117,13 @@ fn from_entry(e: &CacheEntry) -> UsageInfo {
 
 /// Get cached usage for an alias if within TTL.
 pub fn get(alias: &str) -> Option<UsageInfo> {
-    let _lock = CACHE_LOCK.lock().ok()?;
+    let _lock = match CACHE_LOCK.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            tracing::warn!("cache lock poisoned in get()");
+            return None;
+        }
+    };
     let cache = load_cache();
     let entry = cache.entries.get(alias)?;
     if now_secs() - entry.ts > ttl() {
@@ -125,7 +134,13 @@ pub fn get(alias: &str) -> Option<UsageInfo> {
 
 /// Store usage result in cache.
 pub fn put(alias: &str, usage: &UsageInfo) {
-    let _lock = CACHE_LOCK.lock().ok();
+    let _lock = match CACHE_LOCK.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            tracing::warn!("cache lock poisoned in put()");
+            return;
+        }
+    };
     let mut cache = load_cache();
     cache.entries.insert(alias.to_string(), to_entry(usage));
     if let Err(err) = save_cache(&cache) {
@@ -135,21 +150,28 @@ pub fn put(alias: &str, usage: &UsageInfo) {
 
 /// Get the last-used timestamp for an alias (0 if never used).
 pub fn get_last_used(alias: &str) -> i64 {
-    let _lock = CACHE_LOCK.lock().ok();
+    let _lock = match CACHE_LOCK.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            tracing::warn!("cache lock poisoned in get_last_used()");
+            return 0;
+        }
+    };
     let cache = load_cache();
     cache.last_used.get(alias).copied().unwrap_or(0)
 }
 
 /// Record that an alias was just selected by `use`.
-pub fn set_last_used(alias: &str) {
-    let _lock = CACHE_LOCK.lock().ok();
+pub fn set_last_used(alias: &str) -> Result<()> {
+    let _lock = CACHE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("cache lock poisoned"))?;
     let mut cache = load_cache();
     cache
         .last_used
         .insert(alias.to_string(), crate::auth::now_unix_secs());
-    if let Err(err) = save_cache(&cache) {
-        tracing::warn!("Failed to write cache (last_used): {err}");
-    }
+    save_cache(&cache).context("writing last_used cache")?;
+    Ok(())
 }
 
 pub fn rename(old: &str, new: &str) -> Result<()> {

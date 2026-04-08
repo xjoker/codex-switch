@@ -128,17 +128,23 @@ fn persist_refreshed_tokens(alias: &str, profile_path: &Path, new_tokens: &Refre
     }
 
     if crate::profile::read_current() == alias {
-        let live = auth::codex_auth_path();
-        if let Err(err) = auth::update_tokens(
-            &live,
-            &new_tokens.id_token,
-            &new_tokens.access_token,
-            &new_tokens.refresh_token,
-        ) {
-            warn!(
-                "[{alias}] Failed to persist refreshed tokens to {}: {err}",
-                live.display()
-            );
+        match auth::codex_auth_path() {
+            Ok(live) => {
+                if let Err(err) = auth::update_tokens(
+                    &live,
+                    &new_tokens.id_token,
+                    &new_tokens.access_token,
+                    &new_tokens.refresh_token,
+                ) {
+                    warn!(
+                        "[{alias}] Failed to persist refreshed tokens to {}: {err}",
+                        live.display()
+                    );
+                }
+            }
+            Err(err) => {
+                warn!("[{alias}] Failed to determine codex auth path: {err}");
+            }
         }
     }
 }
@@ -366,7 +372,7 @@ pub async fn validate_import_auth(
     }
 }
 
-async fn do_refresh_token(
+pub(crate) async fn do_refresh_token(
     alias: &str,
     client: &reqwest::Client,
     refresh_token: &str,
@@ -406,7 +412,7 @@ async fn do_refresh_token(
     })?;
 
     if let Some(err) = &r.error {
-        warn!("[{alias}] token refresh returned error field: {err}");
+        anyhow::bail!("[{alias}] token refresh failed: {err}");
     }
 
     match (r.access_token, r.id_token, r.refresh_token) {
@@ -738,7 +744,10 @@ pub async fn refresh_expiring_tokens() {
     // Collect (alias, profile_path, refresh_token, expires_at) for tokens expiring soon
     let mut candidates: Vec<(String, std::path::PathBuf, String, i64)> = Vec::new();
     for alias in &profiles {
-        let path = crate::profile::profile_auth_path(alias);
+        let path = match crate::profile::profile_auth_path(alias) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         let val = match auth::read_auth(&path) {
             Ok(v) => v,
             Err(_) => continue,

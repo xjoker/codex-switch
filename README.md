@@ -165,12 +165,10 @@ codex-switch self-update --check
 | `j` / `k` or `Up` / `Down` | Navigate accounts |
 | `Enter` | Switch to selected account |
 | `/` | Search / filter accounts |
-| `r` | Refresh all usage data |
+| `r` | Refresh usage data (marked accounts, or all if none marked) |
 | `s` | Cycle sort mode (name / quota / status) |
 | `Space` | Mark / unmark account for batch operations |
-| `b` | Batch refresh marked accounts |
-| `w` | Warm up selected account (trigger quota window countdown) |
-| `W` | Warm up all accounts |
+| `w` | Warm up accounts (marked accounts, or all if none marked) |
 | `c` | Clear all marks |
 | `n` | Rename selected profile |
 | `d` | Delete selected profile (with confirmation) |
