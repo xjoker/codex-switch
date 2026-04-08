@@ -39,6 +39,10 @@ impl AccountInfo {
         base
     }
 
+    pub fn is_free(&self) -> bool {
+        matches!(self.plan_type.as_deref(), Some("free") | None)
+    }
+
     pub fn is_team(&self) -> bool {
         matches!(self.plan_type.as_deref(), Some("team"))
             || !self.organizations.is_empty()

@@ -133,10 +133,9 @@ pub fn find_profile_by_identity_exact(identity: &AccountIdentity) -> Option<Stri
             Err(_) => continue,
         };
         let existing = extract_identity(&val);
-        if let (Some(eid), Some(eemail)) = (&existing.account_id, &existing.email) {
-            if eid == target_id && eemail == target_email {
-                return Some(alias);
-            }
+        if let (Some(eid), Some(eemail)) = (&existing.account_id, &existing.email)
+            && eid == target_id && eemail == target_email {
+            return Some(alias);
         }
     }
     None
@@ -330,10 +329,9 @@ pub fn auto_track_current() -> bool {
     if let Some(matching) = find_profile_by_identity_exact(&identity) {
         // Exact match (account_id + email) — safe to sync the current pointer.
         let current = read_current();
-        if current != matching {
-            if let Err(e) = write_current(&matching) {
-                tracing::debug!("auto_track_current: could not sync current pointer: {e}");
-            }
+        if current != matching
+            && let Err(e) = write_current(&matching) {
+            tracing::debug!("auto_track_current: could not sync current pointer: {e}");
         }
         return false;
     }

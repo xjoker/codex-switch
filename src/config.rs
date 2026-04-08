@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[serde(rename = "use")]
     pub use_cfg: UseConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 impl AppConfig {
@@ -91,6 +93,33 @@ impl Default for UseConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    /// Usage poll interval in seconds (default: 60)
+    pub poll_interval_secs: u64,
+    /// 5h usage % threshold that triggers a switch (default: 80.0)
+    pub switch_threshold: f64,
+    /// Token expiry check interval in seconds (default: 300)
+    pub token_check_interval_secs: u64,
+    /// Send desktop notification on switch (default: false)
+    pub notify: bool,
+    /// Log level for daemon (default: "info")
+    pub log_level: String,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: 60,
+            switch_threshold: 80.0,
+            token_check_interval_secs: 300,
+            notify: false,
+            log_level: "info".to_string(),
+        }
+    }
+}
+
 pub fn config_path() -> anyhow::Result<PathBuf> {
     Ok(app_home()?.join("config.toml"))
 }
@@ -147,6 +176,7 @@ pub fn resolve_proxy() -> Option<String> {
     None
 }
 
+#[allow(dead_code)]
 /// Resolve the effective select mode: CLI flag takes precedence over config.
 pub fn resolve_select_mode(cli: Option<crate::cli::SelectMode>) -> ConfigSelectMode {
     match cli {

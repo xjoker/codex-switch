@@ -23,9 +23,64 @@ pub struct UsageInfo {
     pub unlimited_credits: Option<bool>,
 }
 
+/// All data needed to score an account. Pure data, no I/O.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub alias: String,
+    pub used_5h: f64,
+    pub resets_at_5h: Option<i64>,
+    pub used_7d: f64,
+    pub resets_at_7d: Option<i64>,
+    pub has_5h_data: bool,
+    pub has_7d_data: bool,
+    pub is_team: bool,
+    pub is_free: bool,
+    pub last_used: i64,
+    pub now: i64,
+}
+
+impl Candidate {
+    /// Build from UsageInfo + metadata. `now` should be shared across all candidates.
+    pub fn from_usage(
+        alias: String,
+        u: &UsageInfo,
+        is_team: bool,
+        is_free: bool,
+        last_used: i64,
+        now: i64,
+    ) -> Self {
+        Self {
+            alias,
+            used_5h: u.primary.as_ref().and_then(|w| w.used_percent).unwrap_or(0.0),
+            resets_at_5h: u.primary.as_ref().and_then(|w| w.resets_at),
+            used_7d: u.secondary.as_ref().and_then(|w| w.used_percent).unwrap_or(0.0),
+            resets_at_7d: u.secondary.as_ref().and_then(|w| w.resets_at),
+            has_5h_data: u.primary.is_some(),
+            has_7d_data: u.secondary.is_some(),
+            is_team,
+            is_free,
+            last_used,
+            now,
+        }
+    }
+
+    /// Reset-aware effective 5h usage: 0.0 if window has already reset.
+    pub fn effective_used_5h(&self) -> f64 {
+        if self.resets_at_5h.is_some_and(|ts| ts <= self.now) { 0.0 } else { self.used_5h }
+    }
+
+    /// Reset-aware effective 7d usage: 0.0 if window has already reset.
+    pub fn effective_used_7d(&self) -> f64 {
+        if self.resets_at_7d.is_some_and(|ts| ts <= self.now) { 0.0 } else { self.used_7d }
+    }
+}
+
 /// Window durations in seconds (used for pace calculation).
 pub const WINDOW_5H_SECS: i64 = 5 * 3600;
 pub const WINDOW_7D_SECS: i64 = 7 * 86400;
+
+/// Free plan accounts become ineligible below this 5h remaining%.
+pub const FREE_FLOOR_PCT: f64 = 35.0;
 
 /// Calculate pace: the expected used_percent if consumption were even across the window.
 /// Returns None if resets_at is unavailable.
@@ -480,6 +535,7 @@ pub fn is_available(u: &UsageInfo) -> bool {
 ///
 /// When ALL accounts are ineligible the caller should fall back to the
 /// best-scoring ineligible account rather than giving up entirely.
+#[allow(dead_code)]
 pub fn is_eligible(u: &UsageInfo, safety_margin_7d: f64) -> bool {
     if !is_available(u) {
         return false;
@@ -501,6 +557,34 @@ pub fn is_eligible(u: &UsageInfo, safety_margin_7d: f64) -> bool {
     true
 }
 
+/// Eligibility check on a Candidate (reset-aware).
+pub fn is_candidate_eligible(c: &Candidate, safety_margin_7d: f64) -> bool {
+    let used_5h = c.effective_used_5h();
+    let used_7d = c.effective_used_7d();
+
+    // Gate 1: 5h exhausted (and not past reset)
+    if used_5h >= 100.0 { return false; }
+    // Gate 2: 7d exhausted (and not past reset)
+    if used_7d >= 100.0 { return false; }
+    // Gate 3: 7d critically low and reset far away
+    if c.has_7d_data {
+        let remaining_7d = 100.0 - used_7d;
+        let critical_pct = (safety_margin_7d * 0.25_f64).max(1.0);
+        if remaining_7d < critical_pct {
+            let hours_to_reset = c.resets_at_7d
+                .map(|ts| ((ts - c.now) as f64 / 3600.0).max(0.0))
+                .unwrap_or(f64::MAX);
+            if hours_to_reset > 48.0 { return false; }
+        }
+    }
+    // Gate 4: Free plan safety floor
+    if c.is_free && c.has_5h_data {
+        let remaining_5h = 100.0 - used_5h;
+        if remaining_5h < FREE_FLOOR_PCT { return false; }
+    }
+    true
+}
+
 // ── 7d adjustment (shared by max-remaining & drain-first) ──
 
 /// Compute the 7d health adjustment (range: -300 to 0).
@@ -509,6 +593,7 @@ pub fn is_eligible(u: &UsageInfo, safety_margin_7d: f64) -> bool {
 /// * 7d remaining < `safety_margin` → penalty up to -300, reduced when
 ///   the 7d window resets within 48h.
 /// * No 7d data → -50 (mild penalty for unknown state)
+#[allow(dead_code)]
 fn compute_7d_adjustment(u: &UsageInfo, safety_margin: f64) -> f64 {
     const MAX_PENALTY: f64 = 300.0;
     const RELIEF_WINDOW_HOURS: f64 = 48.0;
@@ -552,6 +637,7 @@ fn compute_7d_adjustment(u: &UsageInfo, safety_margin: f64) -> f64 {
 
 /// If the 7d window is exhausted (used >= 100%), return a penalty score
 /// based on time-to-reset. Returns `None` if 7d is still usable.
+#[allow(dead_code)]
 fn score_7d_exhausted(u: &UsageInfo, now: i64) -> Option<f64> {
     let w7 = u.secondary.as_ref()?;
     let used_7d = w7.used_percent.unwrap_or(0.0);
@@ -575,6 +661,7 @@ fn score_7d_exhausted(u: &UsageInfo, now: i64) -> Option<f64> {
 ///
 /// Primary: 5h remaining% → higher is better.
 /// Secondary: 7d adjustment (additive, -300 to 0).
+#[allow(dead_code)]
 pub fn score(u: &UsageInfo, safety_margin_7d: f64) -> f64 {
     let now = auth::now_unix_secs();
 
@@ -618,6 +705,7 @@ pub fn score(u: &UsageInfo, safety_margin_7d: f64) -> f64 {
 /// * 7d window exhausted → heavily penalized.
 /// * Among usable accounts, shorter time-to-reset → higher score (1000-1300).
 /// * 7d adjustment applied additively (-300 to 0).
+#[allow(dead_code)]
 pub fn score_drain_first(u: &UsageInfo, min_remaining: f64, safety_margin_7d: f64) -> f64 {
     let now = auth::now_unix_secs();
 
@@ -686,6 +774,7 @@ pub fn score_drain_first(u: &UsageInfo, min_remaining: f64, safety_margin_7d: f6
 /// Two-tier comparison: (is_team, -last_used_ts).
 /// Team accounts are preferred; within the same tier, least-recently-used wins.
 /// Unavailable or 7d-critical accounts get `f64::NEG_INFINITY`.
+#[allow(dead_code)]
 pub fn score_round_robin(u: &UsageInfo, last_used_ts: i64, is_team: bool, safety_margin_7d: f64) -> f64 {
     if !is_eligible(u, safety_margin_7d) {
         return f64::NEG_INFINITY;
@@ -697,6 +786,114 @@ pub fn score_round_robin(u: &UsageInfo, last_used_ts: i64, is_team: bool, safety
     let team_tier: f64 = if is_team { 4e9 } else { 0.0 };
     // Within tier, prefer least recently used (negate timestamp).
     team_tier - (last_used_ts as f64)
+}
+
+/// Unified scoring algorithm. Pure function, no I/O.
+///
+/// Score = base_5h + adj_7d + pace_bonus + drain_bonus + spread_penalty + team_bonus
+/// Range: approximately -1250 to 1370.
+pub fn score_unified(c: &Candidate, safety_margin_7d: f64) -> f64 {
+    let used_5h = c.effective_used_5h();
+    let used_7d = c.effective_used_7d();
+
+    // ── Component A: base_5h ──
+    // Usable: 1000..1100 (higher = more remaining). Exhausted: 0..500 (higher = sooner reset). No data: 50.
+    let base_5h = if !c.has_5h_data {
+        50.0
+    } else if used_5h >= 100.0 {
+        match c.resets_at_5h {
+            None => 0.0,
+            Some(reset_ts) => {
+                let remaining_secs = (reset_ts - c.now).max(0) as f64;
+                (500.0 - remaining_secs / 60.0).max(0.0)
+            }
+        }
+    } else {
+        1000.0 + (100.0 - used_5h)
+    };
+
+    // ── Component B: adj_7d (-1100..0) ──
+    const MAX_7D_PENALTY: f64 = 1100.0;
+    const RELIEF_WINDOW_HOURS: f64 = 48.0;
+    const MAX_RELIEF: f64 = 0.8;
+
+    let adj_7d = if !c.has_7d_data {
+        -50.0
+    } else if used_7d >= 100.0 {
+        // 7d exhausted: heavy penalty, relieved as reset approaches.
+        // remaining_min=0 → reset imminent → penalty≈0; far from reset → penalty≈-base_5h
+        match c.resets_at_7d {
+            None => -base_5h,
+            Some(reset_ts) => {
+                let remaining_min = ((reset_ts - c.now).max(0) as f64) / 60.0;
+                // 7d window = 10080 min; normalize remaining to 0..1 relief factor
+                let relief = (1.0 - remaining_min / 10080.0).clamp(0.0, 1.0);
+                -base_5h * (1.0 - relief)
+            }
+        }
+    } else {
+        let remaining_7d = 100.0 - used_7d;
+        if remaining_7d >= safety_margin_7d {
+            0.0
+        } else {
+            let pressure = if safety_margin_7d > 0.0 {
+                ((safety_margin_7d - remaining_7d) / safety_margin_7d).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let time_relief = c.resets_at_7d
+                .map(|ts| {
+                    let hours = ((ts - c.now) as f64 / 3600.0).max(0.0);
+                    if hours < RELIEF_WINDOW_HOURS {
+                        (1.0 - hours / RELIEF_WINDOW_HOURS).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                })
+                .unwrap_or(0.0);
+            let effective = pressure * (1.0 - time_relief * MAX_RELIEF);
+            -MAX_7D_PENALTY * effective
+        }
+    };
+
+    // ── Component C: pace_bonus (-50..+50) ──
+    let pace_bonus = if c.has_5h_data {
+        if let Some(reset_ts) = c.resets_at_5h {
+            let remaining_secs = (reset_ts - c.now).max(0) as f64;
+            let elapsed = (WINDOW_5H_SECS as f64 - remaining_secs).clamp(0.0, WINDOW_5H_SECS as f64);
+            let expected_use = elapsed / WINDOW_5H_SECS as f64 * 100.0;
+            (expected_use - used_5h).clamp(-50.0, 50.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // ── Component D: drain_bonus (0..200) ──
+    let drain_bonus = if c.has_5h_data && used_5h < 100.0 {
+        if let Some(reset_ts) = c.resets_at_5h {
+            let remaining_min = ((reset_ts - c.now).max(0) as f64) / 60.0;
+            (200.0 - remaining_min * 200.0 / 300.0).clamp(0.0, 200.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // ── Component E: spread_penalty (-100..0) ──
+    let spread_penalty = if c.last_used == 0 {
+        0.0
+    } else {
+        let seconds_ago = (c.now - c.last_used).max(0) as f64;
+        -(100.0 - seconds_ago * 100.0 / 1800.0).clamp(0.0, 100.0)
+    };
+
+    // ── Component F: team_bonus (0 or 20) ──
+    let team_bonus = if c.is_team { 20.0 } else { 0.0 };
+
+    base_5h + adj_7d + pace_bonus + drain_bonus + spread_penalty + team_bonus
 }
 
 pub fn parse_usage(body: &Value) -> UsageInfo {
@@ -1406,5 +1603,93 @@ mod tests {
             Some(window(50.0, Some(9_999))),
         );
         assert_eq!(compute_7d_adjustment(&usage, 0.0), 0.0);
+    }
+
+    // ── unified scoring tests ──
+
+    fn make_candidate(alias: &str, used_5h: f64, reset_5h: Option<i64>, used_7d: f64, reset_7d: Option<i64>) -> Candidate {
+        Candidate {
+            alias: alias.to_string(),
+            used_5h, resets_at_5h: reset_5h,
+            used_7d, resets_at_7d: reset_7d,
+            has_5h_data: true, has_7d_data: true,
+            is_team: false, is_free: false,
+            last_used: 0, now: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn test_unified_healthy_prefers_more_remaining() {
+        let now = 1_000_000i64;
+        let a = make_candidate("a", 30.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        let b = make_candidate("b", 60.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        assert!(score_unified(&a, 20.0) > score_unified(&b, 20.0));
+    }
+
+    #[test]
+    fn test_unified_drain_prefers_sooner_reset() {
+        let now = 1_000_000i64;
+        let a = { let mut c = make_candidate("a", 40.0, Some(now + 1800), 20.0, Some(now + 5 * 86400)); c.now = now; c };
+        let b = { let mut c = make_candidate("b", 40.0, Some(now + 14400), 20.0, Some(now + 5 * 86400)); c.now = now; c };
+        assert!(score_unified(&a, 20.0) > score_unified(&b, 20.0), "sooner-resetting account should score higher");
+    }
+
+    #[test]
+    fn test_unified_7d_critical_overrides_5h() {
+        let now = 1_000_000i64;
+        let a = make_candidate("a", 0.0, Some(now + 18000), 95.0, Some(now + 6 * 86400));
+        let b = make_candidate("b", 50.0, Some(now + 7200), 30.0, Some(now + 5 * 86400));
+        assert!(score_unified(&b, 20.0) > score_unified(&a, 20.0), "7d-critical account should lose to healthy one");
+    }
+
+    #[test]
+    fn test_unified_spread_breaks_tie() {
+        let now = 1_000_000i64;
+        let mut a = make_candidate("a", 40.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        a.last_used = now - 5; // used 5 seconds ago
+        let mut b = make_candidate("b", 40.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        b.last_used = now - 1200; // used 20 minutes ago
+        assert!(score_unified(&b, 20.0) > score_unified(&a, 20.0), "recently-used account should score lower");
+    }
+
+    #[test]
+    fn test_unified_team_bonus() {
+        let now = 1_000_000i64;
+        let a = make_candidate("a", 40.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        let mut b = make_candidate("b", 40.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        b.is_team = true;
+        assert!(score_unified(&b, 20.0) > score_unified(&a, 20.0));
+    }
+
+    #[test]
+    fn test_unified_reset_aware() {
+        let now = 1_000_000i64;
+        let a = make_candidate("a", 80.0, Some(now - 600), 20.0, Some(now + 5 * 86400));
+        // resets_at_5h is in the past, so used_5h should be treated as 0
+        let score = score_unified(&a, 20.0);
+        assert!(score > 1000.0, "past-reset account should score as fully available, got {score}");
+    }
+
+    #[test]
+    fn test_unified_free_floor_ineligible() {
+        let now = 1_000_000i64;
+        let mut c = make_candidate("free1", 70.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        c.is_free = true;
+        // remaining_5h = 30%, below FREE_FLOOR_PCT (35%)
+        assert!(!is_candidate_eligible(&c, 20.0));
+    }
+
+    #[test]
+    fn test_unified_no_data_low_score() {
+        let c = Candidate {
+            alias: "unknown".to_string(),
+            used_5h: 0.0, resets_at_5h: None,
+            used_7d: 0.0, resets_at_7d: None,
+            has_5h_data: false, has_7d_data: false,
+            is_team: false, is_free: false,
+            last_used: 0, now: 1_000_000,
+        };
+        let score = score_unified(&c, 20.0);
+        assert!(score < 50.0, "no-data account should score low, got {score}");
     }
 }

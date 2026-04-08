@@ -204,17 +204,14 @@ pub async fn self_update_dev(show_progress: bool) -> Result<SelfUpdateResult> {
 /// `"dev"`. For stable releases the tag carries the version directly.
 fn extract_release_version(release: &GithubRelease) -> String {
     // Dev releases carry the version in the name: "dev (X.Y.Z-dev.TS)"
-    if release.tag_name == "dev" {
-        if let Some(v) = release
+    if release.tag_name == "dev"
+        && let Some(v) = release
             .name
             .as_deref()
             .and_then(|n| n.strip_prefix("dev ("))
             .and_then(|n| n.strip_suffix(')'))
-        {
-            if Version::parse(v).is_ok() {
-                return v.to_string();
-            }
-        }
+        && Version::parse(v).is_ok() {
+        return v.to_string();
     }
     normalize_version(&release.tag_name)
 }
