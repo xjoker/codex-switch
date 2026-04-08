@@ -949,11 +949,19 @@ async fn self_update_cmd(
         match result {
             Some(info) => {
                 let hint = if use_dev {
-                    if info.install_source == update::InstallSource::Homebrew {
+                    if info.install_source == update::InstallSource::Homebrew
+                        && !update::is_dev_version(&info.current_version)
+                    {
                         "brew uninstall codex-switch` first, then `codex-switch self-update --dev"
+                    } else if dev {
+                        // Explicit --dev flag: include it in the hint.
+                        "codex-switch self-update --dev"
                     } else {
+                        // Already on dev (auto-detected): plain self-update stays in dev.
                         "codex-switch self-update"
                     }
+                } else if stable {
+                    "codex-switch self-update --stable"
                 } else {
                     info.install_source.upgrade_hint()
                 };

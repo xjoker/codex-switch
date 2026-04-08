@@ -269,13 +269,23 @@ impl App {
     }
 
     /// Returns true if the account's 5h window is still active (reset time in the future).
+    /// Checks both loaded usage data and the cache (covers Loading/Idle states).
     fn is_already_warmed(&self, alias: &str) -> bool {
         let now = crate::auth::now_unix_secs();
-        self.accounts.iter().any(|a| {
+        // Check loaded usage first.
+        let loaded = self.accounts.iter().any(|a| {
             a.alias == alias
                 && matches!(&a.usage, UsageStatus::Loaded(u)
                     if u.primary.as_ref().and_then(|w| w.resets_at).is_some_and(|t| t > now))
-        })
+        });
+        if loaded {
+            return true;
+        }
+        // Fall back to cache (covers Loading/Idle states before usage is fetched).
+        crate::cache::get(alias)
+            .and_then(|u| u.primary)
+            .and_then(|w| w.resets_at)
+            .is_some_and(|t| t > now)
     }
 
     pub fn warmup_selected(&mut self) {
@@ -296,14 +306,10 @@ impl App {
     }
 
     pub fn warmup_all(&mut self) {
-        let now = crate::auth::now_unix_secs();
         let aliases: Vec<String> = self
             .accounts
             .iter()
-            .filter(|a| {
-                !matches!(&a.usage, UsageStatus::Loaded(u)
-                    if u.primary.as_ref().and_then(|w| w.resets_at).is_some_and(|t| t > now))
-            })
+            .filter(|a| !self.is_already_warmed(&a.alias))
             .map(|a| a.alias.clone())
             .collect();
         if aliases.is_empty() {

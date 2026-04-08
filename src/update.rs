@@ -90,7 +90,14 @@ pub async fn check_for_dev_update() -> Result<Option<UpdateInfo>> {
     let current_version = current_version().to_string();
     let release = match fetch_release(Some("dev")).await {
         Ok(r) => r,
-        Err(_) => return Ok(None),
+        Err(e) => {
+            // 404 means no dev release exists — not an error.
+            let msg = format!("{e:#}");
+            if msg.contains("404") {
+                return Ok(None);
+            }
+            return Err(e.context("checking dev release"));
+        }
     };
     let dev_version = extract_release_version(&release);
     if !is_newer_version(&dev_version, &current_version) {
@@ -199,7 +206,10 @@ fn extract_release_version(release: &GithubRelease) -> String {
         .and_then(|n| n.strip_prefix("dev ("))
         .and_then(|n| n.strip_suffix(')'))
     {
-        return v.to_string();
+        // Validate that the extracted string is valid semver.
+        if Version::parse(v).is_ok() {
+            return v.to_string();
+        }
     }
     normalize_version(&release.tag_name)
 }

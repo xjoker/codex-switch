@@ -183,15 +183,9 @@ jobs:
 
       - name: Delete existing dev release
         if: needs.meta.outputs.is_dev == 'true'
-        run: gh release delete dev --yes --cleanup-tag || true
+        run: gh release delete dev --yes || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Re-create dev tag at current commit
-        if: needs.meta.outputs.is_dev == 'true'
-        run: |
-          git tag -f dev "$GITHUB_SHA"
-          git push -f origin dev
 
       - name: Generate dev release body
         if: needs.meta.outputs.is_dev == 'true'
