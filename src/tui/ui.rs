@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::app::{App, UsageStatus};
-use crate::output::{format_reset_short, format_reset_time};
+use crate::output::{format_local_time, format_reset_short, format_reset_time};
 use crate::usage::{UsageInfo, is_available};
 
 pub fn render(f: &mut Frame, app: &App) {
@@ -531,7 +531,7 @@ fn render_usage_gauge(
 
     f.render_widget(Paragraph::new(Line::from(spans)), gauge_area);
 
-    // Row 2: "↑ pace" at pace position, reset time right-aligned
+    // Row 2: "started HH:MM" left, "↑ pace" at pace position, "resets in ..." right
     let reset_area = Rect {
         y: area.y + 1,
         height: 1,
@@ -539,17 +539,35 @@ fn render_usage_gauge(
     };
     let reset_text = format!("resets in {reset_str}");
     let reset_style = Style::default().fg(reset_color(remaining_secs));
+    let started_text = w
+        .resets_at
+        .map(|ts| format!("started {}", format_local_time(ts - window_secs)))
+        .unwrap_or_default();
+    let started_len = started_text.len();
+
+    let total_width = reset_area.width as usize;
+    let reset_start = total_width.saturating_sub(reset_text.len());
 
     let row2 = if let Some(pp) = pace_pos {
         let arrow_offset = label_text.len() + pp;
-        let total_width = reset_area.width as usize;
         let pace_label = "\u{2191} pace"; // ↑ pace  (display width = 6, byte len = 8)
         const PACE_LABEL_DISPLAY_WIDTH: usize = 6;
-        // Right-align reset text; only show pace label if there's room for both
-        let reset_start = total_width.saturating_sub(reset_text.len());
         let pace_end = arrow_offset + PACE_LABEL_DISPLAY_WIDTH;
 
-        if pace_end + 2 <= reset_start {
+        // Try to fit: started ... ↑ pace ... resets in ...
+        if !started_text.is_empty()
+            && started_len + 2 <= arrow_offset
+            && pace_end + 2 <= reset_start
+        {
+            Line::from(vec![
+                Span::styled(&started_text, Style::default().fg(Color::DarkGray)),
+                Span::raw(" ".repeat(arrow_offset - started_len)),
+                Span::styled(pace_label, Style::default().fg(Color::DarkGray)),
+                Span::raw(" ".repeat(reset_start - pace_end)),
+                Span::styled(reset_text, reset_style),
+            ])
+        } else if pace_end + 2 <= reset_start {
+            // No room for started, show pace + reset
             Line::from(vec![
                 Span::raw(" ".repeat(arrow_offset)),
                 Span::styled(pace_label, Style::default().fg(Color::DarkGray)),
@@ -557,17 +575,29 @@ fn render_usage_gauge(
                 Span::styled(reset_text, reset_style),
             ])
         } else {
-            // Not enough room — skip pace label, right-align reset only
-            Line::from(vec![
-                Span::raw(" ".repeat(reset_start)),
-                Span::styled(reset_text, reset_style),
-            ])
+            // Tight: started left, reset right
+            let mut spans = Vec::new();
+            if !started_text.is_empty() && started_len + 2 <= reset_start {
+                spans.push(Span::styled(&started_text, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::raw(" ".repeat(reset_start - started_len)));
+            } else {
+                spans.push(Span::raw(" ".repeat(reset_start)));
+            }
+            spans.push(Span::styled(reset_text, reset_style));
+            Line::from(spans)
         }
     } else {
-        Line::from(vec![
-            Span::raw(" ".repeat(label_text.len())),
-            Span::styled(reset_text, reset_style),
-        ])
+        // No pace marker: started left, reset after label offset
+        let mut spans = Vec::new();
+        if !started_text.is_empty() {
+            spans.push(Span::styled(&started_text, Style::default().fg(Color::DarkGray)));
+            let gap = reset_start.saturating_sub(started_len);
+            spans.push(Span::raw(" ".repeat(gap)));
+        } else {
+            spans.push(Span::raw(" ".repeat(label_text.len())));
+        }
+        spans.push(Span::styled(reset_text, reset_style));
+        Line::from(spans)
     };
 
     f.render_widget(Paragraph::new(row2), reset_area);
@@ -645,7 +675,6 @@ const HELP_ITEMS: &[(&str, &str)] = &[
     ("Space", " mark "),
     ("b", " batch "),
     ("w", " warmup "),
-    ("W", " warmup all "),
     ("c", " clear "),
     ("n", " rename "),
     ("d", " del "),

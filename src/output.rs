@@ -215,6 +215,20 @@ pub fn format_reset_short(ts: i64) -> String {
     }
 }
 
+/// Format a timestamp as local time: "HH:MM" (today) or "MM-DD HH:MM" (other days).
+pub fn format_local_time(ts: i64) -> String {
+    let now = Local::now();
+    let dt: DateTime<Local> = match Local.timestamp_opt(ts, 0).single() {
+        Some(d) => d,
+        None => return "--".into(),
+    };
+    if dt.date_naive() == now.date_naive() {
+        dt.format("%H:%M").to_string()
+    } else {
+        dt.format("%m-%d %H:%M").to_string()
+    }
+}
+
 // ── Output ───────────────────────────────────────────────
 
 static JSON_PRETTY: OnceLock<bool> = OnceLock::new();

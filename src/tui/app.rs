@@ -288,30 +288,15 @@ impl App {
             .is_some_and(|t| t > now)
     }
 
-    pub fn warmup_selected(&mut self) {
-        let entry = match self
-            .selected_account_idx()
-            .and_then(|idx| self.accounts.get(idx))
-        {
-            Some(e) => e,
-            None => return,
-        };
-        let alias = entry.alias.clone();
-        if self.is_already_warmed(&alias) {
-            self.set_status(format!("{alias} already active, skipped"), 4);
-            return;
-        }
-        self.spawn_warmup(alias.clone());
-        self.set_status(format!("Warming up {alias}..."), 10);
-    }
-
-    pub fn warmup_all(&mut self) {
+    /// Warmup all accounts, skipping already-active ones.
+    pub fn warmup(&mut self) {
         let aliases: Vec<String> = self
             .accounts
             .iter()
             .filter(|a| !self.is_already_warmed(&a.alias))
             .map(|a| a.alias.clone())
             .collect();
+
         if aliases.is_empty() {
             self.set_status("All accounts already active".into(), 4);
             return;
@@ -802,8 +787,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 KeyCode::Char('n') => app.start_rename(),
                 KeyCode::Char('s') => app.cycle_sort(),
                 KeyCode::Char('c') => app.clear_marks(),
-                KeyCode::Char('w') => app.warmup_selected(),
-                KeyCode::Char('W') => app.warmup_all(),
+                KeyCode::Char('w') => app.warmup(),
                 KeyCode::Char(' ') => app.toggle_mark(),
                 KeyCode::Char('/') => {
                     if let Some(search) = &mut app.search {
