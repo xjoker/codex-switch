@@ -259,7 +259,9 @@ async fn download_and_replace(
     if show_progress {
         eprintln!("Replacing current executable...");
     }
-    self_replace::self_replace(&extracted_path).context("replacing current executable")?;
+    self_replace::self_replace(&extracted_path).context(
+        "replacing current executable (permission denied? try: sudo codex-switch self-update)",
+    )?;
     Ok(())
 }
 
