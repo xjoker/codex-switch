@@ -1,6 +1,6 @@
 # codex-switch installer / uninstaller for Windows
 # Usage:
-#   irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.ps1 | iex
 #   $env:CS_DEV="1"; irm .../install.ps1 | iex              # install latest dev build
 #   $env:CS_VERSION="0.0.11"; irm .../install.ps1 | iex      # install specific version
 #   $env:CS_UNINSTALL="1"; irm .../install.ps1 | iex         # uninstall codex-switch

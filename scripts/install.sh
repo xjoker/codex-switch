@@ -3,7 +3,7 @@ set -euo pipefail
 
 # codex-switch installer / uninstaller for macOS and Linux
 # Usage:
-#   curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.sh | bash
 #   curl -fsSL .../install.sh | bash -s -- --dev          # install latest dev build
 #   curl -fsSL .../install.sh | bash -s -- --uninstall    # uninstall codex-switch
 #   CS_VERSION=0.0.11 curl -fsSL .../install.sh | bash    # install specific version

@@ -6,7 +6,9 @@
 
 ---
 
-![TUI 截图](docs/tui.png)
+| TUI | CLI |
+|:---:|:---:|
+| ![TUI](docs/tui.png) | ![CLI](docs/cli.png) |
 
 ## 功能特性
 
@@ -20,7 +22,9 @@
 - **OAuth 登录** — 内置 PKCE 浏览器登录流程，无需手动复制 token
 - **Token 自动刷新** — 使用 refresh_token 自动刷新过期 token
 - **批量导入校验** — 支持单文件导入，也支持递归扫描目录、分阶段校验并自动分配不重复别名
-- **手动自更新** — `self-update --check` 按需检查 GitHub Releases，`self-update` 更新直装版本
+- **配速标记** — 用量条上显示基于窗口已过时间的预期消耗位置，直观判断用量快慢
+- **预热** — `warmup` 发送最小请求以启动配额窗口倒计时，已激活的账号自动跳过
+- **手动自更新** — `self-update --check` 按需检查 GitHub Releases，`self-update` 更新直装版本（支持 stable 和 dev 双渠道）
 - **代理支持** — HTTP/HTTPS/SOCKS4/SOCKS5/SOCKS5H，支持鉴权
 - **跨平台** — macOS、Linux、Windows
 - **JSON 输出** — `--json` 参数支持脚本化和自动化
@@ -32,13 +36,13 @@
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.sh | bash
 ```
 
 **Windows（PowerShell）：**
 
 ```powershell
-irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.ps1 | iex
 ```
 
 ### Homebrew（macOS / Linux）
@@ -52,13 +56,13 @@ brew install xjoker/tap/codex-switch
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash -s -- --dev
+curl -fsSL https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.sh | bash -s -- --dev
 ```
 
 **Windows（PowerShell）：**
 
 ```powershell
-$env:CS_DEV="1"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+$env:CS_DEV="1"; irm https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.ps1 | iex
 ```
 
 ### 卸载
@@ -66,13 +70,13 @@ $env:CS_DEV="1"; irm https://github.com/xjoker/codex-switch/releases/latest/down
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.sh | bash -s -- --uninstall
 ```
 
 **Windows（PowerShell）：**
 
 ```powershell
-$env:CS_UNINSTALL="1"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+$env:CS_UNINSTALL="1"; irm https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.ps1 | iex
 ```
 
 ### 手动下载

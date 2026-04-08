@@ -4,8 +4,11 @@
 
 ### Added
 
-- **`warmup` command** — `codex-switch warmup [alias]` sends a minimal Codex request (`ping`) to activate the 5h/7d quota window countdown for a fresh account. Omit alias to warm up all saved profiles concurrently. Supports `--json` output with per-account results and a top-level `ok` field
+- **`warmup` command** — `codex-switch warmup [alias]` sends a minimal Codex request (`ping`) to activate the 5h/7d quota window countdown for a fresh account. Omit alias to warm up all saved profiles concurrently. Already-active accounts (reset time still in the future) are automatically skipped. Supports `--json` output with per-account results and a top-level `ok` field
 - **TUI warmup** — Press `w` to warm up the selected account or `W` to warm up all accounts. Usage is automatically refreshed after warmup completes
+- **Pace Marker** — Usage bars (CLI and TUI) now display a `|` pace marker showing expected consumption based on elapsed window time, making it easy to see if you're ahead or behind budget
+- **Dev update channel** — `self-update --dev` installs the latest dev build; `self-update --stable` switches back. Without flags, auto-detects the current channel. Dev builds use timestamped semver (`0.0.11-dev.YYYYMMDDHHmmss`) for proper update detection
+- **Install scripts enhanced** — `install.sh --dev` / `$env:CS_DEV="1"` for dev channel install; `install.sh --uninstall` / `$env:CS_UNINSTALL="1"` for clean removal. Homebrew-installed versions are detected and blocked from direct-install to prevent PATH conflicts
 - **Startup auth change detection** — On launch, codex-switch compares the live `~/.codex/auth.json` against all saved profiles. If a new account is detected (e.g., the user ran `codex login`), it prompts to save as a new profile. If tokens were refreshed for an existing account, it prompts to update the corresponding profile
 - **Non-interactive safety** — When stdin is not a TTY (pipes, cron, CI), startup detection informs without silently mutating state. EOF on stdin is treated as rejection
 
@@ -27,6 +30,9 @@
 - **`auto_track_current` current pointer sync** — When `auth.json` matches an existing saved profile but the `current` file points elsewhere, the pointer is now updated automatically instead of being left stale
 - **Empty `account_id` treated as present** — `/tokens/account_id: ""` was not filtered, preventing the email-only identity fallback. Empty strings are now treated as `None`, consistent with JWT claims filtering
 - **`list` respects startup detection** — When startup auth detection already handled the live `auth.json`, `list` no longer runs `auto_track_current()` a second time, preventing silent saves after an explicit user rejection
+- **Dev update 404 handling** — `check_for_dev_update` now uses proper HTTP status code detection instead of string matching; network errors are propagated while 404 (no dev release) returns `None`
+- **Dev update redundant reinstall** — `self_update_dev` now compares versions before downloading, avoiding re-download when already on the latest dev build
+- **Dev version extraction safety** — `extract_release_version` only attempts dev name parsing when `tag_name == "dev"`, preventing false matches on stable releases
 
 ## v0.0.10 — 2026-04-02
 

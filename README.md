@@ -6,7 +6,9 @@ Multi-account profile manager for [OpenAI Codex CLI](https://github.com/openai/c
 
 ---
 
-![TUI Screenshot](docs/tui.png)
+| TUI | CLI |
+|:---:|:---:|
+| ![TUI](docs/tui.png) | ![CLI](docs/cli.png) |
 
 ## Features
 
@@ -20,7 +22,9 @@ Multi-account profile manager for [OpenAI Codex CLI](https://github.com/openai/c
 - **OAuth Login** — Built-in PKCE browser login flow, no manual token copying
 - **Token Auto-Refresh** — Automatically refreshes expired tokens using refresh_token
 - **Validated Bulk Import** — Import a single `auth.json` or recursively scan a directory, validate files, and auto-assign unique aliases
-- **Manual Self-Update** — `self-update --check` checks GitHub Releases on demand; `self-update` installs the latest release for direct installs
+- **Pace Marker** — Visual indicator on usage bars showing expected consumption based on elapsed window time
+- **Warmup** — `warmup` sends a minimal request to activate the quota window countdown, skipping already-active accounts
+- **Manual Self-Update** — `self-update --check` checks GitHub Releases on demand; `self-update` installs the latest release (supports stable and dev channels)
 - **Proxy Support** — HTTP/HTTPS/SOCKS4/SOCKS5/SOCKS5H with authentication
 - **Cross-Platform** — macOS, Linux, Windows
 - **JSON Output** — `--json` flag for scripting and automation
@@ -32,13 +36,13 @@ Multi-account profile manager for [OpenAI Codex CLI](https://github.com/openai/c
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.ps1 | iex
 ```
 
 ### Homebrew (macOS / Linux)
@@ -52,13 +56,13 @@ brew install xjoker/tap/codex-switch
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash -s -- --dev
+curl -fsSL https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.sh | bash -s -- --dev
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-$env:CS_DEV="1"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+$env:CS_DEV="1"; irm https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.ps1 | iex
 ```
 
 ### Uninstall
@@ -66,13 +70,13 @@ $env:CS_DEV="1"; irm https://github.com/xjoker/codex-switch/releases/latest/down
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.sh | bash -s -- --uninstall
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-$env:CS_UNINSTALL="1"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+$env:CS_UNINSTALL="1"; irm https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.ps1 | iex
 ```
 
 ### From GitHub Releases (Manual)

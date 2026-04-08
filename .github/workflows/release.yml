@@ -162,13 +162,13 @@ jobs:
           ### macOS / Linux (one-liner)
 
           ```bash
-          curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+          curl -fsSL https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.sh | bash
           ```
 
           ### Windows (PowerShell)
 
           ```powershell
-          irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+          irm https://raw.githubusercontent.com/xjoker/codex-switch/master/scripts/install.ps1 | iex
           ```
 
           ### Manual Download
