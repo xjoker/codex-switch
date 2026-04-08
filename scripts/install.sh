@@ -1,27 +1,81 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# codex-switch installer for macOS and Linux
+# codex-switch installer / uninstaller for macOS and Linux
 # Usage:
 #   curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
 #   curl -fsSL .../install.sh | bash -s -- --dev          # install latest dev build
+#   curl -fsSL .../install.sh | bash -s -- --uninstall    # uninstall codex-switch
 #   CS_VERSION=0.0.11 curl -fsSL .../install.sh | bash    # install specific version
 
 REPO="xjoker/codex-switch"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="codex-switch"
+DATA_DIR="${HOME}/.codex-switch"
 
 info()  { printf '\033[0;34m[info]\033[0m  %s\n' "$*"; }
+warn()  { printf '\033[0;33m[warn]\033[0m  %s\n' "$*"; }
 error() { printf '\033[0;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Parse arguments
 USE_DEV=false
+UNINSTALL=false
 for arg in "$@"; do
   case "$arg" in
-    --dev) USE_DEV=true ;;
-    *)     error "Unknown argument: $arg" ;;
+    --dev)       USE_DEV=true ;;
+    --uninstall) UNINSTALL=true ;;
+    *)           error "Unknown argument: $arg" ;;
   esac
 done
+
+# ── Uninstall ────────────────────────────────────────────
+if [ "$UNINSTALL" = true ]; then
+  info "Uninstalling codex-switch..."
+
+  # Check for Homebrew install
+  BREW_BIN="$(command -v codex-switch 2>/dev/null || true)"
+  if [ -n "$BREW_BIN" ]; then
+    RESOLVED="$(readlink -f "$BREW_BIN" 2>/dev/null || realpath "$BREW_BIN" 2>/dev/null || echo "$BREW_BIN")"
+    case "$RESOLVED" in
+      */Cellar/codex-switch/*|*/Homebrew/*)
+        info "Homebrew installation detected. Running: brew uninstall codex-switch"
+        brew uninstall codex-switch || error "brew uninstall failed"
+        ;;
+    esac
+  fi
+
+  # Remove direct-install binary
+  BIN_PATH="${INSTALL_DIR}/${BINARY_NAME}"
+  if [ -f "$BIN_PATH" ]; then
+    if [ -w "$INSTALL_DIR" ]; then
+      rm -f "$BIN_PATH"
+    else
+      info "Removing ${BIN_PATH} (requires sudo)"
+      sudo rm -f "$BIN_PATH"
+    fi
+    info "Removed ${BIN_PATH}"
+  fi
+
+  # Remove data directory
+  if [ -d "$DATA_DIR" ]; then
+    printf '%s' "[info]  Remove data directory ${DATA_DIR}? [y/N] "
+    read -r answer < /dev/tty 2>/dev/null || answer="n"
+    case "$answer" in
+      [yY]|[yY][eE][sS])
+        rm -rf "$DATA_DIR"
+        info "Removed ${DATA_DIR}"
+        ;;
+      *)
+        info "Kept ${DATA_DIR}"
+        ;;
+    esac
+  fi
+
+  info "codex-switch has been uninstalled."
+  exit 0
+fi
+
+# ── Install ──────────────────────────────────────────────
 
 # Detect OS and architecture
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
