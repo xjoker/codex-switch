@@ -270,42 +270,74 @@ impl App {
 
     /// Returns true if the account's 5h window is still active (reset time in the future).
     /// Checks both loaded usage data and the cache (covers Loading/Idle states).
+    /// An account is considered "warmed" only if its 5h window is active AND
+    /// has actual usage (`used_percent > 0`). The usage API returns `resets_at`
+    /// on every call even for unused accounts, so `resets_at > now` alone is
+    /// not sufficient — it would always be true after a usage fetch.
     fn is_already_warmed(&self, alias: &str) -> bool {
         let now = crate::auth::now_unix_secs();
-        // Check loaded usage first.
         let loaded = self.accounts.iter().any(|a| {
             a.alias == alias
                 && matches!(&a.usage, UsageStatus::Loaded(u)
-                    if u.primary.as_ref().and_then(|w| w.resets_at).is_some_and(|t| t > now))
+                    if u.primary.as_ref().is_some_and(|w|
+                        w.resets_at.is_some_and(|t| t > now)
+                        && w.used_percent.is_some_and(|p| p > 0.0)))
         });
         if loaded {
             return true;
         }
-        // Fall back to cache (covers Loading/Idle states before usage is fetched).
         crate::cache::get(alias)
             .and_then(|u| u.primary)
-            .and_then(|w| w.resets_at)
-            .is_some_and(|t| t > now)
+            .is_some_and(|w| {
+                w.resets_at.is_some_and(|t| t > now)
+                    && w.used_percent.is_some_and(|p| p > 0.0)
+            })
     }
 
-    /// Warmup all accounts, skipping already-active ones.
+    /// Warmup all accounts, skipping already-active and errored ones.
     pub fn warmup(&mut self) {
+        let total = self.accounts.len();
+        let error_count = self
+            .accounts
+            .iter()
+            .filter(|a| matches!(a.usage, UsageStatus::Error(_)))
+            .count();
+        let active_count = self
+            .accounts
+            .iter()
+            .filter(|a| {
+                !matches!(a.usage, UsageStatus::Error(_)) && self.is_already_warmed(&a.alias)
+            })
+            .count();
         let aliases: Vec<String> = self
             .accounts
             .iter()
-            .filter(|a| !self.is_already_warmed(&a.alias))
+            .filter(|a| {
+                !matches!(a.usage, UsageStatus::Error(_)) && !self.is_already_warmed(&a.alias)
+            })
             .map(|a| a.alias.clone())
             .collect();
 
         if aliases.is_empty() {
-            self.set_status("All accounts already active".into(), 4);
+            let mut msg = format!("All {total} accounts already active");
+            if error_count > 0 {
+                msg.push_str(&format!(", {error_count} error skipped"));
+            }
+            self.set_status(msg, 4);
             return;
         }
         let count = aliases.len();
         for alias in aliases {
             self.spawn_warmup(alias);
         }
-        self.set_status(format!("Warming up {count} account(s)..."), 10);
+        let mut msg = format!("Warming up {count} account(s)...");
+        if active_count > 0 {
+            msg.push_str(&format!(" ({active_count} already active)"));
+        }
+        if error_count > 0 {
+            msg.push_str(&format!(" ({error_count} error skipped)"));
+        }
+        self.set_status(msg, 10);
     }
 
     fn spawn_warmup(&mut self, alias: String) {
