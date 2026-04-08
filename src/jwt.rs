@@ -3,20 +3,21 @@ use serde_json::Value;
 
 /// Single organization/workspace entry
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct OrgInfo {
+    #[allow(dead_code)]
     pub id: String,
     pub title: String,
+    #[allow(dead_code)]
     pub role: String,
     pub is_default: bool,
 }
 
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct AccountInfo {
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub account_id: Option<String>,
+    #[allow(dead_code)]
     pub user_id: Option<String>,
     pub workspace_name: Option<String>,
     pub organizations: Vec<OrgInfo>,

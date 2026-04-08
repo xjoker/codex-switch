@@ -38,7 +38,6 @@ urlencoding = "2"
 toml = "1"
 rand = "0.10"
 chrono = { version = "0.4", features = ["clock"] }
-futures = { version = "0.3", default-features = false, features = ["executor"] }
 supports-color = "3"
 owo-colors = "4"
 tar = "0.4"

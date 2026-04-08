@@ -62,15 +62,6 @@ pub fn warn(s: &str) -> String {
     }
 }
 
-/// Cyan text for info/labels
-pub fn info(s: &str) -> String {
-    if enabled() {
-        format!("{}", s.cyan())
-    } else {
-        s.to_string()
-    }
-}
-
 /// Dim/gray text
 pub fn dim(s: &str) -> String {
     if enabled() {
@@ -109,20 +100,6 @@ pub fn usage_pct(s: &str, pct: f64) -> String {
         format!("{}", s.yellow())
     } else {
         format!("{}", s.green())
-    }
-}
-
-/// Color a reset countdown: green = soon (< 1h), yellow = medium (< 4h), red = far (>= 4h)
-pub fn reset_time(s: &str, remaining_secs: i64) -> String {
-    if !enabled() {
-        return s.to_string();
-    }
-    if remaining_secs < 3600 {
-        format!("{}", s.green())
-    } else if remaining_secs < 14400 {
-        format!("{}", s.yellow())
-    } else {
-        format!("{}", s.red())
     }
 }
 

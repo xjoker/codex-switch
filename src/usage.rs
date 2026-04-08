@@ -544,6 +544,27 @@ fn compute_7d_adjustment(u: &UsageInfo, safety_margin: f64) -> f64 {
 
 // ── scoring functions ───────────────────────────────────────
 
+/// If the 7d window is exhausted (used >= 100%), return a penalty score
+/// based on time-to-reset. Returns `None` if 7d is still usable.
+fn score_7d_exhausted(u: &UsageInfo, now: i64) -> Option<f64> {
+    let w7 = u.secondary.as_ref()?;
+    let used_7d = w7.used_percent.unwrap_or(0.0);
+    if used_7d < 100.0 {
+        return None;
+    }
+    Some(match w7.resets_at {
+        None => 0.0,
+        Some(reset_ts) => {
+            let remaining_secs = reset_ts - now;
+            if remaining_secs <= 0 {
+                100.0
+            } else {
+                (100.0 - (remaining_secs as f64 / 60.0)).max(0.0)
+            }
+        }
+    })
+}
+
 /// Score an account for **max-remaining** mode.
 ///
 /// Primary: 5h remaining% → higher is better.
@@ -551,22 +572,8 @@ fn compute_7d_adjustment(u: &UsageInfo, safety_margin: f64) -> f64 {
 pub fn score(u: &UsageInfo, safety_margin_7d: f64) -> f64 {
     let now = auth::now_unix_secs();
 
-    // 7d window exhausted → heavily penalized
-    if let Some(w7) = &u.secondary {
-        let used_7d = w7.used_percent.unwrap_or(0.0);
-        if used_7d >= 100.0 {
-            return match w7.resets_at {
-                None => 0.0,
-                Some(reset_ts) => {
-                    let remaining_secs = reset_ts - now;
-                    if remaining_secs <= 0 {
-                        100.0
-                    } else {
-                        (100.0 - (remaining_secs as f64 / 60.0)).max(0.0)
-                    }
-                }
-            };
-        }
+    if let Some(penalty) = score_7d_exhausted(u, now) {
+        return penalty;
     }
 
     let base = match &u.primary {
@@ -608,22 +615,8 @@ pub fn score(u: &UsageInfo, safety_margin_7d: f64) -> f64 {
 pub fn score_drain_first(u: &UsageInfo, min_remaining: f64, safety_margin_7d: f64) -> f64 {
     let now = auth::now_unix_secs();
 
-    // 7d window exhausted → heavily penalized
-    if let Some(w7) = &u.secondary {
-        let used_7d = w7.used_percent.unwrap_or(0.0);
-        if used_7d >= 100.0 {
-            return match w7.resets_at {
-                None => 0.0,
-                Some(reset_ts) => {
-                    let remaining_secs = reset_ts - now;
-                    if remaining_secs <= 0 {
-                        100.0
-                    } else {
-                        (100.0 - (remaining_secs as f64 / 60.0)).max(0.0)
-                    }
-                }
-            };
-        }
+    if let Some(penalty) = score_7d_exhausted(u, now) {
+        return penalty;
     }
 
     let base = match &u.primary {

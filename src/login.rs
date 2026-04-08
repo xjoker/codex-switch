@@ -1,9 +1,8 @@
-/// Codex OAuth PKCE login flow
+/// Codex OAuth login flows
 ///
-/// Matches the Codex CLI / Codex-Manager flow:
-/// - PKCE Authorization Code Flow (not Device Flow)
-/// - Local HTTP callback server on port 1455, with localhost fallback port selection
-/// - Browser completes authorization and redirects back
+/// Two supported flows:
+/// - PKCE Authorization Code Flow — browser-based, local HTTP callback on port 1455
+/// - Device Code Flow (`--device`) — for headless servers without a browser
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};

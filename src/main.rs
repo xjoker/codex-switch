@@ -1,7 +1,6 @@
 mod auth;
 mod cache;
 mod cli;
-#[allow(dead_code)]
 mod color;
 mod config;
 mod error;
