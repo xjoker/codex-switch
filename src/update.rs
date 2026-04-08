@@ -88,16 +88,12 @@ pub async fn check_for_update(force: bool) -> Result<Option<UpdateInfo>> {
 /// so each build is unique and semver-comparable.
 pub async fn check_for_dev_update() -> Result<Option<UpdateInfo>> {
     let current_version = current_version().to_string();
-    let release = match fetch_release(Some("dev")).await {
-        Ok(r) => r,
-        Err(e) => {
-            // 404 means no dev release exists — not an error.
-            let msg = format!("{e:#}");
-            if msg.contains("404") {
-                return Ok(None);
-            }
-            return Err(e.context("checking dev release"));
-        }
+    let release = match fetch_release_optional(Some("dev"))
+        .await
+        .context("checking dev release")?
+    {
+        Some(r) => r,
+        None => return Ok(None), // No dev release exists (404).
     };
     let dev_version = extract_release_version(&release);
     if !is_newer_version(&dev_version, &current_version) {
@@ -167,8 +163,6 @@ pub async fn self_update(version: Option<&str>, show_progress: bool) -> Result<S
 
 /// Install the dev build from the `dev` GitHub Release tag.
 ///
-/// Dev builds always reinstall since the underlying binary may be newer even
-/// if the base version hasn't changed.
 /// Switching from dev→stable uses the normal `self_update` path.
 pub async fn self_update_dev(show_progress: bool) -> Result<SelfUpdateResult> {
     let install_source = detect_install_source();
@@ -184,6 +178,15 @@ pub async fn self_update_dev(show_progress: bool) -> Result<SelfUpdateResult> {
         .context("fetching dev release from GitHub")?;
     let dev_version = extract_release_version(&release);
 
+    if !is_newer_version(&dev_version, &current_version) {
+        return Ok(SelfUpdateResult {
+            current_version,
+            latest_version: dev_version,
+            install_source,
+            updated: false,
+        });
+    }
+
     download_and_replace(&release, show_progress, " (dev)").await?;
 
     Ok(SelfUpdateResult {
@@ -196,19 +199,21 @@ pub async fn self_update_dev(show_progress: bool) -> Result<SelfUpdateResult> {
 
 /// Extract a semver-compatible version string from a GitHub Release.
 ///
-/// For dev releases the version is embedded in the release name (e.g. `"dev (0.0.11-dev.20260408)"`)
-/// because the tag itself is just `"dev"`. For normal releases the tag carries the version.
+/// For dev releases (`is_dev = true`) the version is embedded in the release
+/// name (e.g. `"dev (0.0.11-dev.20260408)"`) because the tag itself is just
+/// `"dev"`. For stable releases the tag carries the version directly.
 fn extract_release_version(release: &GithubRelease) -> String {
-    // Try release name first: "dev (X.Y.Z-dev.TS)" → "X.Y.Z-dev.TS"
-    if let Some(v) = release
-        .name
-        .as_deref()
-        .and_then(|n| n.strip_prefix("dev ("))
-        .and_then(|n| n.strip_suffix(')'))
-    {
-        // Validate that the extracted string is valid semver.
-        if Version::parse(v).is_ok() {
-            return v.to_string();
+    // Dev releases carry the version in the name: "dev (X.Y.Z-dev.TS)"
+    if release.tag_name == "dev" {
+        if let Some(v) = release
+            .name
+            .as_deref()
+            .and_then(|n| n.strip_prefix("dev ("))
+            .and_then(|n| n.strip_suffix(')'))
+        {
+            if Version::parse(v).is_ok() {
+                return v.to_string();
+            }
         }
     }
     normalize_version(&release.tag_name)
@@ -306,21 +311,39 @@ async fn latest_release_version(force: bool) -> Result<String> {
 }
 
 async fn fetch_release(version: Option<&str>) -> Result<GithubRelease> {
+    fetch_release_inner(version)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("release not found"))
+}
+
+/// Fetch a GitHub Release, returning `Ok(None)` for 404 (release not found)
+/// and propagating all other errors.
+async fn fetch_release_optional(version: Option<&str>) -> Result<Option<GithubRelease>> {
+    fetch_release_inner(version).await
+}
+
+async fn fetch_release_inner(version: Option<&str>) -> Result<Option<GithubRelease>> {
     let client =
         crate::auth::build_http_client().context("building HTTP client for update check")?;
     let url = release_api_url(version);
-    let release = client
+    let resp = client
         .get(url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
-        .context("requesting GitHub release metadata")?
+        .context("requesting GitHub release metadata")?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    let release = resp
         .error_for_status()
         .context("GitHub release request failed")?
         .json::<GithubRelease>()
         .await
         .context("parsing GitHub release metadata")?;
-    Ok(release)
+    Ok(Some(release))
 }
 
 async fn download_file(client: &reqwest::Client, url: &str, path: &Path) -> Result<()> {

@@ -40,20 +40,25 @@ if [ "$UNINSTALL" = true ]; then
       */Cellar/codex-switch/*|*/Homebrew/*)
         info "Homebrew installation detected. Running: brew uninstall codex-switch"
         brew uninstall codex-switch || error "brew uninstall failed"
+        info "Homebrew package removed."
+        # Skip direct-install removal — Homebrew was the only install method
+        BREW_REMOVED=true
         ;;
     esac
   fi
 
-  # Remove direct-install binary
-  BIN_PATH="${INSTALL_DIR}/${BINARY_NAME}"
-  if [ -f "$BIN_PATH" ]; then
-    if [ -w "$INSTALL_DIR" ]; then
-      rm -f "$BIN_PATH"
-    else
-      info "Removing ${BIN_PATH} (requires sudo)"
-      sudo rm -f "$BIN_PATH"
+  # Remove direct-install binary (skip if we just removed the Homebrew package)
+  if [ "${BREW_REMOVED:-false}" != true ]; then
+    BIN_PATH="${INSTALL_DIR}/${BINARY_NAME}"
+    if [ -f "$BIN_PATH" ]; then
+      if [ -w "$INSTALL_DIR" ]; then
+        rm -f "$BIN_PATH"
+      else
+        info "Removing ${BIN_PATH} (requires sudo)"
+        sudo rm -f "$BIN_PATH"
+      fi
+      info "Removed ${BIN_PATH}"
     fi
-    info "Removed ${BIN_PATH}"
   fi
 
   # Remove data directory

@@ -952,7 +952,7 @@ async fn self_update_cmd(
                     if info.install_source == update::InstallSource::Homebrew
                         && !update::is_dev_version(&info.current_version)
                     {
-                        "brew uninstall codex-switch` first, then `codex-switch self-update --dev"
+                        "brew uninstall codex-switch && codex-switch self-update --dev"
                     } else if dev {
                         // Explicit --dev flag: include it in the hint.
                         "codex-switch self-update --dev"
