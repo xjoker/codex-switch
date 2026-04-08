@@ -732,7 +732,7 @@ impl App {
 }
 
 pub async fn run() -> Result<()> {
-    crate::profile::auto_track_current();
+    // auth-change detection runs before dispatch(), so auto_track is already handled.
 
     // Ensure terminal is restored even on panic
     let original_hook = std::panic::take_hook();

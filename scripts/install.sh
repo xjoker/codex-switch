@@ -14,7 +14,6 @@ BINARY_NAME="codex-switch"
 DATA_DIR="${HOME}/.codex-switch"
 
 info()  { printf '\033[0;34m[info]\033[0m  %s\n' "$*"; }
-warn()  { printf '\033[0;33m[warn]\033[0m  %s\n' "$*"; }
 error() { printf '\033[0;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Parse arguments

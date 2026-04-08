@@ -73,7 +73,6 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
             Commands::Login { .. }
                 | Commands::Import { .. }
                 | Commands::SelfUpdate { .. }
-                | Commands::Tui
                 | Commands::Open
         );
         if should_check {

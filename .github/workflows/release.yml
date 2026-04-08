@@ -96,7 +96,6 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ needs.meta.outputs.version }}"
-          # Strip pre-release suffix for Cargo semver (e.g., 0.0.1-dev -> 0.0.1-dev is valid semver)
           sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
           rm -f Cargo.toml.bak
           echo "Building version: ${VERSION}"
@@ -194,7 +193,7 @@ jobs:
           cat > dev_body.md << EOF
           Development build from \`master\` at ${{ github.sha }}.
 
-          **This is a pre-release build for testing.** Use \`codex-switch self-update --dev\` to install, or \`codex-switch self-update\` to return to the latest stable release.
+          **This is a pre-release build for testing.** Use \`codex-switch self-update --dev\` to install, or \`codex-switch self-update --stable\` to return to the latest stable release.
 
           Version: \`${{ needs.meta.outputs.version }}\`
           EOF
