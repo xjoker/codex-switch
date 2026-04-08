@@ -93,8 +93,13 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         Commands::Delete { alias } => delete_cmd(&alias, json)?,
         Commands::Login { alias, device } => login_cmd(alias.as_deref(), device, json).await?,
         Commands::Import { path, alias } => import_cmd(&path, alias.as_deref(), json).await?,
-        Commands::SelfUpdate { check, version, dev } => {
-            self_update_cmd(check, version.as_deref(), dev, json).await?
+        Commands::SelfUpdate {
+            check,
+            version,
+            dev,
+            stable,
+        } => {
+            self_update_cmd(check, version.as_deref(), dev, stable, json).await?
         }
         Commands::Warmup { alias } => warmup_cmd(alias.as_deref(), json).await?,
         Commands::Tui => tui::run_tui().await?,
@@ -890,10 +895,26 @@ async fn import_one_file(
 
 // ── self-update ──────────────────────────────────────────
 
-async fn self_update_cmd(check: bool, version: Option<&str>, dev: bool, json: bool) -> Result<()> {
+async fn self_update_cmd(
+    check: bool,
+    version: Option<&str>,
+    dev: bool,
+    stable: bool,
+    json: bool,
+) -> Result<()> {
+    // Resolve the effective channel:
+    // --dev → dev, --stable → stable, otherwise auto-detect from current version.
+    let use_dev = if dev {
+        true
+    } else if stable || version.is_some() {
+        false
+    } else {
+        update::is_dev_version(update::current_version())
+    };
+
     if check {
         let current_version = update::current_version().to_string();
-        let result = if dev {
+        let result = if use_dev {
             update::check_for_dev_update().await?
         } else {
             update::check_for_update(true).await?
@@ -924,14 +945,14 @@ async fn self_update_cmd(check: bool, version: Option<&str>, dev: bool, json: bo
             return Ok(());
         }
 
+        let channel_label = if use_dev { " (dev)" } else { "" };
         match result {
             Some(info) => {
-                let channel = if dev { " (dev)" } else { "" };
-                let hint = if dev {
+                let hint = if use_dev {
                     if info.install_source == update::InstallSource::Homebrew {
                         "brew uninstall codex-switch` first, then `codex-switch self-update --dev"
                     } else {
-                        "codex-switch self-update --dev"
+                        "codex-switch self-update"
                     }
                 } else {
                     info.install_source.upgrade_hint()
@@ -939,36 +960,26 @@ async fn self_update_cmd(check: bool, version: Option<&str>, dev: bool, json: bo
                 println!(
                     "{}",
                     color::warn(&format!(
-                        "New version available{channel}: v{} (current v{}). Run `{hint}`.",
+                        "New version available{channel_label}: v{} (current v{}). Run `{hint}`.",
                         info.latest_version, info.current_version,
                     ))
                 );
             }
             None => {
-                let current = update::current_version();
-                if dev && update::is_dev_version(current) {
-                    println!(
-                        "{}",
-                        color::success(&format!("Already on latest dev: v{current}"))
-                    );
-                } else if dev {
-                    println!(
-                        "{}",
-                        color::success("No dev release found on GitHub.")
-                    );
-                } else {
-                    println!(
-                        "{}",
-                        color::success(&format!("Already up to date: v{current}"))
-                    );
-                }
+                println!(
+                    "{}",
+                    color::success(&format!(
+                        "Already up to date{channel_label}: v{}",
+                        update::current_version()
+                    ))
+                );
             }
         }
         return Ok(());
     }
 
     let show_progress = !json && update::should_show_download_progress();
-    let result = if dev {
+    let result = if use_dev {
         update::self_update_dev(show_progress).await?
     } else {
         update::self_update(version, show_progress).await?
@@ -992,14 +1003,23 @@ async fn self_update_cmd(check: bool, version: Option<&str>, dev: bool, json: bo
     }
 
     if result.updated {
-        let channel = if dev { " (dev)" } else { "" };
+        let channel_label = if use_dev { " (dev)" } else { "" };
         println!(
             "{}",
             color::success(&format!(
-                "Updated codex-switch{channel}: v{} -> v{}",
+                "Updated codex-switch{channel_label}: v{} -> v{}",
                 result.current_version, result.latest_version
             ))
         );
+        if dev && !update::is_dev_version(&result.current_version) {
+            user_println(&color::dim(
+                "Switched to dev channel. Run `codex-switch self-update --stable` to return.",
+            ));
+        } else if stable && update::is_dev_version(&result.current_version) {
+            user_println(&color::dim(
+                "Switched back to stable channel.",
+            ));
+        }
     } else {
         println!(
             "{}",

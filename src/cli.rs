@@ -109,18 +109,21 @@ pub enum Commands {
     },
     /// Manually check GitHub Releases (`--check`) or update this binary
     #[command(
-        after_help = "Examples:\n  codex-switch self-update --check\n  codex-switch self-update\n  codex-switch self-update --dev\n  codex-switch self-update --check --dev\n\nUpdate checks are manual only. The app never checks automatically on startup.\nUse `--dev` to switch to the dev channel (latest dev build from the `dev` tag).\nRun `self-update` without `--dev` to return to the stable channel."
+        after_help = "Examples:\n  codex-switch self-update --check\n  codex-switch self-update\n  codex-switch self-update --dev\n  codex-switch self-update --stable\n\nUpdate checks are manual only. The app never checks automatically on startup.\nWithout flags, updates within the current channel (stable or dev).\n`--dev` switches to the dev channel. `--stable` switches back to stable."
     )]
     SelfUpdate {
         /// Check whether a newer version is available without installing it
         #[arg(long)]
         check: bool,
         /// Install a specific newer version instead of the latest release
-        #[arg(long, conflicts_with = "dev")]
+        #[arg(long, conflicts_with_all = ["dev", "stable"])]
         version: Option<String>,
-        /// Use the dev channel (install or check the latest dev build)
-        #[arg(long)]
+        /// Switch to the dev channel (latest dev build)
+        #[arg(long, conflicts_with = "stable")]
         dev: bool,
+        /// Switch back to the stable channel (from dev)
+        #[arg(long, conflicts_with = "dev")]
+        stable: bool,
     },
     /// Send a minimal request to activate the quota window countdown for one or all profiles
     ///
