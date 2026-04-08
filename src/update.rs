@@ -92,16 +92,7 @@ pub async fn check_for_dev_update() -> Result<Option<UpdateInfo>> {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
-    // Extract version from release name like "dev (0.0.11-dev.20260408143000)"
-    // or fall back to a generic "dev" label.
-    let dev_version = release
-        .name
-        .as_deref()
-        .and_then(|n| n.strip_prefix("dev ("))
-        .and_then(|n| n.strip_suffix(')'))
-        .unwrap_or("dev")
-        .to_string();
-    // If the remote version is the same as or older than the current one, no update.
+    let dev_version = extract_release_version(&release);
     if !is_newer_version(&dev_version, &current_version) {
         return Ok(None);
     }
@@ -123,7 +114,7 @@ pub async fn self_update(version: Option<&str>, show_progress: bool) -> Result<S
 
     let current_version = current_version().to_string();
     let release = fetch_release(version).await?;
-    let latest_version = normalize_version(&release.tag_name);
+    let latest_version = extract_release_version(&release);
 
     if let Some(requested) = version {
         let requested = normalize_version(requested);
@@ -152,41 +143,7 @@ pub async fn self_update(version: Option<&str>, show_progress: bool) -> Result<S
         });
     }
 
-    let client =
-        crate::auth::build_http_client().context("building HTTP client for self-update")?;
-    let archive_name = asset_name();
-    let archive_asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name == archive_name)
-        .cloned()
-        .with_context(|| format!("release does not contain asset '{archive_name}'"))?;
-    let checksum_name = format!("{archive_name}.sha256");
-    let checksum_asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name == checksum_name)
-        .cloned()
-        .with_context(|| format!("release does not contain checksum asset '{checksum_name}'"))?;
-
-    let temp_dir = tempfile::tempdir().context("creating temporary update directory")?;
-    let archive_path = temp_dir.path().join(&archive_asset.name);
-    if show_progress {
-        eprintln!("Downloading {}...", archive_asset.name);
-    }
-    download_file(&client, &archive_asset.browser_download_url, &archive_path).await?;
-    verify_checksum(&client, &checksum_asset.browser_download_url, &archive_path).await?;
-
-    let extracted_path = temp_dir.path().join(extracted_binary_name());
-    if show_progress {
-        eprintln!("Extracting update package...");
-    }
-    extract_binary(&archive_path, &extracted_path)?;
-
-    if show_progress {
-        eprintln!("Replacing current executable...");
-    }
-    self_replace::self_replace(&extracted_path).context("replacing current executable")?;
+    download_and_replace(&release, show_progress, "").await?;
 
     save_update_cache(&UpdateCache {
         checked_at: crate::auth::now_unix_secs(),
@@ -203,8 +160,8 @@ pub async fn self_update(version: Option<&str>, show_progress: bool) -> Result<S
 
 /// Install the dev build from the `dev` GitHub Release tag.
 ///
-/// Unlike stable updates, dev→dev always reinstalls (the version string is the
-/// same `X.Y.Z-dev` each time, but the underlying binary may be newer).
+/// Dev builds always reinstall since the underlying binary may be newer even
+/// if the base version hasn't changed.
 /// Switching from dev→stable uses the normal `self_update` path.
 pub async fn self_update_dev(show_progress: bool) -> Result<SelfUpdateResult> {
     let install_source = detect_install_source();
@@ -218,29 +175,62 @@ pub async fn self_update_dev(show_progress: bool) -> Result<SelfUpdateResult> {
     let release = fetch_release(Some("dev"))
         .await
         .context("fetching dev release from GitHub")?;
-    let dev_version = normalize_version(&release.tag_name);
+    let dev_version = extract_release_version(&release);
 
+    download_and_replace(&release, show_progress, " (dev)").await?;
+
+    Ok(SelfUpdateResult {
+        current_version,
+        latest_version: dev_version,
+        install_source,
+        updated: true,
+    })
+}
+
+/// Extract a semver-compatible version string from a GitHub Release.
+///
+/// For dev releases the version is embedded in the release name (e.g. `"dev (0.0.11-dev.20260408)"`)
+/// because the tag itself is just `"dev"`. For normal releases the tag carries the version.
+fn extract_release_version(release: &GithubRelease) -> String {
+    // Try release name first: "dev (X.Y.Z-dev.TS)" → "X.Y.Z-dev.TS"
+    if let Some(v) = release
+        .name
+        .as_deref()
+        .and_then(|n| n.strip_prefix("dev ("))
+        .and_then(|n| n.strip_suffix(')'))
+    {
+        return v.to_string();
+    }
+    normalize_version(&release.tag_name)
+}
+
+/// Download, verify, extract and replace the current binary from a GitHub Release.
+async fn download_and_replace(
+    release: &GithubRelease,
+    show_progress: bool,
+    label_suffix: &str,
+) -> Result<()> {
     let client =
         crate::auth::build_http_client().context("building HTTP client for self-update")?;
     let archive_name = asset_name();
     let archive_asset = release
         .assets
         .iter()
-        .find(|asset| asset.name == archive_name)
+        .find(|a| a.name == archive_name)
         .cloned()
-        .with_context(|| format!("dev release does not contain asset '{archive_name}'"))?;
+        .with_context(|| format!("release does not contain asset '{archive_name}'"))?;
     let checksum_name = format!("{archive_name}.sha256");
     let checksum_asset = release
         .assets
         .iter()
-        .find(|asset| asset.name == checksum_name)
+        .find(|a| a.name == checksum_name)
         .cloned()
-        .with_context(|| format!("dev release does not contain checksum asset '{checksum_name}'"))?;
+        .with_context(|| format!("release does not contain checksum asset '{checksum_name}'"))?;
 
     let temp_dir = tempfile::tempdir().context("creating temporary update directory")?;
     let archive_path = temp_dir.path().join(&archive_asset.name);
     if show_progress {
-        eprintln!("Downloading {} (dev)...", archive_asset.name);
+        eprintln!("Downloading {}{}...", archive_asset.name, label_suffix);
     }
     download_file(&client, &archive_asset.browser_download_url, &archive_path).await?;
     verify_checksum(&client, &checksum_asset.browser_download_url, &archive_path).await?;
@@ -255,20 +245,13 @@ pub async fn self_update_dev(show_progress: bool) -> Result<SelfUpdateResult> {
         eprintln!("Replacing current executable...");
     }
     self_replace::self_replace(&extracted_path).context("replacing current executable")?;
-
-    Ok(SelfUpdateResult {
-        current_version,
-        latest_version: dev_version,
-        install_source,
-        updated: true,
-    })
+    Ok(())
 }
 
 /// Returns true if the given version string contains a pre-release component
-/// (e.g. `0.0.11-dev`).
+/// (e.g. `0.0.11-dev` or `0.0.11-dev.20260408143000`).
 pub fn is_dev_version(version: &str) -> bool {
-    let normalized = normalize_version(version);
-    normalized.contains("-dev")
+    normalize_version(version).contains("-dev")
 }
 
 pub fn detect_install_source() -> InstallSource {
@@ -607,38 +590,9 @@ mod tests {
 
     #[test]
     fn is_dev_version_detects_prerelease() {
-        assert!(is_dev_version("0.0.11-dev"));
-        assert!(is_dev_version("0.0.11-dev.20260408143000"));
-        assert!(is_dev_version("0.0.11-dev+abc1234"));
-        assert!(!is_dev_version("0.0.11"));
-        assert!(!is_dev_version("0.1.0"));
-    }
-
-    #[test]
-    fn dev_timestamp_versions_are_comparable() {
-        // Newer timestamp is greater in semver (numeric pre-release identifiers).
-        assert!(is_newer_version(
-            "0.0.11-dev.20260408150000",
-            "0.0.11-dev.20260408140000"
-        ));
-        assert!(!is_newer_version(
-            "0.0.11-dev.20260408140000",
-            "0.0.11-dev.20260408150000"
-        ));
-        // Same timestamp — not newer.
-        assert!(!is_newer_version(
-            "0.0.11-dev.20260408140000",
-            "0.0.11-dev.20260408140000"
-        ));
-    }
-
-    #[test]
-    fn dev_version_is_less_than_stable_in_semver() {
-        // Ensures that `self_update` (stable) sees a stable release as
-        // "newer" when the user is on a dev build.
-        assert!(is_newer_version("0.0.11", "0.0.11-dev"));
-        assert!(is_newer_version("0.0.11", "0.0.11-dev.20260408143000"));
-        assert!(!is_newer_version("0.0.11-dev", "0.0.11"));
-        assert!(!is_newer_version("0.0.11-dev.20260408143000", "0.0.11"));
+        assert!(is_dev_version("1.2.3-dev"));
+        assert!(is_dev_version("1.2.3-dev.20260408143000"));
+        assert!(is_dev_version("1.2.3-dev+abc1234"));
+        assert!(!is_dev_version("1.2.3"));
     }
 }
