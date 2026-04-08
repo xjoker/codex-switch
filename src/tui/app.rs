@@ -250,23 +250,6 @@ impl App {
         self.marked.clear();
     }
 
-    pub fn batch_refresh(&mut self) {
-        if self.marked.is_empty() {
-            self.set_status("No accounts marked (use Space to mark)".to_string(), 3);
-            return;
-        }
-
-        let aliases: Vec<String> = self.marked.iter().cloned().collect();
-        let count = aliases.len();
-        for alias in &aliases {
-            if let Some(idx) = self.accounts.iter().position(|a| &a.alias == alias) {
-                self.accounts[idx].usage = UsageStatus::Idle;
-                self.fetch_usage_for(idx, true);
-            }
-        }
-        self.update_view();
-        self.set_status(format!("Refreshing {count} marked account(s)..."), 3);
-    }
 
     /// Returns true if the account's 5h window is still active (reset time in the future).
     /// Checks both loaded usage data and the cache (covers Loading/Idle states).
@@ -294,36 +277,29 @@ impl App {
             })
     }
 
-    /// Warmup all accounts, skipping already-active and errored ones.
+    /// Warmup: marked accounts if any are marked, otherwise all.
+    /// Skips already-active and errored accounts.
     pub fn warmup(&mut self) {
-        let total = self.accounts.len();
-        let error_count = self
-            .accounts
-            .iter()
-            .filter(|a| matches!(a.usage, UsageStatus::Error(_)))
-            .count();
-        let active_count = self
-            .accounts
-            .iter()
-            .filter(|a| {
-                !matches!(a.usage, UsageStatus::Error(_)) && self.is_already_warmed(&a.alias)
-            })
-            .count();
-        let aliases: Vec<String> = self
-            .accounts
+        let candidates: Vec<&AccountEntry> = if self.marked.is_empty() {
+            self.accounts.iter().collect()
+        } else {
+            self.accounts
+                .iter()
+                .filter(|a| self.marked.contains(&a.alias))
+                .collect()
+        };
+
+        let aliases: Vec<String> = candidates
             .iter()
             .filter(|a| {
                 !matches!(a.usage, UsageStatus::Error(_)) && !self.is_already_warmed(&a.alias)
             })
             .map(|a| a.alias.clone())
             .collect();
+        let skipped = candidates.len() - aliases.len();
 
         if aliases.is_empty() {
-            let mut msg = format!("All {total} accounts already active");
-            if error_count > 0 {
-                msg.push_str(&format!(", {error_count} error skipped"));
-            }
-            self.set_status(msg, 4);
+            self.set_status(format!("All {} accounts already active or skipped", candidates.len()), 4);
             return;
         }
         let count = aliases.len();
@@ -331,11 +307,8 @@ impl App {
             self.spawn_warmup(alias);
         }
         let mut msg = format!("Warming up {count} account(s)...");
-        if active_count > 0 {
-            msg.push_str(&format!(" ({active_count} already active)"));
-        }
-        if error_count > 0 {
-            msg.push_str(&format!(" ({error_count} error skipped)"));
+        if skipped > 0 {
+            msg.push_str(&format!(" ({skipped} skipped)"));
         }
         self.set_status(msg, 10);
     }
@@ -441,24 +414,38 @@ impl App {
         });
     }
 
-    /// Fetch all accounts. If `force` is true, bypass disk cache.
-    pub fn refresh_all(&mut self, force: bool) {
-        for entry in &mut self.accounts {
+    /// Refresh usage: marked accounts only if any are marked, otherwise all.
+    pub fn refresh(&mut self, force: bool) {
+        let target_indices: Vec<usize> = if self.marked.is_empty() {
+            (0..self.accounts.len()).collect()
+        } else {
+            self.accounts
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| self.marked.contains(&a.alias))
+                .map(|(i, _)| i)
+                .collect()
+        };
+
+        for &i in &target_indices {
+            let entry = &mut self.accounts[i];
             match &entry.usage {
                 UsageStatus::Error(_) => entry.usage = UsageStatus::Idle,
                 UsageStatus::Loaded(_) if force => entry.usage = UsageStatus::Idle,
                 _ => {}
             }
-
             if !force && let Some(cached) = crate::cache::get(&entry.alias) {
                 entry.usage = UsageStatus::Loaded(cached);
             }
         }
-        let count = self.accounts.len();
-        for i in 0..count {
+        for &i in &target_indices {
             self.fetch_usage_for(i, force);
         }
         self.update_view();
+        let count = target_indices.len();
+        if !self.marked.is_empty() {
+            self.set_status(format!("Refreshing {count} marked account(s)..."), 3);
+        }
     }
 
     pub fn poll_results(&mut self) {
@@ -520,7 +507,7 @@ impl App {
                 Ok(()) => {
                     self.set_status(format!("Deleted {alias}"), 3);
                     self.load_profiles();
-                    self.refresh_all(true);
+                    self.refresh(true);
                 }
                 Err(e) => self.set_status(format!("Delete failed: {e}"), 5),
             },
@@ -581,7 +568,7 @@ impl App {
                         {
                             self.selected = view_idx;
                         }
-                        self.refresh_all(true);
+                        self.refresh(true);
                     }
                     Err(e) => self.set_status(format!("Rename failed: {e}"), 5),
                 }
@@ -758,7 +745,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
         return Ok(());
     }
 
-    app.refresh_all(false);
+    app.refresh(false);
 
     loop {
         app.poll_results();
@@ -813,8 +800,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                     }
                 }
                 KeyCode::Enter => app.switch_selected(),
-                KeyCode::Char('r') => app.refresh_all(true),
-                KeyCode::Char('b') => app.batch_refresh(),
+                KeyCode::Char('r') => app.refresh(true),
                 KeyCode::Char('d') => app.request_delete(),
                 KeyCode::Char('n') => app.start_rename(),
                 KeyCode::Char('s') => app.cycle_sort(),

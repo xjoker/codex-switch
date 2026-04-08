@@ -673,7 +673,6 @@ const HELP_ITEMS: &[(&str, &str)] = &[
     ("r", " refresh "),
     ("s", " sort "),
     ("Space", " mark "),
-    ("b", " batch "),
     ("w", " warmup "),
     ("c", " clear "),
     ("n", " rename "),
