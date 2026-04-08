@@ -47,14 +47,32 @@ irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 
 brew install xjoker/tap/codex-switch
 ```
 
-### 安装指定版本
+### 安装开发版（最新开发构建）
+
+**macOS / Linux：**
 
 ```bash
-# macOS / Linux
-CS_VERSION=0.0.11 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash -s -- --dev
+```
 
-# Windows
-$env:CS_VERSION="0.0.11"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+**Windows（PowerShell）：**
+
+```powershell
+$env:CS_DEV="1"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+```
+
+### 卸载
+
+**macOS / Linux：**
+
+```bash
+curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash -s -- --uninstall
+```
+
+**Windows（PowerShell）：**
+
+```powershell
+$env:CS_UNINSTALL="1"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
 ```
 
 ### 手动下载
@@ -120,7 +138,7 @@ codex-switch self-update --check
 | `codex-switch rename <旧别名> <新别名>` | 重命名账号 |
 | `codex-switch delete <别名>` | 删除账号 |
 | `codex-switch import <路径> [别名]` | 导入单个 auth.json，或递归扫描目录下所有 JSON 文件并校验后导入 |
-| `codex-switch self-update [--check] [--version <版本>]` | 手动检查 GitHub Releases，或更新当前直装版本 |
+| `codex-switch self-update [--check] [--dev]` | 手动检查 GitHub Releases，或更新当前直装版本。`--dev` 切换到开发通道 |
 | `codex-switch tui` | 启动交互式终端界面 |
 | `codex-switch open` | 在文件管理器中打开配置目录 |
 
@@ -164,13 +182,12 @@ codex-switch self-update --check
 # 将直装版本更新到最新 release
 codex-switch self-update
 
-# 更新到指定的新版本
-codex-switch self-update --version 0.0.11
 ```
 
 - Homebrew 安装不会被程序自行覆盖，请使用 `brew upgrade xjoker/tap/codex-switch`
 - 直装版本会先校验 release 对应的 `.sha256`，再替换当前二进制
-- 不支持降级；`--version` 只接受当前版本或更高版本的 release
+- 使用 `--dev` 安装最新开发版，运行 `self-update`（不带 `--dev`）可退回稳定版
+- Homebrew 用户需先 `brew uninstall codex-switch` 才能使用 `--dev`
 
 ## 代理支持
 

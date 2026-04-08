@@ -109,7 +109,7 @@ pub enum Commands {
     },
     /// Manually check GitHub Releases (`--check`) or update this binary
     #[command(
-        after_help = "Examples:\n  codex-switch self-update --check\n  codex-switch self-update\n  codex-switch self-update --dev\n  codex-switch self-update --check --dev\n  codex-switch self-update --version 0.0.11\n\nUpdate checks are manual only. The app never checks automatically on startup.\nDowngrades are not supported; `--version` only accepts the current version or a newer release.\nUse `--dev` to switch to the dev channel (latest dev build from the `dev` tag)."
+        after_help = "Examples:\n  codex-switch self-update --check\n  codex-switch self-update\n  codex-switch self-update --dev\n  codex-switch self-update --check --dev\n\nUpdate checks are manual only. The app never checks automatically on startup.\nUse `--dev` to switch to the dev channel (latest dev build from the `dev` tag).\nRun `self-update` without `--dev` to return to the stable channel."
     )]
     SelfUpdate {
         /// Check whether a newer version is available without installing it

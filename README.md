@@ -47,14 +47,32 @@ irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 
 brew install xjoker/tap/codex-switch
 ```
 
-### Install a Specific Version
+### Dev Build (Latest Development Version)
+
+**macOS / Linux:**
 
 ```bash
-# macOS / Linux
-CS_VERSION=0.0.11 curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash -s -- --dev
+```
 
-# Windows
-$env:CS_VERSION="0.0.11"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+**Windows (PowerShell):**
+
+```powershell
+$env:CS_DEV="1"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+```
+
+### Uninstall
+
+**macOS / Linux:**
+
+```bash
+curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/install.sh | bash -s -- --uninstall
+```
+
+**Windows (PowerShell):**
+
+```powershell
+$env:CS_UNINSTALL="1"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
 ```
 
 ### From GitHub Releases (Manual)
@@ -121,7 +139,7 @@ codex-switch self-update --check
 | `codex-switch rename <old> <new>` | Rename a profile |
 | `codex-switch delete <alias>` | Delete a profile |
 | `codex-switch import <path> [alias]` | Import one auth.json file, or recursively validate and import all JSON files under a directory |
-| `codex-switch self-update [--check] [--version <ver>]` | Manually check GitHub Releases or update the current direct-install binary |
+| `codex-switch self-update [--check] [--dev]` | Manually check GitHub Releases or update the current direct-install binary. `--dev` switches to the dev channel |
 | `codex-switch tui` | Launch the interactive terminal UI |
 | `codex-switch open` | Open the config directory in file manager |
 
@@ -165,13 +183,12 @@ codex-switch self-update --check
 # Update a direct install to the latest release
 codex-switch self-update
 
-# Update to a specific newer version
-codex-switch self-update --version 0.0.11
 ```
 
 - Homebrew installs are not self-overwritten. Use `brew upgrade xjoker/tap/codex-switch`.
 - Direct installs verify the release `.sha256` before replacing the current executable.
-- Downgrades are not supported. `--version` only accepts the current version or a newer release.
+- Use `--dev` to install the latest dev build. Run `self-update` (without `--dev`) to return to the stable channel.
+- Homebrew users must `brew uninstall codex-switch` before using `--dev`.
 
 ## Proxy Support
 
