@@ -30,7 +30,8 @@ jobs:
             BASE=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
             # Strip any existing pre-release suffix (e.g. "0.0.11-dev" -> "0.0.11")
             BASE="${BASE%%-*}"
-            echo "version=${BASE}-dev" >> "$GITHUB_OUTPUT"
+            TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
+            echo "version=${BASE}-dev.${TIMESTAMP}" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
             echo "is_dev=true" >> "$GITHUB_OUTPUT"
           else

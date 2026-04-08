@@ -82,18 +82,18 @@ pub async fn check_for_update(force: bool) -> Result<Option<UpdateInfo>> {
     }))
 }
 
-/// Check whether a dev release exists on GitHub.
+/// Check whether a newer dev release exists on GitHub.
 ///
-/// For dev builds, we always report as "available" since the tag is reused and
-/// the binary may have been rebuilt even if the version string hasn't changed.
+/// Dev versions include a build timestamp (e.g. `0.0.11-dev.20260408143000`)
+/// so each build is unique and semver-comparable.
 pub async fn check_for_dev_update() -> Result<Option<UpdateInfo>> {
     let current_version = current_version().to_string();
     let release = match fetch_release(Some("dev")).await {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
-    // Extract version from release name like "dev (0.0.11-dev)" or fall back
-    // to a generic "dev" label.
+    // Extract version from release name like "dev (0.0.11-dev.20260408143000)"
+    // or fall back to a generic "dev" label.
     let dev_version = release
         .name
         .as_deref()
@@ -101,6 +101,10 @@ pub async fn check_for_dev_update() -> Result<Option<UpdateInfo>> {
         .and_then(|n| n.strip_suffix(')'))
         .unwrap_or("dev")
         .to_string();
+    // If the remote version is the same as or older than the current one, no update.
+    if !is_newer_version(&dev_version, &current_version) {
+        return Ok(None);
+    }
     Ok(Some(UpdateInfo {
         current_version,
         latest_version: dev_version,
@@ -604,9 +608,28 @@ mod tests {
     #[test]
     fn is_dev_version_detects_prerelease() {
         assert!(is_dev_version("0.0.11-dev"));
+        assert!(is_dev_version("0.0.11-dev.20260408143000"));
         assert!(is_dev_version("0.0.11-dev+abc1234"));
         assert!(!is_dev_version("0.0.11"));
         assert!(!is_dev_version("0.1.0"));
+    }
+
+    #[test]
+    fn dev_timestamp_versions_are_comparable() {
+        // Newer timestamp is greater in semver (numeric pre-release identifiers).
+        assert!(is_newer_version(
+            "0.0.11-dev.20260408150000",
+            "0.0.11-dev.20260408140000"
+        ));
+        assert!(!is_newer_version(
+            "0.0.11-dev.20260408140000",
+            "0.0.11-dev.20260408150000"
+        ));
+        // Same timestamp — not newer.
+        assert!(!is_newer_version(
+            "0.0.11-dev.20260408140000",
+            "0.0.11-dev.20260408140000"
+        ));
     }
 
     #[test]
@@ -614,6 +637,8 @@ mod tests {
         // Ensures that `self_update` (stable) sees a stable release as
         // "newer" when the user is on a dev build.
         assert!(is_newer_version("0.0.11", "0.0.11-dev"));
+        assert!(is_newer_version("0.0.11", "0.0.11-dev.20260408143000"));
         assert!(!is_newer_version("0.0.11-dev", "0.0.11"));
+        assert!(!is_newer_version("0.0.11-dev.20260408143000", "0.0.11"));
     }
 }
