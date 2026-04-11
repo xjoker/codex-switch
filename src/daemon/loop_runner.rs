@@ -161,22 +161,30 @@ async fn check_and_switch() -> Result<bool> {
     current_candidate.pool_exhausted = pool_exhausted;
     let current_score = usage::score_unified(&current_candidate, safety_7d);
 
-    let mut best: Option<(String, f64)> = None;
+    // Two-phase: prefer eligible candidates, fallback to best ineligible
+    let mut best_eligible: Option<(String, f64)> = None;
+    let mut best_ineligible: Option<(String, f64)> = None;
+    let mut any_eligible = false;
 
     for (mut candidate, alias) in other_candidates {
         candidate.pool_exhausted = pool_exhausted;
-
-        if !usage::is_candidate_eligible(&candidate, safety_7d) {
-            continue;
-        }
-
         let s = usage::score_unified(&candidate, safety_7d);
+        let eligible = usage::is_candidate_eligible(&candidate, safety_7d);
 
-        if s > current_score
-            && best.as_ref().is_none_or(|(_, bs)| s > *bs) {
-            best = Some((alias, s));
+        if eligible {
+            any_eligible = true;
+            if s > current_score
+                && best_eligible.as_ref().is_none_or(|(_, bs)| s > *bs) {
+                best_eligible = Some((alias, s));
+            }
+        } else if s > current_score
+            && best_ineligible.as_ref().is_none_or(|(_, bs)| s > *bs) {
+            best_ineligible = Some((alias, s));
         }
     }
+
+    // Use eligible candidate if available, otherwise fallback to best ineligible
+    let best = best_eligible.or_else(|| if !any_eligible { best_ineligible } else { None });
 
     // 5. Switch if a better candidate was found
     if let Some((best_alias, best_score)) = best {

@@ -631,11 +631,11 @@ pub fn score_unified(c: &Candidate, safety_margin_7d: f64) -> f64 {
     } else if used_7d >= 100.0 {
         // 7d exhausted: heavy penalty, relieved as reset approaches
         match c.resets_at_7d {
-            None => -800.0, // 7d exhausted, no reset info: maximum penalty
+            None => -800.0, // no reset info: maximum penalty
             Some(reset_ts) => {
                 let remaining_min = ((reset_ts - c.now).max(0) as f64) / 60.0;
                 let relief = (1.0 - remaining_min / 10080.0).clamp(0.0, 1.0);
-                -headroom * (1.0 - relief)
+                -800.0 * (1.0 - relief)
             }
         }
     } else {
@@ -690,7 +690,7 @@ pub fn score_unified(c: &Candidate, safety_margin_7d: f64) -> f64 {
     let raw_drain = if c.has_5h_data && used_5h < 100.0 {
         if let Some(reset_ts) = c.resets_at_5h {
             let remaining_min = ((reset_ts - c.now).max(0) as f64) / 60.0;
-            if remaining_min < DRAIN_WINDOW_MIN {
+            if remaining_min <= DRAIN_WINDOW_MIN {
                 let remaining_pct = 100.0 - used_5h;
                 let urgency = ((DRAIN_WINDOW_MIN - remaining_min) / DRAIN_WINDOW_MIN).clamp(0.0, 1.0);
                 // waste = remaining quota × urgency, scaled to 0..300
@@ -1176,8 +1176,37 @@ mod tests {
             pool_size: 1, pool_exhausted: 0,
             team_priority: true,
         };
-        let score = score_unified(&c, 20.0);
-        assert!(score < 50.0, "no-data account should score low, got {score}");
+        // headroom=50 (no 5h data) + sustain=-50 (no 7d data) = 0
+        assert_eq!(score_unified(&c, 20.0), 0.0, "no-data account should score exactly 0");
+    }
+
+    #[test]
+    fn test_adaptive_both_windows_exhausted() {
+        let now = 1_000_000i64;
+        // 5h exhausted (no reset info) + 7d exhausted (resets in 7 days)
+        let mut c = make_candidate("both_dead", 100.0, None, 100.0, Some(now + 7 * 86400));
+        c.has_5h_data = true;
+        c.has_7d_data = true;
+        let s = score_unified(&c, 20.0);
+        // headroom=0 (exhausted, no reset), sustain should still be heavily negative
+        assert!(s < -700.0, "doubly-exhausted account must score very low, got {s}");
+    }
+
+    #[test]
+    fn test_adaptive_both_windows_exhausted_no_reset_info() {
+        // Worst case: both exhausted, no reset info at all
+        let c = Candidate {
+            alias: "dead".to_string(),
+            used_5h: 100.0, resets_at_5h: None,
+            used_7d: 100.0, resets_at_7d: None,
+            has_5h_data: true, has_7d_data: true,
+            is_team: false, is_free: false,
+            last_used: 0, now: 1_000_000,
+            pool_size: 1, pool_exhausted: 1,
+            team_priority: false,
+        };
+        let s = score_unified(&c, 20.0);
+        assert!(s < -700.0, "doubly-exhausted no-reset account must score very low, got {s}");
     }
 
     #[test]
