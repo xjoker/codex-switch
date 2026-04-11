@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.0.12-dev — 2026-04-11
+
+### Changed
+
+- **Adaptive scoring algorithm** — Replaced three separate selection modes (`max-remaining`, `drain-first`, `round-robin`) with a single adaptive algorithm that automatically adjusts strategy based on pool state. Config options `mode` and `min_remaining` are removed; `team_priority` (default: `true`) is the only new option
+- **Team priority** — Team plan accounts now receive a +500 scoring bonus by default, ensuring they are used first. Set `team_priority = false` in config to disable
+- **Pace-aware headroom** — Scoring now uses burn rate to project effective remaining time instead of static remaining percentage
+- **Pool-adaptive drain** — Drain bonus only activates within 60 minutes of 5h reset, with weight scaled by pool exhaustion ratio
+- **7d sustainability** — Budget-per-window calculation replaces static safety margin for more accurate 7d health assessment
+- **README tagline simplified** — Removed self-promotional language from project description
+
+### Removed
+
+- **Selection modes** — `ConfigSelectMode` enum, `-m` CLI flag, `min_remaining` config option, and three separate scoring functions (`score`, `score_drain_first`, `score_round_robin`) have been removed. The unified algorithm subsumes all three strategies
+
 ## v0.0.11 — 2026-04-07
 
 ### Added

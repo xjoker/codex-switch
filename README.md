@@ -1,6 +1,6 @@
 # codex-switch
 
-**The multi-account manager for [OpenAI Codex CLI](https://github.com/openai/codex)** — manage unlimited accounts, monitor live quota across all of them, and auto-switch to the best one before each session. No other tool gives you real-time, per-account usage tracking with smart rotation.
+**The multi-account manager for [OpenAI Codex CLI](https://github.com/openai/codex)** — manage unlimited accounts, monitor live quota across all of them, and auto-switch to the best one before each session.
 
 [**中文文档 →**](README_CN.md)
 
