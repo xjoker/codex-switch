@@ -100,11 +100,14 @@ async fn check_and_switch() -> Result<bool> {
         threshold,
     );
 
-    // 3. Score current account using unified algorithm
+    // 3. Score current account using adaptive algorithm
+    let team_priority = cfg.use_cfg.team_priority;
+    let pool_size = profiles.len();
+
     let current_info = profile::profile_auth_path(&current)
         .map(|p| auth::read_account_info(&p))
         .unwrap_or_default();
-    let current_candidate = usage::Candidate::from_usage(
+    let mut current_candidate = usage::Candidate::from_usage(
         current.clone(),
         &current_usage,
         current_info.is_team(),
@@ -112,10 +115,11 @@ async fn check_and_switch() -> Result<bool> {
         cache::get_last_used(&current),
         now,
     );
-    let current_score = usage::score_unified(&current_candidate, safety_7d);
+    current_candidate.pool_size = pool_size;
+    current_candidate.team_priority = team_priority;
 
-    // 4. Score all other candidates and find the best
-    let mut best: Option<(String, f64)> = None;
+    // 4. Fetch all other candidates, then compute pool_exhausted and score
+    let mut other_candidates: Vec<(usage::Candidate, String)> = Vec::new();
 
     for alias in &profiles {
         if alias == &current {
@@ -134,7 +138,7 @@ async fn check_and_switch() -> Result<bool> {
         };
 
         let info = auth::read_account_info(&path);
-        let candidate = usage::Candidate::from_usage(
+        let mut candidate = usage::Candidate::from_usage(
             alias.clone(),
             &u,
             info.is_team(),
@@ -142,6 +146,25 @@ async fn check_and_switch() -> Result<bool> {
             cache::get_last_used(alias),
             now,
         );
+        candidate.pool_size = pool_size;
+        candidate.team_priority = team_priority;
+        other_candidates.push((candidate, alias.clone()));
+    }
+
+    // Compute pool_exhausted across all accounts (including current)
+    let pool_exhausted = other_candidates.iter()
+        .filter(|(c, _)| c.effective_used_5h() >= 100.0)
+        .count()
+        + if current_candidate.effective_used_5h() >= 100.0 { 1 } else { 0 };
+
+    // Patch pool_exhausted into current candidate and re-score
+    current_candidate.pool_exhausted = pool_exhausted;
+    let current_score = usage::score_unified(&current_candidate, safety_7d);
+
+    let mut best: Option<(String, f64)> = None;
+
+    for (mut candidate, alias) in other_candidates {
+        candidate.pool_exhausted = pool_exhausted;
 
         if !usage::is_candidate_eligible(&candidate, safety_7d) {
             continue;
@@ -151,7 +174,7 @@ async fn check_and_switch() -> Result<bool> {
 
         if s > current_score
             && best.as_ref().is_none_or(|(_, bs)| s > *bs) {
-            best = Some((alias.clone(), s));
+            best = Some((alias, s));
         }
     }
 

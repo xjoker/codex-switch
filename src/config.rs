@@ -63,32 +63,20 @@ impl Default for NetworkConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ConfigSelectMode {
-    #[default]
-    MaxRemaining,
-    DrainFirst,
-    RoundRobin,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UseConfig {
-    /// Selection mode (default: max-remaining)
-    pub mode: ConfigSelectMode,
-    /// drain-first: accounts with remaining% below this threshold are deprioritized (default: 5)
-    pub min_remaining: f64,
     /// 7d safety margin: when 7d remaining% falls below this, a scoring penalty kicks in (default: 20)
     pub safety_margin_7d: f64,
+    /// Prioritize Team plan accounts (default: true)
+    pub team_priority: bool,
 }
 
 impl Default for UseConfig {
     fn default() -> Self {
         Self {
-            mode: ConfigSelectMode::default(),
-            min_remaining: 5.0,
             safety_margin_7d: 20.0,
+            team_priority: true,
         }
     }
 }
@@ -176,16 +164,6 @@ pub fn resolve_proxy() -> Option<String> {
     None
 }
 
-#[allow(dead_code)]
-/// Resolve the effective select mode: CLI flag takes precedence over config.
-pub fn resolve_select_mode(cli: Option<crate::cli::SelectMode>) -> ConfigSelectMode {
-    match cli {
-        Some(crate::cli::SelectMode::MaxRemaining) => ConfigSelectMode::MaxRemaining,
-        Some(crate::cli::SelectMode::DrainFirst) => ConfigSelectMode::DrainFirst,
-        Some(crate::cli::SelectMode::RoundRobin) => ConfigSelectMode::RoundRobin,
-        None => get().use_cfg.mode,
-    }
-}
 
 pub fn resolve_no_proxy() -> Option<String> {
     if let Some(np) = &get().proxy.no_proxy

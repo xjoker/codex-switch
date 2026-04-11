@@ -672,15 +672,18 @@ async fn best_cmd(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Build candidates and score with unified algorithm
-    let mut scored: Vec<(usage::Candidate, usage::UsageInfo, f64)> = fetched
+    // Build candidates with pool-level signals and score with adaptive algorithm
+    let team_priority = config::get().use_cfg.team_priority;
+    let pool_size = fetched.len();
+
+    let mut candidates: Vec<(usage::Candidate, usage::UsageInfo)> = fetched
         .into_iter()
         .map(|(alias, u)| {
             let info = profile::profile_auth_path(&alias)
                 .map(|p| auth::read_account_info(&p))
                 .unwrap_or_default();
             let last_used = cache::get_last_used(&alias);
-            let candidate = usage::Candidate::from_usage(
+            let mut candidate = usage::Candidate::from_usage(
                 alias,
                 &u,
                 info.is_team(),
@@ -688,8 +691,25 @@ async fn best_cmd(json: bool) -> Result<()> {
                 last_used,
                 now,
             );
-            let s = usage::score_unified(&candidate, safety_7d);
-            (candidate, u, s)
+            candidate.pool_size = pool_size;
+            candidate.team_priority = team_priority;
+            (candidate, u)
+        })
+        .collect();
+
+    // Count exhausted accounts for pool-adaptive scoring
+    let pool_exhausted = candidates.iter()
+        .filter(|(c, _)| c.effective_used_5h() >= 100.0)
+        .count();
+    for (c, _) in &mut candidates {
+        c.pool_exhausted = pool_exhausted;
+    }
+
+    let mut scored: Vec<(usage::Candidate, usage::UsageInfo, f64)> = candidates
+        .into_iter()
+        .map(|(c, u)| {
+            let s = usage::score_unified(&c, safety_7d);
+            (c, u, s)
         })
         .collect();
 

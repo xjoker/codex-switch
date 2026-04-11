@@ -10,16 +10,6 @@ pub enum ColorMode {
     Never,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum SelectMode {
-    /// Pick the account with the most remaining quota (config default)
-    MaxRemaining,
-    /// Prefer accounts whose reset is imminent, saving slow-to-reset quota for later
-    DrainFirst,
-    /// Rotate through eligible accounts evenly (least recently used first)
-    RoundRobin,
-}
-
 #[derive(Debug, Clone, Subcommand)]
 pub enum DaemonCommand {
     /// Start the daemon (foreground if --foreground, otherwise detached)
