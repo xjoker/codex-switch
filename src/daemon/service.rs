@@ -36,8 +36,6 @@ fn install_launchd() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
         .display()
         .to_string();
-    let log_dir = crate::auth::app_home()?;
-
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -57,10 +55,6 @@ fn install_launchd() -> Result<()> {
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardOutPath</key>
-    <string>{log_out}</string>
-    <key>StandardErrorPath</key>
-    <string>{log_err}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
@@ -70,8 +64,6 @@ fn install_launchd() -> Result<()> {
 </plist>"#,
         exe = exe,
         home = home,
-        log_out = log_dir.join("daemon.log").display(),
-        log_err = log_dir.join("daemon.err").display(),
     );
 
     let path = plist_path()?;

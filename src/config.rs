@@ -112,6 +112,48 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
     Ok(app_home()?.join("config.toml"))
 }
 
+/// Probe struct to detect deprecated `[use]` keys that are silently ignored.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DeprecatedConfigProbe {
+    #[serde(rename = "use")]
+    use_cfg: Option<DeprecatedUseProbe>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DeprecatedUseProbe {
+    mode: Option<toml::Value>,
+    min_remaining: Option<toml::Value>,
+}
+
+fn warn_deprecated_keys(raw: &str) {
+    let Ok(probe) = toml::from_str::<DeprecatedConfigProbe>(raw) else {
+        return;
+    };
+    let Some(use_cfg) = probe.use_cfg else {
+        return;
+    };
+    if use_cfg.mode.is_some() {
+        tracing::warn!(
+            "config: [use] 'mode' is deprecated and ignored in v0.0.12+, \
+             the adaptive algorithm replaces all selection modes"
+        );
+    }
+    if use_cfg.min_remaining.is_some() {
+        tracing::warn!(
+            "config: [use] 'min_remaining' is deprecated and ignored in v0.0.12+, \
+             the adaptive algorithm replaces all selection modes"
+        );
+    }
+}
+
+fn load_from_str(raw: &str) -> std::result::Result<AppConfig, toml::de::Error> {
+    let config = toml::from_str::<AppConfig>(raw)?;
+    warn_deprecated_keys(raw);
+    Ok(config.normalize())
+}
+
 fn load_from_file() -> AppConfig {
     let path = match config_path() {
         Ok(p) => p,
@@ -124,8 +166,8 @@ fn load_from_file() -> AppConfig {
         return AppConfig::default();
     }
     match std::fs::read_to_string(&path) {
-        Ok(content) => match toml::from_str::<AppConfig>(&content) {
-            Ok(config) => config.normalize(),
+        Ok(content) => match load_from_str(&content) {
+            Ok(config) => config,
             Err(err) => {
                 tracing::warn!("Failed to load config: {err}");
                 AppConfig::default()
@@ -172,4 +214,16 @@ pub fn resolve_no_proxy() -> Option<String> {
         return Some(np.clone());
     }
     None
+}
+
+/// Read daemon log_level from config file without initializing the global config.
+/// Called before tracing is set up, so it must not use tracing.
+pub fn daemon_log_level() -> String {
+    let level = load_from_file().daemon.log_level;
+    let trimmed = level.trim();
+    if trimmed.is_empty() {
+        "info".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
