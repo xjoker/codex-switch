@@ -1,7 +1,9 @@
+use std::fs::OpenOptions;
 use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 
 use crate::auth::{
     app_home, backup_auth, codex_auth_path, current_file, profiles_dir, read_auth, write_auth,
@@ -78,6 +80,29 @@ fn ensure_profile_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn auth_lock_path() -> Result<PathBuf> {
+    Ok(app_home()?.join("auth.lock"))
+}
+
+fn lock_live_auth() -> Result<std::fs::File> {
+    let path = auth_lock_path()?;
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening auth lock {}", path.display()))?;
+
+    file.lock_exclusive()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
+}
+
 fn write_current(alias: &str) -> Result<()> {
     let path = current_file()?;
     if let Some(p) = path.parent() {
@@ -85,6 +110,22 @@ fn write_current(alias: &str) -> Result<()> {
     }
     std::fs::write(&path, alias)
         .with_context(|| format!("writing current profile marker {}", path.display()))?;
+    Ok(())
+}
+
+fn switch_live_auth(alias: &str) -> Result<()> {
+    validate_alias(alias)?;
+    let src = profile_auth_path(alias)?;
+    if !src.exists() {
+        return Err(CsError::NotFound(alias.to_string()).into());
+    }
+
+    let val = read_auth(&src)?;
+    let _lock = lock_live_auth()?;
+    let dst = codex_auth_path()?;
+    backup_auth(&dst)?;
+    write_auth(&dst, &val)?;
+    write_current(alias)?;
     Ok(())
 }
 
@@ -134,7 +175,9 @@ pub fn find_profile_by_identity_exact(identity: &AccountIdentity) -> Option<Stri
         };
         let existing = extract_identity(&val);
         if let (Some(eid), Some(eemail)) = (&existing.account_id, &existing.email)
-            && eid == target_id && eemail == target_email {
+            && eid == target_id
+            && eemail == target_email
+        {
             return Some(alias);
         }
     }
@@ -330,7 +373,8 @@ pub fn auto_track_current() -> bool {
         // Exact match (account_id + email) — safe to sync the current pointer.
         let current = read_current();
         if current != matching
-            && let Err(e) = write_current(&matching) {
+            && let Err(e) = write_current(&matching)
+        {
             tracing::debug!("auto_track_current: could not sync current pointer: {e}");
         }
         return false;
@@ -437,7 +481,9 @@ fn make_unique_alias(base: &str) -> Result<String> {
         }
         n += 1;
         if n > MAX_RETRIES {
-            anyhow::bail!("could not generate a unique alias for '{base}' after {MAX_RETRIES} attempts");
+            anyhow::bail!(
+                "could not generate a unique alias for '{base}' after {MAX_RETRIES} attempts"
+            );
         }
     }
 }
@@ -464,27 +510,13 @@ pub fn cmd_use(alias: &str) -> Result<()> {
         }
     }
 
-    backup_auth(&dst)?;
-    let val = read_auth(&src)?;
-    write_auth(&dst, &val)?;
-    write_current(alias)?;
-
+    switch_live_auth(alias)?;
     user_println(&format!("Switched to profile: {alias}"));
     Ok(())
 }
 
 pub fn switch_profile(alias: &str) -> Result<()> {
-    validate_alias(alias)?;
-    let src = profile_auth_path(alias)?;
-    if !src.exists() {
-        return Err(CsError::NotFound(alias.to_string()).into());
-    }
-    let dst = codex_auth_path()?;
-    backup_auth(&dst)?;
-    let val = read_auth(&src)?;
-    write_auth(&dst, &val)?;
-    write_current(alias)?;
-    Ok(())
+    switch_live_auth(alias)
 }
 
 pub fn cmd_delete(alias: &str) -> Result<()> {
@@ -639,8 +671,10 @@ pub fn save_auth_value(val: serde_json::Value, hint_alias: Option<&str>) -> Resu
 mod tests {
     use std::ffi::OsString;
     use std::sync::{LazyLock, Mutex, MutexGuard};
+    use std::time::Duration;
 
     use anyhow::Result;
+    use fs2::FileExt;
 
     use super::{cmd_delete, cmd_use, rename_profile, switch_profile, validate_alias};
 
@@ -759,6 +793,62 @@ mod tests {
         }
 
         assert_invalid_alias(rename_profile("valid-alias", ""), "alias cannot be empty");
+    }
+
+    #[test]
+    fn switch_profile_waits_for_auth_lock() {
+        let _env = TestEnv::new();
+
+        let live = crate::auth::codex_auth_path().unwrap();
+        let current =
+            realistic_auth_json("current@example.com", "acct_current", "acc_old", "ref_old");
+        crate::auth::write_auth(&live, &current).unwrap();
+
+        let next = realistic_auth_json("next@example.com", "acct_next", "acc_new", "ref_new");
+        let profile_path = super::profile_auth_path("next-profile").unwrap();
+        super::ensure_profile_parent(&profile_path).unwrap();
+        crate::auth::write_auth(&profile_path, &next).unwrap();
+
+        let lock_path = super::auth_lock_path().unwrap();
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        lock_file.lock_exclusive().unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let ok = super::switch_profile("next-profile").is_ok();
+            tx.send(ok).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            rx.try_recv().is_err(),
+            "switch should block while auth lock is held"
+        );
+        assert_eq!(
+            crate::auth::read_auth(&live)
+                .unwrap()
+                .pointer("/tokens/access_token")
+                .and_then(|v| v.as_str()),
+            Some("acc_old")
+        );
+
+        drop(lock_file);
+
+        assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        handle.join().unwrap();
+        assert_eq!(
+            crate::auth::read_auth(&live)
+                .unwrap()
+                .pointer("/tokens/access_token")
+                .and_then(|v| v.as_str()),
+            Some("acc_new")
+        );
+        assert_eq!(super::read_current(), "next-profile");
     }
 
     // ── detect_auth_change tests ─────────────────────────────
@@ -997,8 +1087,7 @@ mod tests {
         super::cmd_save(Some("bob")).unwrap();
 
         // Update live with new alice tokens
-        let alice_updated =
-            realistic_auth_json("alice@example.com", "acct_a", "acc_a2", "ref_a2");
+        let alice_updated = realistic_auth_json("alice@example.com", "acct_a", "acc_a2", "ref_a2");
         crate::auth::write_auth(&live, &alice_updated).unwrap();
         super::update_profile_from_live("alice").unwrap();
 
@@ -1010,8 +1099,7 @@ mod tests {
         assert_eq!(profile_val["OPENAI_API_KEY"], serde_json::Value::Null);
 
         // Verify: bob's profile was NOT modified
-        let bob_val =
-            crate::auth::read_auth(&super::profile_auth_path("bob").unwrap()).unwrap();
+        let bob_val = crate::auth::read_auth(&super::profile_auth_path("bob").unwrap()).unwrap();
         assert_eq!(bob_val["tokens"]["access_token"], "acc_b1");
 
         // Verify: current marker updated
