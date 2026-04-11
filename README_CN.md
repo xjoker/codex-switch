@@ -19,7 +19,8 @@
 - **账号管理** — 保存、切换、重命名、删除 Codex 账号
 - **自动探测** — 自动发现并追踪当前 `auth.json`
 - **用量仪表盘** — 实时监控配额（5 小时和 7 天窗口），包含每个账号自己的刷新时间
-- **智能切换** — `codex-switch use` 不带参数时通过三种[选择模式](#选择模式)自动选择最优账号（Team 账号优先调度）
+- **自适应智能切换** — `codex-switch use` 不带参数时通过统一的 5 组件自适应评分算法自动选择最优账号，Team 账号默认优先
+- **后台守护进程（Beta）** — 可选的 `daemon` 命令在后台监控当前账号的用量，当超过阈值时自动切换。支持 macOS LaunchAgent 和 Linux systemd 用户服务安装
 - **仅刷新过期账号** — `use`、`list` 和 TUI 默认只刷新缓存已过期的账号
 - **进度展示** — 大批量 `use`、`list`、目录 `import` 统一显示单行跨平台进度条
 - **交互式 TUI** — 完整的终端界面，实时用量数据、颜色状态、键盘快捷键
@@ -131,7 +132,13 @@ codex-switch use
 # 6. 启动交互式 TUI
 codex-switch tui
 
-# 7. 手动检查新版本
+# 7. 启动后台守护进程（Beta，可选）
+codex-switch daemon start
+
+# 8. 检查守护进程状态
+codex-switch daemon status
+
+# 9. 手动检查新版本
 codex-switch self-update --check
 ```
 
@@ -139,13 +146,18 @@ codex-switch self-update --check
 
 | 命令 | 说明 |
 |------|------|
-| `codex-switch use [别名] [-m 模式]` | 切换账号。不带别名则按配置的[选择模式](#选择模式)自动选择最优账号。`-m` 覆盖默认模式 |
+| `codex-switch use [别名] [--force]` | 切换账号。不带别名则用自适应评分算法自动选择最优账号。`--force` 跳过运行中 Codex 进程的警告 |
 | `codex-switch list [-f]` | 显示所有账号信息、用量和可用状态（`-f` 强制刷新，忽略缓存） |
 | `codex-switch warmup [别名]` | 发送最小请求以触发 5h/7d 配额窗口倒计时。不带别名则预热所有账号 |
 | `codex-switch login [--device] [别名]` | OAuth 登录（`--device` 用于无浏览器的服务器）。若别名已存在则重新授权 |
 | `codex-switch rename <旧别名> <新别名>` | 重命名账号 |
 | `codex-switch delete <别名>` | 删除账号 |
 | `codex-switch import <路径> [别名]` | 导入单个 auth.json，或递归扫描目录下所有 JSON 文件并校验后导入 |
+| `codex-switch daemon start [--foreground]` | 启动自动切换守护进程（Beta）。默认后台运行；`--foreground` 用于服务管理器 |
+| `codex-switch daemon stop` | 停止运行的 Beta 守护进程 |
+| `codex-switch daemon status` | 显示 Beta 守护进程状态 |
+| `codex-switch daemon install` | 安装 Beta 守护进程作为系统服务（macOS LaunchAgent / Linux systemd 用户服务） |
+| `codex-switch daemon uninstall` | 卸载 Beta 守护进程系统服务 |
 | `codex-switch self-update [--check] [--dev]` | 手动检查 GitHub Releases，或更新当前直装版本。`--dev` 切换到开发通道 |
 | `codex-switch tui` | 启动交互式终端界面 |
 | `codex-switch open` | 在文件管理器中打开配置目录 |
@@ -230,9 +242,15 @@ ttl = 300  # 缓存有效期（秒，默认 300）
 max_concurrent = 20  # 最大并发请求数（默认 20）
 
 [use]
-mode = "max-remaining"      # 选择模式: max-remaining | drain-first | round-robin
-min_remaining = 5           # drain-first: 低于此 5h 剩余百分比的账号降级（默认: 5）
-safety_margin_7d = 20       # 7d 安全线: 低于此剩余百分比开始扣分（默认: 20）
+safety_margin_7d = 20       # 7d 安全线：低于此剩余百分比开始惩罚（默认：20）
+team_priority = true        # 优先使用 Team 账号，+500 层级加成（默认：true）
+
+[daemon]
+poll_interval_secs = 60         # 用量轮询间隔（秒，默认：60）
+switch_threshold = 80           # 触发切换的 5h 用量百分比（默认：80）
+token_check_interval_secs = 300 # Token 刷新检查间隔（秒，默认：300）
+notify = false                  # 切换时桌面通知（默认：false）
+log_level = "info"              # 守护进程日志级别（默认："info"）
 ```
 
 ### 示例
@@ -258,6 +276,27 @@ codex-switch list
 # 加入 shell 配置文件（.zshrc / .bashrc）：
 codex-switch use && codex
 ```
+
+### 使用守护进程保持下一次会话就绪（Beta）
+
+当你希望 `codex-switch` 持续监控当前账号并在后台准备好下一次 Codex 启动时，使用 Beta 守护进程：
+
+```bash
+# 启动后台守护进程
+codex-switch daemon start
+
+# 检查是否在运行
+codex-switch daemon status
+
+# 停止守护进程
+codex-switch daemon stop
+
+# 安装/卸载用户服务
+codex-switch daemon install
+codex-switch daemon uninstall
+```
+
+Beta 守护进程使用与 `codex-switch use` 相同的自适应评分逻辑。它在每次轮询时刷新当前账号，仅在 `daemon.switch_threshold` 达到或超过阈值且存在更好的候选账号时才切换，并在单独的定时器上刷新即将过期的 Token。守护进程为未来的 Codex 启动做准备；已运行的 Codex 进程在切换后仍需重启。
 
 ### 定时刷新 Token（可选）
 
@@ -300,11 +339,18 @@ codex-switch --debug use
 | `~/.codex/auth.json` | Codex CLI 认证文件（或 `$CODEX_HOME/auth.json`） |
 | `~/.codex-switch/profiles/<别名>/auth.json` | 保存的账号数据 |
 | `~/.codex-switch/current` | 当前激活的账号名 |
+| `~/.codex-switch/auth.lock` | 文件锁（序列化 auth.json 切换操作） |
 | `~/.codex-switch/config.toml` | 配置文件 |
 
 ### 自动探测
 
-运行 `codex-switch list` 或 `codex-switch tui` 时，工具会检查当前 `~/.codex/auth.json` 是否属于未追踪的账号。如果是，自动保存为新 profile（使用邮箱用户名作为别名）。
+每次交互式启动时，codex-switch 会将当前 `~/.codex/auth.json` 与所有已保存的 profile 进行比对：
+
+- **检测到新账号**（例如你运行了 `codex login`）— 提示保存为新 profile
+- **已有账号的 Token 已刷新** — 提示更新对应 profile
+- **非交互式环境**（管道、cron、CI）— 报告变更但不会静默修改状态
+
+运行 `codex-switch list` 或 `codex-switch tui` 时，工具还会检查当前 `auth.json` 是否属于未追踪的账号，并自动保存为新 profile（使用邮箱用户名作为别名）。
 
 ### 去重机制
 
@@ -323,141 +369,44 @@ codex-switch --debug use
 
 ### 智能切换（`codex-switch use`）
 
-不带别名调用时，`codex-switch use` 会先复用仍然新鲜的缓存，再只刷新过期账号，并对每个账号评分，选择得分最高的进行切换。
+不带别名调用时，`codex-switch use` 会先复用仍然新鲜的缓存，再只刷新过期账号，对每个账号使用统一的自适应算法评分。
 
 算法采用**两阶段**方式：
-1. **准入检查** — 已耗尽或 7d 配额严重不足（且重置遥远）的账号被过滤。如果所有账号都不达标，则从中选最优的作为兜底。
-2. **评分排名** — 对通过准入的账号按 5h 模式分数 + 7d 健康度调整进行排名。
+1. **准入检查** — 过滤已耗尽、7d 配额严重不足（且重置遥远）或低于 Free 计划安全底线的账号。如果**所有**账号都不达标，则从中选最优的作为兜底。
+2. **自适应评分** — 对通过准入的账号使用五个组件进行排名：
 
-**Team 账号加权** — 在 `max-remaining` 和 `drain-first` 模式下，Team 计划账号获得 +20 评分加成。在 `round-robin` 模式下，Team 账号被置于更高层级，始终优先于非 Team 账号。
+```text
+score = tier_bonus + headroom + sustain + drain_value + recency
+```
+
+- `tier_bonus`（0 或 +500）— `team_priority = true` 时 Team 账号默认获得优先。这是优先级而非保证：已耗尽或不安全的 Team 账号仍可能落败或被过滤。
+- `headroom`（0..1100）— 基于燃烧速率和重置时间的 5h 配速感知剩余容量，而非静态剩余百分比。
+- `sustain`（-800..0）— 7d 每窗口预算安全惩罚。
+- `drain_value`（0..300）— 对 60 分钟内即将重置的配额给予加分；权重根据池大小和耗尽比率自适应调整。
+- `recency`（-60..0）— 轻微分散惩罚，避免反复使用同一账号。
+
+v0.0.13+ 不再有模式选择。此统一算法替代了之前的 `max-remaining`、`drain-first` 和 `round-robin`。
 
 > **注意：** 切换账号后，需要**重启 Codex** 才能加载新的 `auth.json`。Codex CLI 仅在启动时读取认证文件，不会监听文件变化。
-
-### 评分机制
-
-**5h 决定"用谁"，7d 决定"敢不敢用"。**
-
-```
-最终分数 = 5h 模式分数 + 7d 调整量   (max-remaining 和 drain-first)
-最终分数 = Team 层级 + 最久未使用      (round-robin)
-```
-
-对于 `max-remaining` 和 `drain-first`，5h 窗口是主要因素 — 决定当前应该使用哪个账号。7d 窗口作为安全修正：当周配额偏低时，逐步惩罚该账号，但不会完全推翻一个强势的 5h 优势。
-
-对于 `round-robin`，不使用 7d 调整量。取而代之的是准入门槛会过滤掉 7d 严重不足的账号，剩余合格账号按最久未使用的顺序轮换。
-
-#### 7d 健康度调整（max-remaining 和 drain-first）
-
-在 5h 评分后以加法叠加（范围：-300 到 0）：
-
-- **7d 剩余 >= 安全线（默认 20%）** → 不惩罚（安全区）
-- **7d 剩余 < 安全线** → 剩余越少惩罚越大
-- **7d 在 48 小时内重置** → 惩罚减轻（最多减轻 80%），因为周配额即将恢复
-- **7d 重置遥远** → 全额惩罚，因为耗尽意味着数天的锁定
-- **无 7d 数据** → 轻微惩罚（-50），未知状态保守处理
-
-最大惩罚 300 分足以在 5h 接近的竞争中翻转结果，但无法推翻较大的 5h 优势 — 确保 5h 始终是主要决策因素。
 
 #### 准入门槛
 
 以下情况账号被标记为**不合格**：
-- 任一窗口已完全耗尽（>=100%），或
-- 7d 剩余低于临界阈值（安全线的 25%，最低 1%）且 7d 重置超过 48 小时
+- 5h 窗口已完全耗尽（>=100%）
+- 7d 窗口已完全耗尽（>=100%）
+- 7d 剩余低于临界阈值（`safety_margin_7d` 的 25%，最低 1%）且 7d 重置超过 48 小时
+- Free 计划账号已低于内置的 5h 安全底线
 
 不合格账号会被排除，除非所有账号都不合格，此时选择得分最高的作为最后手段。
 
-### 选择模式
+### 配置选项
 
-三种模式控制账号的排名方式。7d 调整应用于 `max-remaining` 和 `drain-first`；`round-robin` 仅通过准入门槛来保护 7d 配额。
+`[use]` 现在只有两个选项：
 
-| 模式 | CLI 参数 | 说明 |
-|------|----------|------|
-| `max-remaining` | `-m max-remaining` | **默认。** 选择 5h 剩余配额最多的账号 |
-| `drain-first` | `-m drain-first` | 优先选择 5h 即将重置的账号 — 先花"免费"配额 |
-| `round-robin` | `-m round-robin` | 在合格账号之间均匀轮换 |
+- `safety_margin_7d` — 7d 安全线，用于 sustain 组件和准入门槛
+- `team_priority` — 默认 `true`；为 Team 账号提供 +500 层级加成
 
-#### `max-remaining`（默认）
-
-**策略：最大化当前可用余量。**
-
-选择 5h 窗口中剩余配额最多的账号。简单直接 — 始终给你能坚持最久的那个账号。
-
-5h 评分：
-1. 7d 达 100% → 极低分（账号不可用，分数 0-100）
-2. 5h 有剩余配额 → 分数 = `1000 + 剩余百分比`（范围 1000-1100）
-3. 5h 耗尽但 7d 未满 → 中等分数，基于 5h 重置倒计时（范围 0-500）
-4. 无用量数据 → 中性分数（50）
-
-**适用场景：** 单账号为主，或始终想用"最满"的账号。
-
-#### `drain-first`
-
-**策略：优先消耗即将"免费"的配额，保留不会很快恢复的配额。**
-
-核心思路：如果一个账号的 5h 窗口 30 分钟后就重置，那现在花掉的配额实际上是"免费"的 — 无论如何很快就会恢复。而一个 4 小时后才重置的账号应该留作后备。
-
-5h 评分：
-1. 7d 达 100% → 极低分（分数 0-100）
-2. 5h 剩余低于 `min_remaining` 阈值（默认 5%）→ 降级（分数 500-600）。配额太少无法支撑完整对话，但仍高于已耗尽的账号
-3. 5h 有剩余配额且高于阈值 → 分数 = `1000 + 重置紧迫度加分`（范围 1000-1300）。距重置越近，加分越高
-4. 5h 耗尽 → 中等分数，基于重置倒计时（范围 0-500）
-
-**5 个账号示例（7d 均健康）：**
-
-| 账号 | 5h 已用 | 5h 重置 | 5h 分数 | 7d 调整 | 最终 | 原因 |
-|------|---------|---------|---------|---------|------|------|
-| C | 60% | 20 分钟 | ~1280 | 0 | ~1280 | 有余量 + 即将重置 → 花"免费"配额 |
-| D | 40% | 45 分钟 | ~1255 | 0 | ~1255 | 余量充足 + 即将重置 → 第二选择 |
-| A | 10% | 4 小时 | ~1060 | 0 | ~1060 | 大量余量但重置遥远 → 留作后备 |
-| B | 97% | 10 分钟 | ~597 | 0 | ~597 | 低于阈值 → 降级 |
-| E | 100% | 2 小时 | ~380 | 0 | ~380 | 已耗尽 → 等待重置 |
-
-**7d 影响示例：**
-
-| 账号 | 5h 已用 | 5h 重置 | 7d 已用 | 7d 重置 | 5h 分数 | 7d 调整 | 最终 |
-|------|---------|---------|---------|---------|---------|---------|------|
-| A | 0% | 30 分钟 | 10% | 5 天 | 1300 | 0 | **1300** |
-| B | 50% | 2 小时 | 30% | 4 天 | 1180 | 0 | **1180** |
-| C | 0% | 30 分钟 | 90% | 12 小时 | 1300 | -60 | **1240** |
-| D | 0% | 30 分钟 | 95% | 6 天 | 1300 | -225 | **1075** |
-
-账号 D 虽然 5h 满额，但 7d 仅剩 5% 且 6 天后才重置 — -225 的惩罚让它低于账号 B。
-
-**适用场景：** 3 个以上账号，追求无缝轮换和最大总吞吐量。
-
-#### `round-robin`
-
-**策略：均匀分散使用。**
-
-忽略配额水平（仅判断是否合格）。选择最近最少被 `codex-switch use` 选中的合格账号。Team 账号被置于更高层级，始终优先于非 Team 账号。
-
-评分：
-1. 不合格账号（已耗尽或 7d 严重不足且重置遥远）→ 排除
-2. Team 账号 → 高层级，层级内按最久未使用排序
-3. 非 Team 账号 → 低层级，层级内按最久未使用排序
-
-**适用场景：** 大量账号池，均匀分配比最优配额利用更重要。
-
-### 配置选择模式
-
-**CLI 参数（单次覆盖）：**
-
-```bash
-codex-switch use -m drain-first
-codex-switch use --mode round-robin
-```
-
-**配置文件（持久默认值）：**
-
-```toml
-# ~/.codex-switch/config.toml
-[use]
-mode = "max-remaining"      # max-remaining | drain-first | round-robin
-min_remaining = 5           # drain-first: 低于此 5h 剩余百分比的账号降级（默认: 5）
-safety_margin_7d = 20       # 7d 安全线: 低于此剩余百分比开始扣分（默认: 20）
-```
-
-CLI `-m` 参数始终覆盖配置文件中的设置。
+旧版 `mode` 和 `min_remaining` 在 v0.0.13+ 中被忽略并输出警告。
 
 ### 缓存行为
 
