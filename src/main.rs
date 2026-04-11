@@ -37,7 +37,8 @@ async fn main() {
         let level = config::daemon_log_level();
         EnvFilter::new(format!("codex_switch={level}"))
     } else {
-        EnvFilter::from_default_env()
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("codex_switch=info"))
     };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -1166,7 +1167,7 @@ fn print_usage_line(u: &usage::UsageInfo) {
     if let Some(w) = &u.primary {
         let pct = w.used_percent.unwrap_or(0.0);
         let remaining_pct = (100.0 - pct).max(0.0);
-        let pace = usage::pace_percent(w, usage::WINDOW_5H_SECS);
+        let pace = usage::visible_pace_percent(w, usage::WINDOW_5H_SECS);
         let bar = render_progress_bar(pct, pace, bar_width);
         let reset = format_reset_short_relative(w);
         println!(
@@ -1179,7 +1180,7 @@ fn print_usage_line(u: &usage::UsageInfo) {
     if let Some(w) = &u.secondary {
         let pct = w.used_percent.unwrap_or(0.0);
         let remaining_pct = (100.0 - pct).max(0.0);
-        let pace = usage::pace_percent(w, usage::WINDOW_7D_SECS);
+        let pace = usage::visible_pace_percent(w, usage::WINDOW_7D_SECS);
         let bar = render_progress_bar(pct, pace, bar_width);
         let reset = format_reset_short_relative(w);
         println!(

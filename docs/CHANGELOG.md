@@ -1,6 +1,12 @@
 # Changelog
 
-## v0.0.12-dev — 2026-04-11
+## v0.0.13 — 2026-04-11
+
+### Added
+
+- **Background daemon (Beta)** — `codex-switch daemon start|stop|status|install|uninstall` runs a background process that monitors the current account's usage and auto-switches when the configured threshold is exceeded. Supports macOS LaunchAgent and Linux systemd user service installation. Marked Beta: use with care
+- **Mock testing infrastructure** — HTTP-level integration tests with a real mock server exercising the full fetch → parse → score pipeline
+- **Daemon integration test** — End-to-end test covering daemon start, automatic switch, status, and stop lifecycle
 
 ### Changed
 
@@ -10,6 +16,26 @@
 - **Pool-adaptive drain** — Drain bonus only activates within 60 minutes of 5h reset, with weight scaled by pool exhaustion ratio
 - **7d sustainability** — Budget-per-window calculation replaces static safety margin for more accurate 7d health assessment
 - **README tagline simplified** — Removed self-promotional language from project description
+
+### Fixed
+
+- **PID file TOCTOU race** — Daemon PID file now uses atomic `O_CREAT|O_EXCL` creation, preventing double-instance under launchd/systemd restart racing
+- **PID file leak on panic** — RAII guard ensures the PID file is cleaned up even when the daemon loop panics
+- **AppleScript notification injection** — Notification messages are now sanitized to printable ASCII with proper backslash and quote escaping
+- **CODEX_HOME path traversal** — `CODEX_HOME` environment variable now rejects paths containing `..` components
+- **`update_tokens` silent data loss** — Previously skipped token updates without error when `auth.json` lacked a `tokens` object; now returns an error
+- **Daemon backoff blocks shutdown** — Backoff sleep during consecutive failures now uses a nested `select!` so SIGTERM is handled immediately
+- **Daemon tick burst after backoff** — Both poll and token-check intervals now use `MissedTickBehavior::Skip` to prevent accumulated tick storms
+- **Daemon process signals via PATH** — `process_alive` and `stop` now use `libc::kill` directly instead of spawning `kill` from PATH
+- **`daemon_log_level` tracing dependency** — Pre-tracing config probe no longer calls the full `load_from_file()` which triggered silent `tracing::warn!` calls
+- **Non-daemon log level silent** — Non-daemon commands now default to `codex_switch=info` when `RUST_LOG` is not set, instead of producing no output
+- **`parse_window` false positive** — Window parsing now requires `used_percent` to be present; a window with only `reset_at` no longer creates a misleading `has_5h_data=true` with `used_5h=0.0`
+- **Warmup token errors silenced** — `update_tokens` failures in warmup are now logged via `warn!` instead of being silently discarded with `let _ =`
+- **Service install idempotency** — `daemon install` now detects and warns about existing service files, unloading/stopping the old service before reinstalling
+- **Daemon detach startup detection** — `daemon start` now checks if the spawned child is still alive after 200ms, failing early with a diagnostic message instead of printing success
+- **Test env var leak** — HTTP integration tests no longer mutate `CS_USAGE_URL` via `set_var`, eliminating cross-test pollution and multi-thread UB
+- **Test mock token handler** — Mock `/oauth/token` now validates `grant_type=refresh_token` and returns 400 on malformed requests
+- **Test pool_exhausted hardcoded** — Timeline tests now compute `pool_exhausted` dynamically instead of hardcoding values
 
 ### Removed
 

@@ -20,17 +20,26 @@ pub(crate) fn token_url() -> String {
 /// ~/.codex/auth.json (or $CODEX_HOME/auth.json)
 pub fn codex_auth_path() -> Result<PathBuf> {
     if let Ok(home) = std::env::var("CODEX_HOME") {
-        return Ok(PathBuf::from(home).join("auth.json"));
+        let path = PathBuf::from(&home);
+        // Reject path traversal components
+        for component in path.components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                anyhow::bail!(
+                    "CODEX_HOME contains '..' component which is not allowed: {home}"
+                );
+            }
+        }
+        return Ok(path.join("auth.json"));
     }
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
     Ok(home.join(".codex").join("auth.json"))
 }
 
 /// ~/.codex-switch/
 pub fn app_home() -> Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
     Ok(home.join(".codex-switch"))
 }
 
@@ -112,11 +121,13 @@ pub fn update_tokens(
     refresh_token: &str,
 ) -> Result<()> {
     let mut val = read_auth(path)?;
-    if let Some(tokens) = val.get_mut("tokens").and_then(|t| t.as_object_mut()) {
-        tokens.insert("id_token".into(), serde_json::json!(id_token));
-        tokens.insert("access_token".into(), serde_json::json!(access_token));
-        tokens.insert("refresh_token".into(), serde_json::json!(refresh_token));
-    }
+    let tokens = val
+        .get_mut("tokens")
+        .and_then(|t| t.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("auth.json missing tokens object in {}", path.display()))?;
+    tokens.insert("id_token".into(), serde_json::json!(id_token));
+    tokens.insert("access_token".into(), serde_json::json!(access_token));
+    tokens.insert("refresh_token".into(), serde_json::json!(refresh_token));
     write_auth(path, &val)
 }
 

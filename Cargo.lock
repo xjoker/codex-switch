@@ -327,7 +327,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codex-switch"
-version = "0.0.12-dev"
+version = "0.0.13"
 dependencies = [
  "anyhow",
  "axum",
@@ -339,6 +339,7 @@ dependencies = [
  "flate2",
  "fs2",
  "hex",
+ "libc",
  "owo-colors",
  "rand 0.10.0",
  "ratatui",

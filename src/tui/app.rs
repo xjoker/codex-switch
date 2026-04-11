@@ -257,7 +257,6 @@ impl App {
         self.marked.clear();
     }
 
-
     /// Returns true if the account's 5h window is still active (reset time in the future).
     /// Checks both loaded usage data and the cache (covers Loading/Idle states).
     /// An account is considered "warmed" only if its 5h window is active AND
@@ -279,8 +278,7 @@ impl App {
         crate::cache::get(alias)
             .and_then(|u| u.primary)
             .is_some_and(|w| {
-                w.resets_at.is_some_and(|t| t > now)
-                    && w.used_percent.is_some_and(|p| p > 0.0)
+                w.resets_at.is_some_and(|t| t > now) && w.used_percent.is_some_and(|p| p > 0.0)
             })
     }
 
@@ -306,7 +304,13 @@ impl App {
         let skipped = candidates.len() - aliases.len();
 
         if aliases.is_empty() {
-            self.set_status(format!("All {} accounts already active or skipped", candidates.len()), 4);
+            self.set_status(
+                format!(
+                    "All {} accounts already active or skipped",
+                    candidates.len()
+                ),
+                4,
+            );
             return;
         }
         let count = aliases.len();

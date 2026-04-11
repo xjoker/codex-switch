@@ -1,6 +1,6 @@
+use crate::output::user_println;
 use anyhow::Result;
 use std::path::PathBuf;
-use crate::output::user_println;
 
 pub fn install() -> Result<()> {
     #[cfg(target_os = "macos")]
@@ -67,6 +67,18 @@ fn install_launchd() -> Result<()> {
     );
 
     let path = plist_path()?;
+    if path.exists() {
+        user_println(&format!(
+            "Warning: overwriting existing LaunchAgent at {}",
+            path.display()
+        ));
+        // Unload the old service first to avoid launchctl conflicts
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &path.display().to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -134,6 +146,18 @@ WantedBy=default.target
     );
 
     let path = unit_path()?;
+    if path.exists() {
+        user_println(&format!(
+            "Warning: overwriting existing systemd service at {}",
+            path.display()
+        ));
+        // Stop the old service first to avoid conflicts
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "stop", "codex-switch-daemon"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -148,7 +172,10 @@ WantedBy=default.target
     if !status.success() {
         anyhow::bail!("systemctl enable failed");
     }
-    user_println(&format!("Installed systemd user service at {}", path.display()));
+    user_println(&format!(
+        "Installed systemd user service at {}",
+        path.display()
+    ));
     Ok(())
 }
 

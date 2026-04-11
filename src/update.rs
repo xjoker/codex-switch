@@ -210,7 +210,8 @@ fn extract_release_version(release: &GithubRelease) -> String {
             .as_deref()
             .and_then(|n| n.strip_prefix("dev ("))
             .and_then(|n| n.strip_suffix(')'))
-        && Version::parse(v).is_ok() {
+        && Version::parse(v).is_ok()
+    {
         return v.to_string();
     }
     normalize_version(&release.tag_name)

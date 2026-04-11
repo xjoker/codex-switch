@@ -454,7 +454,7 @@ fn render_usage_gauge(
 ) {
     let used = w.used_percent.unwrap_or(0.0).min(100.0);
     let remaining_pct = (100.0 - used).max(0.0);
-    let pace = crate::usage::pace_percent(w, window_secs);
+    let pace = crate::usage::visible_pace_percent(w, window_secs);
     let over = pace.is_some_and(|p| used > p);
     let reset_str = w
         .resets_at

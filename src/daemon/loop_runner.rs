@@ -9,7 +9,9 @@ pub async fn run_daemon_loop() -> Result<()> {
     let token_secs = cfg.daemon.token_check_interval_secs;
 
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
+    poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut token_interval = tokio::time::interval(std::time::Duration::from_secs(token_secs));
+    token_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut consecutive_failures: u32 = 0;
 
     tracing::info!(
@@ -35,7 +37,14 @@ pub async fn run_daemon_loop() -> Result<()> {
                         tracing::error!(
                             "Monitor cycle failed ({consecutive_failures}x): {e}, backing off {backoff_secs}s"
                         );
-                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                        // Backoff with nested select! so shutdown signal is still responsive
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
+                            _ = shutdown_signal() => {
+                                tracing::info!("Received shutdown signal during backoff, exiting");
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -152,10 +161,15 @@ async fn check_and_switch() -> Result<bool> {
     }
 
     // Compute pool_exhausted across all accounts (including current)
-    let pool_exhausted = other_candidates.iter()
+    let pool_exhausted = other_candidates
+        .iter()
         .filter(|(c, _)| c.effective_used_5h() >= 100.0)
         .count()
-        + if current_candidate.effective_used_5h() >= 100.0 { 1 } else { 0 };
+        + if current_candidate.effective_used_5h() >= 100.0 {
+            1
+        } else {
+            0
+        };
 
     // Patch pool_exhausted into current candidate and re-score
     current_candidate.pool_exhausted = pool_exhausted;
@@ -173,18 +187,16 @@ async fn check_and_switch() -> Result<bool> {
 
         if eligible {
             any_eligible = true;
-            if s > current_score
-                && best_eligible.as_ref().is_none_or(|(_, bs)| s > *bs) {
+            if s > current_score && best_eligible.as_ref().is_none_or(|(_, bs)| s > *bs) {
                 best_eligible = Some((alias, s));
             }
-        } else if s > current_score
-            && best_ineligible.as_ref().is_none_or(|(_, bs)| s > *bs) {
+        } else if s > current_score && best_ineligible.as_ref().is_none_or(|(_, bs)| s > *bs) {
             best_ineligible = Some((alias, s));
         }
     }
 
     // Use eligible candidate if available, otherwise fallback to best ineligible
-    let best = best_eligible.or_else(|| if !any_eligible { best_ineligible } else { None });
+    let best = best_eligible.or(if !any_eligible { best_ineligible } else { None });
 
     // 5. Switch if a better candidate was found
     if let Some((best_alias, best_score)) = best {

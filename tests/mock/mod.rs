@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod scenarios;
 pub mod transformer;
 
@@ -37,7 +39,13 @@ impl MockServer {
     pub async fn start(entries: Vec<(String, Vec<Value>)>) -> Self {
         let mut state_map = HashMap::new();
         for (token, responses) in entries {
-            state_map.insert(token, TokenState { responses, cursor: 0 });
+            state_map.insert(
+                token,
+                TokenState {
+                    responses,
+                    cursor: 0,
+                },
+            );
         }
         let state: SharedState = Arc::new(Mutex::new(state_map));
 
@@ -90,10 +98,7 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 }
 
 /// GET /backend-api/wham/usage handler.
-async fn usage_handler(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn usage_handler(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
     let token = match extract_bearer(&headers) {
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response(),
@@ -103,11 +108,7 @@ async fn usage_handler(
     let ts = match map.get_mut(&token) {
         Some(ts) => ts,
         None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                format!("Unknown token: {token}"),
-            )
-                .into_response()
+            return (StatusCode::UNAUTHORIZED, format!("Unknown token: {token}")).into_response();
         }
     };
 
@@ -119,19 +120,41 @@ async fn usage_handler(
 }
 
 /// POST /oauth/token handler — mock token refresh.
-/// Always succeeds, returning dummy tokens based on the refresh_token in the form body.
+/// Validates grant_type=refresh_token is present, then returns dummy tokens.
 async fn token_handler(body: String) -> impl IntoResponse {
-    // Parse the form body to extract refresh_token for traceability
-    let refresh_token = body
+    // Parse form body into key-value pairs
+    let params: HashMap<String, String> = body
         .split('&')
-        .find_map(|pair| {
+        .filter_map(|pair| {
             let (key, val) = pair.split_once('=')?;
-            if key == "refresh_token" {
-                Some(urlencoding::decode(val).unwrap_or_default().into_owned())
-            } else {
-                None
-            }
+            Some((
+                key.to_string(),
+                urlencoding::decode(val)
+                    .map(|v| v.into_owned())
+                    .unwrap_or_else(|_| val.to_string()),
+            ))
         })
+        .collect();
+
+    // Validate grant_type
+    let grant_type = params.get("grant_type").map(|s| s.as_str());
+    if grant_type != Some("refresh_token") {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "error": "unsupported_grant_type",
+                "error_description": format!(
+                    "expected grant_type=refresh_token, got {:?}",
+                    grant_type
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    let refresh_token = params
+        .get("refresh_token")
+        .cloned()
         .unwrap_or_else(|| "unknown".to_string());
 
     let response = json!({
@@ -140,5 +163,5 @@ async fn token_handler(body: String) -> impl IntoResponse {
         "refresh_token": format!("mock_refresh_{refresh_token}"),
     });
 
-    axum::Json(response)
+    axum::Json(response).into_response()
 }

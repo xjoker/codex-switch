@@ -32,25 +32,30 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
 
     // Pre-refresh: if token is about to expire, refresh proactively
     if let Some(ref rt) = refresh_token
-        && crate::jwt::is_token_expiring(&access_token, 60) == Some(true) {
+        && crate::jwt::is_token_expiring(&access_token, 60) == Some(true)
+    {
         debug!("[{alias}] access_token expiring soon, refreshing before warmup");
         match crate::usage::do_refresh_token(alias, &client, rt).await {
             Ok(refreshed) => {
-                let _ = crate::auth::update_tokens(
+                if let Err(e) = crate::auth::update_tokens(
                     profile_path,
                     &refreshed.id_token,
                     &refreshed.access_token,
                     &refreshed.refresh_token,
-                );
+                ) {
+                    warn!("[{alias}] failed to persist refreshed tokens: {e}");
+                }
                 // Sync live auth.json if this is the current profile
                 if crate::profile::read_current() == alias
-                    && let Ok(live) = crate::auth::codex_auth_path() {
-                    let _ = crate::auth::update_tokens(
+                    && let Ok(live) = crate::auth::codex_auth_path()
+                    && let Err(e) = crate::auth::update_tokens(
                         &live,
                         &refreshed.id_token,
                         &refreshed.access_token,
                         &refreshed.refresh_token,
-                    );
+                    )
+                {
+                    warn!("[{alias}] failed to persist refreshed tokens to live auth: {e}");
                 }
                 access_token = refreshed.access_token;
                 refresh_token = Some(refreshed.refresh_token);
@@ -109,20 +114,24 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                 debug!("[{alias}] got {status}, attempting token refresh and retry");
                 match crate::usage::do_refresh_token(alias, &client, rt).await {
                     Ok(refreshed) => {
-                        let _ = crate::auth::update_tokens(
+                        if let Err(e) = crate::auth::update_tokens(
                             profile_path,
                             &refreshed.id_token,
                             &refreshed.access_token,
                             &refreshed.refresh_token,
-                        );
+                        ) {
+                            warn!("[{alias}] failed to persist refreshed tokens: {e}");
+                        }
                         if crate::profile::read_current() == alias
-                            && let Ok(live) = crate::auth::codex_auth_path() {
-                            let _ = crate::auth::update_tokens(
+                            && let Ok(live) = crate::auth::codex_auth_path()
+                            && let Err(e) = crate::auth::update_tokens(
                                 &live,
                                 &refreshed.id_token,
                                 &refreshed.access_token,
                                 &refreshed.refresh_token,
-                            );
+                            )
+                        {
+                            warn!("[{alias}] failed to persist refreshed tokens to live auth: {e}");
                         }
                         let mut retry_builder = client
                             .post(RESPONSES_URL)
@@ -131,11 +140,10 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                         if let Some(ref acct_id) = account_id {
                             retry_builder = retry_builder.header("ChatGPT-Account-Id", acct_id);
                         }
-                        let mut retry_resp = retry_builder
-                            .json(&body)
-                            .send()
-                            .await
-                            .map_err(|e| crate::auth::format_reqwest_error("warmup retry failed", &e))?;
+                        let mut retry_resp =
+                            retry_builder.json(&body).send().await.map_err(|e| {
+                                crate::auth::format_reqwest_error("warmup retry failed", &e)
+                            })?;
                         let retry_status = retry_resp.status();
                         if retry_status.is_success() {
                             let _ = retry_resp.chunk().await;
