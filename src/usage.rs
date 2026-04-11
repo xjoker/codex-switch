@@ -132,11 +132,8 @@ impl std::fmt::Display for UsageError {
     }
 }
 
-fn usage_url() -> &'static str {
-    static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| {
-        std::env::var("CS_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
-    })
+fn usage_url() -> String {
+    std::env::var("CS_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
 }
 
 /// Extract a short summary from an error message for user-facing display.
@@ -299,7 +296,7 @@ pub async fn fetch_usage_with_refresh(
         match do_refresh_token(alias, &client, rt).await {
             Ok(new_tokens) => {
                 let resp = client
-                    .get(usage_url)
+                    .get(&usage_url)
                     .header(
                         "Authorization",
                         format!("Bearer {}", new_tokens.access_token),
@@ -325,7 +322,7 @@ pub async fn fetch_usage_with_refresh(
     }
 
     let resp = client
-        .get(usage_url)
+        .get(&usage_url)
         .header("Authorization", format!("Bearer {access_token}"))
         .send()
         .await
@@ -350,7 +347,7 @@ pub async fn fetch_usage_with_refresh(
         match do_refresh_token(alias, &client, rt).await {
             Ok(new_tokens) => {
                 let resp2 = client
-                    .get(usage_url)
+                    .get(&usage_url)
                     .header(
                         "Authorization",
                         format!("Bearer {}", new_tokens.access_token),

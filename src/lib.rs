@@ -1,5 +1,6 @@
 // Re-export modules needed by integration tests.
 // The binary entry point remains in main.rs.
+#![allow(dead_code)]
 
 pub mod auth;
 mod cache;
