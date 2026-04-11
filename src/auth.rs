@@ -11,7 +11,11 @@ const MAX_BACKUPS: usize = 3;
 pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(crate) const USER_AGENT: &str = "codex/0.2.0";
 pub(crate) const ISSUER: &str = "https://auth.openai.com";
-pub(crate) const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+
+pub(crate) fn token_url() -> String {
+    std::env::var("CS_TOKEN_URL").unwrap_or_else(|_| DEFAULT_TOKEN_URL.to_string())
+}
 
 /// ~/.codex/auth.json (or $CODEX_HOME/auth.json)
 pub fn codex_auth_path() -> Result<PathBuf> {

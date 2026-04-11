@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[serde(rename = "use")]
     pub use_cfg: UseConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 impl AppConfig {
@@ -61,38 +63,95 @@ impl Default for NetworkConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ConfigSelectMode {
-    #[default]
-    MaxRemaining,
-    DrainFirst,
-    RoundRobin,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UseConfig {
-    /// Selection mode (default: max-remaining)
-    pub mode: ConfigSelectMode,
-    /// drain-first: accounts with remaining% below this threshold are deprioritized (default: 5)
-    pub min_remaining: f64,
     /// 7d safety margin: when 7d remaining% falls below this, a scoring penalty kicks in (default: 20)
     pub safety_margin_7d: f64,
+    /// Prioritize Team plan accounts (default: true)
+    pub team_priority: bool,
 }
 
 impl Default for UseConfig {
     fn default() -> Self {
         Self {
-            mode: ConfigSelectMode::default(),
-            min_remaining: 5.0,
             safety_margin_7d: 20.0,
+            team_priority: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    /// Usage poll interval in seconds (default: 60)
+    pub poll_interval_secs: u64,
+    /// 5h usage % threshold that triggers a switch (default: 80.0)
+    pub switch_threshold: f64,
+    /// Token expiry check interval in seconds (default: 300)
+    pub token_check_interval_secs: u64,
+    /// Send desktop notification on switch (default: false)
+    pub notify: bool,
+    /// Log level for daemon (default: "info")
+    pub log_level: String,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: 60,
+            switch_threshold: 80.0,
+            token_check_interval_secs: 300,
+            notify: false,
+            log_level: "info".to_string(),
         }
     }
 }
 
 pub fn config_path() -> anyhow::Result<PathBuf> {
     Ok(app_home()?.join("config.toml"))
+}
+
+/// Probe struct to detect deprecated `[use]` keys that are silently ignored.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DeprecatedConfigProbe {
+    #[serde(rename = "use")]
+    use_cfg: Option<DeprecatedUseProbe>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DeprecatedUseProbe {
+    mode: Option<toml::Value>,
+    min_remaining: Option<toml::Value>,
+}
+
+fn warn_deprecated_keys(raw: &str) {
+    let Ok(probe) = toml::from_str::<DeprecatedConfigProbe>(raw) else {
+        return;
+    };
+    let Some(use_cfg) = probe.use_cfg else {
+        return;
+    };
+    if use_cfg.mode.is_some() {
+        tracing::warn!(
+            "config: [use] 'mode' is deprecated and ignored in v0.0.12+, \
+             the adaptive algorithm replaces all selection modes"
+        );
+    }
+    if use_cfg.min_remaining.is_some() {
+        tracing::warn!(
+            "config: [use] 'min_remaining' is deprecated and ignored in v0.0.12+, \
+             the adaptive algorithm replaces all selection modes"
+        );
+    }
+}
+
+fn load_from_str(raw: &str) -> std::result::Result<AppConfig, toml::de::Error> {
+    let config = toml::from_str::<AppConfig>(raw)?;
+    warn_deprecated_keys(raw);
+    Ok(config.normalize())
 }
 
 fn load_from_file() -> AppConfig {
@@ -107,8 +166,8 @@ fn load_from_file() -> AppConfig {
         return AppConfig::default();
     }
     match std::fs::read_to_string(&path) {
-        Ok(content) => match toml::from_str::<AppConfig>(&content) {
-            Ok(config) => config.normalize(),
+        Ok(content) => match load_from_str(&content) {
+            Ok(config) => config,
             Err(err) => {
                 tracing::warn!("Failed to load config: {err}");
                 AppConfig::default()
@@ -147,15 +206,6 @@ pub fn resolve_proxy() -> Option<String> {
     None
 }
 
-/// Resolve the effective select mode: CLI flag takes precedence over config.
-pub fn resolve_select_mode(cli: Option<crate::cli::SelectMode>) -> ConfigSelectMode {
-    match cli {
-        Some(crate::cli::SelectMode::MaxRemaining) => ConfigSelectMode::MaxRemaining,
-        Some(crate::cli::SelectMode::DrainFirst) => ConfigSelectMode::DrainFirst,
-        Some(crate::cli::SelectMode::RoundRobin) => ConfigSelectMode::RoundRobin,
-        None => get().use_cfg.mode,
-    }
-}
 
 pub fn resolve_no_proxy() -> Option<String> {
     if let Some(np) = &get().proxy.no_proxy
@@ -164,4 +214,16 @@ pub fn resolve_no_proxy() -> Option<String> {
         return Some(np.clone());
     }
     None
+}
+
+/// Read daemon log_level from config file without initializing the global config.
+/// Called before tracing is set up, so it must not use tracing.
+pub fn daemon_log_level() -> String {
+    let level = load_from_file().daemon.log_level;
+    let trimmed = level.trim();
+    if trimmed.is_empty() {
+        "info".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }

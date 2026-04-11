@@ -1,14 +1,18 @@
 # codex-switch
 
-[OpenAI Codex CLI](https://github.com/openai/codex) 多账号管理工具，支持配额监控和交互式 TUI 界面。
+**[OpenAI Codex CLI](https://github.com/openai/codex) 多账号管理工具** — 无限账号管理、实时配额监控、智能自动切换。
 
 [**English Documentation →**](README.md)
 
 ---
 
-| TUI | CLI |
-|:---:|:---:|
-| ![TUI](docs/tui.png) | ![CLI](docs/cli.png) |
+### TUI
+
+![TUI](docs/tui.png)
+
+### CLI
+
+![CLI](docs/cli.png)
 
 ## 功能特性
 

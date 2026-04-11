@@ -3,6 +3,7 @@ mod cache;
 mod cli;
 mod color;
 mod config;
+mod daemon;
 mod error;
 mod jwt;
 mod login;
@@ -27,9 +28,14 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     let cli = Cli::parse();
 
-    // --debug sets tracing to debug level; otherwise respect RUST_LOG env
+    // Priority: --debug flag > RUST_LOG env > config.toml daemon.log_level > default "info"
     let filter = if cli.debug {
         EnvFilter::new("codex_switch=debug")
+    } else if std::env::var_os("RUST_LOG").is_some() {
+        EnvFilter::from_default_env()
+    } else if matches!(&cli.command, Commands::Daemon(_)) {
+        let level = config::daemon_log_level();
+        EnvFilter::new(format!("codex_switch={level}"))
     } else {
         EnvFilter::from_default_env()
     };
@@ -85,7 +91,7 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
     let auth_handled = !matches!(auth_check, AuthCheckResult::NoChange);
 
     match cmd {
-        Commands::Use { alias, force, mode } => use_cmd(alias.as_deref(), force, mode, json).await?,
+        Commands::Use { alias, force } => use_cmd(alias.as_deref(), force, json).await?,
         Commands::List { force } => list_cmd(force, json, auth_handled).await?,
         Commands::Rename { old, new } => rename_cmd(&old, &new, json)?,
         Commands::Delete { alias } => delete_cmd(&alias, json)?,
@@ -102,6 +108,7 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         Commands::Warmup { alias } => warmup_cmd(alias.as_deref(), json).await?,
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => open_cmd()?,
+        Commands::Daemon(sub) => daemon::dispatch(sub).await?,
     }
 
     // If startup check actually synced the profile, re-sync after command execution
@@ -224,7 +231,7 @@ fn confirm(prompt: &str) -> bool {
 
 // ── use ──────────────────────────────────────────────────
 
-async fn use_cmd(alias: Option<&str>, force: bool, mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
+async fn use_cmd(alias: Option<&str>, force: bool, json: bool) -> Result<()> {
     if !force {
         let procs = process::detect_codex_processes();
         if !procs.is_empty() {
@@ -259,7 +266,7 @@ async fn use_cmd(alias: Option<&str>, force: bool, mode: Option<cli::SelectMode>
                 });
             }
         }
-        None => best_cmd(mode, json).await?,
+        None => best_cmd(json).await?,
     }
     Ok(())
 }
@@ -587,9 +594,7 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
 
 // ── best (internal, called by `use` with no alias) ────────
 
-async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
-    use config::ConfigSelectMode;
-
+async fn best_cmd(json: bool) -> Result<()> {
     let profiles = profile::list_profiles()?;
     if profiles.is_empty() {
         if json {
@@ -600,9 +605,8 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mode = config::resolve_select_mode(cli_mode);
-    let min_remaining = config::get().use_cfg.min_remaining;
     let safety_7d = config::get().use_cfg.safety_margin_7d;
+    let now = auth::now_unix_secs();
 
     let current = profile::read_current();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
@@ -610,36 +614,11 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
     ));
 
     let mut tasks = tokio::task::JoinSet::new();
-    let mut scored: Vec<(String, usage::UsageInfo, f64)> = Vec::with_capacity(profiles.len());
-
-    /// Team accounts get a +20 bonus so they are preferred when quotas are similar.
-    /// (Not used for round-robin, which handles team preference via tier separation.)
-    const TEAM_BONUS: f64 = 20.0;
-
-    let score_fn = |alias: &str, u: &usage::UsageInfo| -> f64 {
-        let is_team = profile::profile_auth_path(alias)
-            .map(|p| auth::read_account_info(&p).is_team())
-            .unwrap_or(false);
-        match mode {
-            ConfigSelectMode::MaxRemaining => {
-                let base = usage::score(u, safety_7d);
-                base + if is_team { TEAM_BONUS } else { 0.0 }
-            }
-            ConfigSelectMode::DrainFirst => {
-                let base = usage::score_drain_first(u, min_remaining, safety_7d);
-                base + if is_team { TEAM_BONUS } else { 0.0 }
-            }
-            ConfigSelectMode::RoundRobin => {
-                // round-robin handles team preference internally via tier separation
-                usage::score_round_robin(u, cache::get_last_used(alias), is_team, safety_7d)
-            }
-        }
-    };
+    let mut fetched: Vec<(String, usage::UsageInfo)> = Vec::with_capacity(profiles.len());
 
     for alias in profiles {
         if let Some(cached) = cache::get(&alias) {
-            let s = score_fn(&alias, &cached);
-            scored.push((alias, cached, s));
+            fetched.push((alias, cached));
             continue;
         }
 
@@ -681,8 +660,7 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
         if let Some((alias, usage)) =
             task.map_err(|e| anyhow::anyhow!("usage worker failed: {e}"))?
         {
-            let s = score_fn(&alias, &usage);
-            scored.push((alias, usage, s));
+            fetched.push((alias, usage));
         }
     }
 
@@ -690,7 +668,7 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
         progress.finish();
     }
 
-    if scored.is_empty() {
+    if fetched.is_empty() {
         if json {
             print_error("all usage queries failed");
         } else {
@@ -699,31 +677,62 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Phase 1: prefer eligible accounts; fall back to all if none are eligible.
-    let mut eligible: Vec<(String, usage::UsageInfo, f64)> = scored
-        .iter()
-        .filter(|(_, u, _)| usage::is_eligible(u, safety_7d))
-        .cloned()
+    // Build candidates with pool-level signals and score with adaptive algorithm
+    let team_priority = config::get().use_cfg.team_priority;
+    let pool_size = fetched.len();
+
+    let mut candidates: Vec<(usage::Candidate, usage::UsageInfo)> = fetched
+        .into_iter()
+        .map(|(alias, u)| {
+            let info = profile::profile_auth_path(&alias)
+                .map(|p| auth::read_account_info(&p))
+                .unwrap_or_default();
+            let last_used = cache::get_last_used(&alias);
+            let mut candidate = usage::Candidate::from_usage(
+                alias,
+                &u,
+                info.is_team(),
+                info.is_free(),
+                last_used,
+                now,
+            );
+            candidate.pool_size = pool_size;
+            candidate.team_priority = team_priority;
+            (candidate, u)
+        })
         .collect();
 
-    let pool = if eligible.is_empty() {
-        &mut scored
-    } else {
-        &mut eligible
-    };
+    // Count exhausted accounts for pool-adaptive scoring
+    let pool_exhausted = candidates.iter()
+        .filter(|(c, _)| c.effective_used_5h() >= 100.0)
+        .count();
+    for (c, _) in &mut candidates {
+        c.pool_exhausted = pool_exhausted;
+    }
 
-    // Phase 2: sort by score and pick the best.
-    pool.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    let (best_alias, best_usage, best_score) = pool.remove(0);
+    let mut scored: Vec<(usage::Candidate, usage::UsageInfo, f64)> = candidates
+        .into_iter()
+        .map(|(c, u)| {
+            let s = usage::score_unified(&c, safety_7d);
+            (c, u, s)
+        })
+        .collect();
+
+    // Deterministic sort: eligible first, then score desc, then LRU, then alias
+    scored.sort_by(|a, b| {
+        let ea = usage::is_candidate_eligible(&a.0, safety_7d);
+        let eb = usage::is_candidate_eligible(&b.0, safety_7d);
+        eb.cmp(&ea)
+            .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+            .then(a.0.last_used.cmp(&b.0.last_used))
+            .then(a.0.alias.cmp(&b.0.alias))
+    });
+
+    let (best_candidate, best_usage, best_score) = scored.remove(0);
+    let best_alias = best_candidate.alias;
 
     profile::switch_profile(&best_alias)?;
     cache::set_last_used(&best_alias)?;
-
-    let mode_label = match mode {
-        ConfigSelectMode::MaxRemaining => "max-remaining",
-        ConfigSelectMode::DrainFirst => "drain-first",
-        ConfigSelectMode::RoundRobin => "round-robin",
-    };
 
     let path = profile::profile_auth_path(&best_alias)?;
     let info = auth::read_account_info(&path);
@@ -734,11 +743,11 @@ async fn best_cmd(cli_mode: Option<cli::SelectMode>, json: bool) -> Result<()> {
             account: account_to_json(&info),
             usage: usage_to_json(Ok(&best_usage)),
             score: best_score,
-            mode: mode_label.to_string(),
+            mode: "unified".to_string(),
         });
     } else {
         println!(
-            "{} (mode: {mode_label})",
+            "{}",
             color::success(&format!("Switched to: {best_alias}"))
         );
         print_usage_line(&best_usage);

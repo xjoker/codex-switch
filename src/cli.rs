@@ -10,14 +10,22 @@ pub enum ColorMode {
     Never,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum SelectMode {
-    /// Pick the account with the most remaining quota (config default)
-    MaxRemaining,
-    /// Prefer accounts whose reset is imminent, saving slow-to-reset quota for later
-    DrainFirst,
-    /// Rotate through eligible accounts evenly (least recently used first)
-    RoundRobin,
+#[derive(Debug, Clone, Subcommand)]
+pub enum DaemonCommand {
+    /// Start the daemon (foreground if --foreground, otherwise detached)
+    Start {
+        /// Run in foreground (for service managers)
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Stop a running daemon
+    Stop,
+    /// Show daemon status
+    Status,
+    /// Install as a system service (LaunchAgent on macOS, systemd on Linux)
+    Install,
+    /// Uninstall the system service
+    Uninstall,
 }
 
 #[derive(Parser)]
@@ -62,16 +70,13 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Switch to a profile; omit alias to auto-select using the configured selection mode
+    /// Switch to a profile; omit alias to auto-select using the unified scoring algorithm
     Use {
-        /// Profile alias (omit to auto-select using selection mode)
+        /// Profile alias (omit to auto-select)
         alias: Option<String>,
         /// Force switch even if Codex processes are running
         #[arg(long)]
         force: bool,
-        /// Selection mode for auto-select (overrides config file)
-        #[arg(long, short = 'm', value_enum)]
-        mode: Option<SelectMode>,
     },
     /// List all profiles with account info, usage, and availability
     List {
@@ -140,4 +145,7 @@ pub enum Commands {
     Tui,
     /// Open the ~/.codex-switch directory in the system file manager
     Open,
+    /// Background daemon for automatic account switching
+    #[command(subcommand)]
+    Daemon(DaemonCommand),
 }

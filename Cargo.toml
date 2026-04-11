@@ -1,6 +1,6 @@
 [package]
 name = "codex-switch"
-version = "0.0.11"
+version = "0.0.12-dev"
 edition = "2024"
 rust-version = "1.88"
 description = "Codex account switcher — multi-profile manager with usage dashboard"
@@ -8,6 +8,10 @@ license = "MIT"
 repository = "https://github.com/xjoker/codex-switch"
 keywords = ["codex", "openai", "account", "switcher", "cli"]
 categories = ["command-line-utilities"]
+
+[lib]
+name = "codex_switch"
+path = "src/lib.rs"
 
 [[bin]]
 name = "codex-switch"
@@ -37,11 +41,15 @@ crossterm = "0.29"
 urlencoding = "2"
 toml = "1"
 rand = "0.10"
+fs2 = "0.4"
 chrono = { version = "0.4", features = ["clock"] }
 supports-color = "3"
 owo-colors = "4"
 tar = "0.4"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+axum = "0.8"
 
 [profile.release]
 strip = true

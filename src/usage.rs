@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
-use crate::auth::{self, CLIENT_ID, TOKEN_URL, format_reqwest_error};
+use crate::auth::{self, CLIENT_ID, format_reqwest_error};
 
 #[derive(Debug, Default, Clone)]
 pub struct WindowUsage {
@@ -23,9 +23,71 @@ pub struct UsageInfo {
     pub unlimited_credits: Option<bool>,
 }
 
+/// All data needed to score an account. Pure data, no I/O.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub alias: String,
+    pub used_5h: f64,
+    pub resets_at_5h: Option<i64>,
+    pub used_7d: f64,
+    pub resets_at_7d: Option<i64>,
+    pub has_5h_data: bool,
+    pub has_7d_data: bool,
+    pub is_team: bool,
+    pub is_free: bool,
+    pub last_used: i64,
+    pub now: i64,
+    // Pool-level signals (set by caller after building all candidates)
+    pub pool_size: usize,
+    pub pool_exhausted: usize,
+    pub team_priority: bool,
+}
+
+impl Candidate {
+    /// Build from UsageInfo + metadata. `now` should be shared across all candidates.
+    pub fn from_usage(
+        alias: String,
+        u: &UsageInfo,
+        is_team: bool,
+        is_free: bool,
+        last_used: i64,
+        now: i64,
+    ) -> Self {
+        Self {
+            alias,
+            used_5h: u.primary.as_ref().and_then(|w| w.used_percent).unwrap_or(0.0),
+            resets_at_5h: u.primary.as_ref().and_then(|w| w.resets_at),
+            used_7d: u.secondary.as_ref().and_then(|w| w.used_percent).unwrap_or(0.0),
+            resets_at_7d: u.secondary.as_ref().and_then(|w| w.resets_at),
+            has_5h_data: u.primary.is_some(),
+            has_7d_data: u.secondary.is_some(),
+            is_team,
+            is_free,
+            last_used,
+            now,
+            pool_size: 1,
+            pool_exhausted: 0,
+            team_priority: false,
+        }
+    }
+
+    /// Reset-aware effective 5h usage: 0.0 if window has already reset.
+    pub fn effective_used_5h(&self) -> f64 {
+        if self.resets_at_5h.is_some_and(|ts| ts <= self.now) { 0.0 } else { self.used_5h }
+    }
+
+    /// Reset-aware effective 7d usage: 0.0 if window has already reset.
+    pub fn effective_used_7d(&self) -> f64 {
+        if self.resets_at_7d.is_some_and(|ts| ts <= self.now) { 0.0 } else { self.used_7d }
+    }
+}
+
 /// Window durations in seconds (used for pace calculation).
 pub const WINDOW_5H_SECS: i64 = 5 * 3600;
 pub const WINDOW_7D_SECS: i64 = 7 * 86400;
+
+/// Free plan accounts become ineligible below this 5h remaining%.
+pub const FREE_FLOOR_PCT: f64 = 35.0;
 
 /// Calculate pace: the expected used_percent if consumption were even across the window.
 /// Returns None if resets_at is unavailable.
@@ -383,10 +445,11 @@ pub(crate) async fn do_refresh_token(
         urlencoding::encode(CLIENT_ID),
     );
 
-    debug!("[{alias}] sending token refresh request to {TOKEN_URL}");
+    let token_url = auth::token_url();
+    debug!("[{alias}] sending token refresh request to {token_url}");
 
     let resp = client
-        .post(TOKEN_URL)
+        .post(token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -472,231 +535,203 @@ pub fn is_available(u: &UsageInfo) -> bool {
     true
 }
 
-/// Whether the account should be considered eligible for selection.
-///
-/// An account is **ineligible** when:
-/// - Either window is fully exhausted (>=100%), OR
-/// - 7d remaining < `critical_pct` AND 7d resets more than 48h away.
-///
-/// When ALL accounts are ineligible the caller should fall back to the
-/// best-scoring ineligible account rather than giving up entirely.
-pub fn is_eligible(u: &UsageInfo, safety_margin_7d: f64) -> bool {
-    if !is_available(u) {
-        return false;
-    }
-    // Hard gate: 7d critically low AND reset is far away
-    let critical_pct = (safety_margin_7d * 0.25).max(1.0); // 25% of safety margin, min 1%
-    if let Some(w7) = &u.secondary {
-        let remaining_7d = 100.0 - w7.used_percent.unwrap_or(0.0);
+
+/// Eligibility check on a Candidate (reset-aware).
+pub fn is_candidate_eligible(c: &Candidate, safety_margin_7d: f64) -> bool {
+    let used_5h = c.effective_used_5h();
+    let used_7d = c.effective_used_7d();
+
+    // Gate 1: 5h exhausted (and not past reset)
+    if used_5h >= 100.0 { return false; }
+    // Gate 2: 7d exhausted (and not past reset)
+    if used_7d >= 100.0 { return false; }
+    // Gate 3: 7d critically low and reset far away
+    if c.has_7d_data {
+        let remaining_7d = 100.0 - used_7d;
+        let critical_pct = (safety_margin_7d * 0.25_f64).max(1.0);
         if remaining_7d < critical_pct {
-            let hours_to_reset = w7
-                .resets_at
-                .map(|ts| ((ts - auth::now_unix_secs()) as f64 / 3600.0).max(0.0))
+            let hours_to_reset = c.resets_at_7d
+                .map(|ts| ((ts - c.now) as f64 / 3600.0).max(0.0))
                 .unwrap_or(f64::MAX);
-            if hours_to_reset > 48.0 {
-                return false;
-            }
+            if hours_to_reset > 48.0 { return false; }
         }
+    }
+    // Gate 4: Free plan safety floor
+    if c.is_free && c.has_5h_data {
+        let remaining_5h = 100.0 - used_5h;
+        if remaining_5h < FREE_FLOOR_PCT { return false; }
     }
     true
 }
 
-// ── 7d adjustment (shared by max-remaining & drain-first) ──
+// ── adaptive scoring algorithm ─────────────────────────────
 
-/// Compute the 7d health adjustment (range: -300 to 0).
+/// Adaptive scoring algorithm. Pure function, no I/O.
 ///
-/// * 7d remaining >= `safety_margin` → 0 (safe zone)
-/// * 7d remaining < `safety_margin` → penalty up to -300, reduced when
-///   the 7d window resets within 48h.
-/// * No 7d data → -50 (mild penalty for unknown state)
-fn compute_7d_adjustment(u: &UsageInfo, safety_margin: f64) -> f64 {
-    const MAX_PENALTY: f64 = 300.0;
-    const RELIEF_WINDOW_HOURS: f64 = 48.0;
-    const MAX_RELIEF: f64 = 0.8; // reset time can reduce penalty by up to 80%
+/// Automatically adjusts strategy based on pool state. No mode selection needed.
+///
+/// Components:
+///   tier_bonus   — Team priority (0 or 500, configurable)
+///   headroom     — Pace-aware effective remaining time (0..1100)
+///   drain_value  — Quota that will be wasted if not used before reset (0..300)
+///   sustain      — 7d budget-per-window sustainability (-800..0)
+///   recency      — Spread usage across accounts (-60..0)
+///
+/// Pool-adaptive: drain_weight scales with pool_size and exhausted ratio.
+pub fn score_unified(c: &Candidate, safety_margin_7d: f64) -> f64 {
+    let used_5h = c.effective_used_5h();
+    let used_7d = c.effective_used_7d();
 
-    let Some(w7) = &u.secondary else {
-        return -50.0; // no 7d data → mild penalty for unknown state
-    };
-    let used_7d = w7.used_percent.unwrap_or(0.0).clamp(0.0, 100.0);
-    let remaining_7d = 100.0 - used_7d;
+    // ── Component A: tier_bonus (0 or 500) ──
+    let tier_bonus = if c.is_team && c.team_priority { 500.0 } else { 0.0 };
 
-    if remaining_7d >= safety_margin {
-        return 0.0; // safe zone
-    }
-
-    // pressure: 0.0 (at safety_margin) → 1.0 (at 0% remaining)
-    let pressure = if safety_margin > 0.0 {
-        ((safety_margin - remaining_7d) / safety_margin).clamp(0.0, 1.0)
+    // ── Component B: headroom (0..1100) ──
+    // Pace-aware: uses burn rate to project effective remaining time,
+    // not just static remaining%.
+    let headroom = if !c.has_5h_data {
+        50.0
+    } else if used_5h >= 100.0 {
+        // Exhausted: score by time-to-reset (closer = higher, range 0..500)
+        match c.resets_at_5h {
+            None => 0.0,
+            Some(reset_ts) => {
+                let remaining_secs = (reset_ts - c.now).max(0) as f64;
+                (500.0 - remaining_secs / 60.0).max(0.0)
+            }
+        }
     } else {
-        1.0
+        // Pace-aware headroom: project remaining minutes using burn rate
+        let remaining_pct = 100.0 - used_5h;
+        match c.resets_at_5h {
+            Some(reset_ts) => {
+                let remaining_secs = (reset_ts - c.now).max(0) as f64;
+                let elapsed_secs = (WINDOW_5H_SECS as f64 - remaining_secs).max(1.0);
+                let burn_rate = used_5h / elapsed_secs; // %/sec
+
+                if burn_rate > 0.001 {
+                    // Project minutes until exhaustion at current rate
+                    let projected_min = (remaining_pct / burn_rate) / 60.0;
+                    // Cap at 300 min (5h), normalize to 0..100, add base 1000
+                    1000.0 + (projected_min.min(300.0) / 300.0 * 100.0)
+                } else {
+                    // Near-zero burn rate → effectively full capacity
+                    1000.0 + remaining_pct
+                }
+            }
+            None => 1000.0 + remaining_pct,
+        }
     };
 
-    // time relief: if 7d resets within 48h, reduce penalty
-    let time_relief = w7
-        .resets_at
-        .map(|ts| {
-            let hours = ((ts - auth::now_unix_secs()) as f64 / 3600.0).max(0.0);
-            if hours < RELIEF_WINDOW_HOURS {
-                (1.0 - hours / RELIEF_WINDOW_HOURS).clamp(0.0, 1.0)
+    // ── Component C: sustain — 7d sustainability (-800..0) ──
+    // Uses budget-per-window: how much 7d quota is available per remaining 5h window.
+    const RELIEF_WINDOW_HOURS: f64 = 48.0;
+    const MAX_RELIEF: f64 = 0.8;
+
+    let sustain = if !c.has_7d_data {
+        -50.0
+    } else if used_7d >= 100.0 {
+        // 7d exhausted: heavy penalty, relieved as reset approaches
+        match c.resets_at_7d {
+            None => -800.0, // no reset info: maximum penalty
+            Some(reset_ts) => {
+                let remaining_min = ((reset_ts - c.now).max(0) as f64) / 60.0;
+                let relief = (1.0 - remaining_min / 10080.0).clamp(0.0, 1.0);
+                -800.0 * (1.0 - relief)
+            }
+        }
+    } else {
+        let remaining_7d = 100.0 - used_7d;
+        if remaining_7d >= safety_margin_7d {
+            0.0
+        } else {
+            // Compute budget per remaining 5h window
+            let budget_penalty = if let Some(reset_ts_7d) = c.resets_at_7d {
+                let hours_to_7d_reset = ((reset_ts_7d - c.now) as f64 / 3600.0).max(0.0);
+                let remaining_windows = (hours_to_7d_reset / 5.0).max(1.0);
+                let budget_per_window = remaining_7d / remaining_windows;
+                // If each window gets ≥ safety_margin worth of budget, it's fine
+                if budget_per_window >= safety_margin_7d {
+                    0.0
+                } else {
+                    // Shortfall: 0..1, higher = more pressure
+                    ((safety_margin_7d - budget_per_window) / safety_margin_7d).clamp(0.0, 1.0)
+                }
+            } else {
+                // No reset time: use simple pressure
+                let pressure = if safety_margin_7d > 0.0 {
+                    ((safety_margin_7d - remaining_7d) / safety_margin_7d).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                pressure
+            };
+
+            // Time relief: if 7d resets within 48h, reduce penalty
+            let time_relief = c.resets_at_7d
+                .map(|ts| {
+                    let hours = ((ts - c.now) as f64 / 3600.0).max(0.0);
+                    if hours < RELIEF_WINDOW_HOURS {
+                        (1.0 - hours / RELIEF_WINDOW_HOURS).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                })
+                .unwrap_or(0.0);
+
+            let effective = budget_penalty * (1.0 - time_relief * MAX_RELIEF);
+            -800.0 * effective
+        }
+    };
+
+    // ── Component D: drain_value (0..300) ──
+    // Only activates when 5h reset is within 60 minutes AND there's quota to waste.
+    // Pool-adaptive: larger pools with more available accounts → more aggressive drain.
+    const DRAIN_WINDOW_MIN: f64 = 60.0;
+
+    let raw_drain = if c.has_5h_data && used_5h < 100.0 {
+        if let Some(reset_ts) = c.resets_at_5h {
+            let remaining_min = ((reset_ts - c.now).max(0) as f64) / 60.0;
+            if remaining_min <= DRAIN_WINDOW_MIN {
+                let remaining_pct = 100.0 - used_5h;
+                let urgency = ((DRAIN_WINDOW_MIN - remaining_min) / DRAIN_WINDOW_MIN).clamp(0.0, 1.0);
+                // waste = remaining quota × urgency, scaled to 0..300
+                (remaining_pct * urgency * 3.0).min(300.0)
             } else {
                 0.0
             }
-        })
-        .unwrap_or(0.0); // unknown reset time → no relief
-
-    let effective = pressure * (1.0 - time_relief * MAX_RELIEF);
-    -MAX_PENALTY * effective
-}
-
-// ── scoring functions ───────────────────────────────────────
-
-/// If the 7d window is exhausted (used >= 100%), return a penalty score
-/// based on time-to-reset. Returns `None` if 7d is still usable.
-fn score_7d_exhausted(u: &UsageInfo, now: i64) -> Option<f64> {
-    let w7 = u.secondary.as_ref()?;
-    let used_7d = w7.used_percent.unwrap_or(0.0);
-    if used_7d < 100.0 {
-        return None;
-    }
-    Some(match w7.resets_at {
-        None => 0.0,
-        Some(reset_ts) => {
-            let remaining_secs = reset_ts - now;
-            if remaining_secs <= 0 {
-                100.0
-            } else {
-                (100.0 - (remaining_secs as f64 / 60.0)).max(0.0)
-            }
+        } else {
+            0.0
         }
-    })
-}
+    } else {
+        0.0
+    };
 
-/// Score an account for **max-remaining** mode.
-///
-/// Primary: 5h remaining% → higher is better.
-/// Secondary: 7d adjustment (additive, -300 to 0).
-pub fn score(u: &UsageInfo, safety_margin_7d: f64) -> f64 {
-    let now = auth::now_unix_secs();
-
-    if let Some(penalty) = score_7d_exhausted(u, now) {
-        return penalty;
-    }
-
-    let base = match &u.primary {
-        None => 50.0,
-        Some(w) => {
-            let used = w.used_percent.unwrap_or(100.0);
-            if used < 100.0 {
-                1000.0 + (100.0 - used)
-            } else {
-                match w.resets_at {
-                    None => 0.0,
-                    Some(reset_ts) => {
-                        let remaining_secs = reset_ts - now;
-                        if remaining_secs <= 0 {
-                            500.0
-                        } else {
-                            let remaining_min = remaining_secs as f64 / 60.0;
-                            (500.0 - remaining_min).max(0.0)
-                        }
-                    }
-                }
-            }
+    // Pool-adaptive drain weight
+    let drain_weight = if c.pool_size <= 2 {
+        0.5 // Few accounts: be conservative, don't chase drain
+    } else {
+        let exhausted_ratio = c.pool_exhausted as f64 / c.pool_size as f64;
+        if exhausted_ratio > 0.7 {
+            0.3 // Most accounts exhausted: conserve what we have
+        } else if c.pool_size >= 5 && exhausted_ratio < 0.3 {
+            1.5 // Plenty of backup: drain aggressively
+        } else {
+            1.0
         }
     };
 
-    base + compute_7d_adjustment(u, safety_margin_7d)
-}
+    let drain_value = raw_drain * drain_weight;
 
-/// Score an account using the **drain-first** strategy.
-///
-/// Core idea: prefer accounts whose 5h window resets soonest — use them up
-/// before the reset makes the spent quota "free", while preserving accounts
-/// with distant resets as a reserve.
-///
-/// * Accounts below `min_remaining`% are demoted (range 500-600).
-/// * 7d window exhausted → heavily penalized.
-/// * Among usable accounts, shorter time-to-reset → higher score (1000-1300).
-/// * 7d adjustment applied additively (-300 to 0).
-pub fn score_drain_first(u: &UsageInfo, min_remaining: f64, safety_margin_7d: f64) -> f64 {
-    let now = auth::now_unix_secs();
-
-    if let Some(penalty) = score_7d_exhausted(u, now) {
-        return penalty;
-    }
-
-    let base = match &u.primary {
-        None => 50.0,
-        Some(w) => {
-            let used = w.used_percent.unwrap_or(100.0);
-            let remaining = 100.0 - used;
-
-            if used >= 100.0 {
-                // Exhausted: score by time-to-reset (0-500 range)
-                match w.resets_at {
-                    None => 0.0,
-                    Some(reset_ts) => {
-                        let remaining_secs = reset_ts - now;
-                        if remaining_secs <= 0 {
-                            500.0
-                        } else {
-                            let remaining_min = remaining_secs as f64 / 60.0;
-                            (500.0 - remaining_min).max(0.0)
-                        }
-                    }
-                }
-            } else if remaining < min_remaining {
-                // Below threshold: demoted but still usable (range 500-600)
-                match w.resets_at {
-                    None => 500.0,
-                    Some(reset_ts) => {
-                        let remaining_secs = reset_ts - now;
-                        if remaining_secs <= 0 {
-                            600.0
-                        } else {
-                            let remaining_min = remaining_secs as f64 / 60.0;
-                            (600.0 - (remaining_min / 3.0)).max(500.0)
-                        }
-                    }
-                }
-            } else {
-                // Usable: base 1000 + reset urgency bonus (0-300)
-                let reset_bonus = match w.resets_at {
-                    None => 0.0,
-                    Some(reset_ts) => {
-                        let remaining_secs = reset_ts - now;
-                        if remaining_secs <= 0 {
-                            300.0
-                        } else {
-                            let remaining_min = remaining_secs as f64 / 60.0;
-                            (300.0 - remaining_min).max(0.0)
-                        }
-                    }
-                };
-                1000.0 + reset_bonus
-            }
-        }
+    // ── Component E: recency (-60..0) ──
+    // Light spread penalty to avoid hammering the same account
+    let recency = if c.last_used == 0 {
+        0.0
+    } else {
+        let seconds_ago = (c.now - c.last_used).max(0) as f64;
+        -(60.0 - (seconds_ago / 30.0)).clamp(0.0, 60.0)
     };
 
-    base + compute_7d_adjustment(u, safety_margin_7d)
-}
-
-/// Score an account using the **round-robin** strategy.
-///
-/// Two-tier comparison: (is_team, -last_used_ts).
-/// Team accounts are preferred; within the same tier, least-recently-used wins.
-/// Unavailable or 7d-critical accounts get `f64::NEG_INFINITY`.
-pub fn score_round_robin(u: &UsageInfo, last_used_ts: i64, is_team: bool, safety_margin_7d: f64) -> f64 {
-    if !is_eligible(u, safety_margin_7d) {
-        return f64::NEG_INFINITY;
-    }
-    // Team tier: team accounts get an offset that guarantees they sort above
-    // non-team accounts. We use 4e9 (not 1e18) to stay well within f64's
-    // exact-integer range (~2^53), preserving 1-second timestamp precision.
-    // Non-team scores: 0 to -2e9.  Team scores: 4e9 to ~2.3e9.  Always team > non-team.
-    let team_tier: f64 = if is_team { 4e9 } else { 0.0 };
-    // Within tier, prefer least recently used (negate timestamp).
-    team_tier - (last_used_ts as f64)
+    tier_bonus + headroom + sustain + drain_value + recency
 }
 
 pub fn parse_usage(body: &Value) -> UsageInfo {
@@ -979,432 +1014,244 @@ mod tests {
         assert!(is_available(&UsageInfo::default()));
     }
 
-    // ── max-remaining tests ────────────────────────────────
 
-    #[test]
-    fn test_score_available_account() {
-        // No 7d data → -50 penalty: 1070 - 50 = 1020
-        let usage = usage_with(Some(window(30.0, Some(1_000))), None);
-        assert_eq!(score(&usage, 20.0), 1_020.0);
+
+    // ── adaptive scoring tests ──
+
+    fn make_candidate(alias: &str, used_5h: f64, reset_5h: Option<i64>, used_7d: f64, reset_7d: Option<i64>) -> Candidate {
+        Candidate {
+            alias: alias.to_string(),
+            used_5h, resets_at_5h: reset_5h,
+            used_7d, resets_at_7d: reset_7d,
+            has_5h_data: true, has_7d_data: true,
+            is_team: false, is_free: false,
+            last_used: 0, now: 1_000_000,
+            pool_size: 5, pool_exhausted: 0,
+            team_priority: true,
+        }
     }
 
     #[test]
-    fn test_score_available_with_healthy_7d() {
-        // 7d at 50% used (50% remaining > 20% safety) → no penalty
-        let usage = usage_with(Some(window(30.0, Some(1_000))), Some(window(50.0, Some(9_999))));
-        assert_eq!(score(&usage, 20.0), 1_070.0);
+    fn test_adaptive_prefers_more_remaining() {
+        let now = 1_000_000i64;
+        let a = make_candidate("a", 30.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        let b = make_candidate("b", 60.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        assert!(score_unified(&a, 20.0) > score_unified(&b, 20.0));
     }
 
     #[test]
-    fn test_score_7d_penalty_applied() {
-        let now = auth::now_unix_secs();
-        // 5h: 30% used → base 1070
-        // 7d: 90% used (10% remaining), resets in 6d → no time relief
-        // pressure = (20-10)/20 = 0.5, adj = -300 × 0.5 = -150 → 920
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(90.0, Some(now + 6 * 86_400))),
-        );
-        assert_eq!(score(&usage, 20.0), 920.0);
+    fn test_adaptive_team_priority_dominates() {
+        let now = 1_000_000i64;
+        // Non-team with 0% used vs Team with 50% used → Team wins with priority
+        let a = make_candidate("a", 0.0, Some(now + 18000), 10.0, Some(now + 5 * 86400));
+        let mut b = make_candidate("b", 50.0, Some(now + 7200), 10.0, Some(now + 5 * 86400));
+        b.is_team = true;
+        let sa = score_unified(&a, 20.0);
+        let sb = score_unified(&b, 20.0);
+        assert!(sb > sa, "team account should beat non-team even with worse 5h: {sb} > {sa}");
     }
 
     #[test]
-    fn test_score_7d_penalty_with_time_relief() {
-        let now = auth::now_unix_secs();
-        // 7d: 90% used (10% remaining), resets in 12h
-        // pressure = 0.5, time_relief = 1 - 12/48 = 0.75
-        // effective = 0.5 × (1 - 0.75×0.8) = 0.5 × 0.4 = 0.2
-        // adj = -300 × 0.2 = -60 → 1070 - 60 = 1010
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(90.0, Some(now + 12 * 3_600))),
-        );
-        assert_eq!(score(&usage, 20.0), 1_010.0);
+    fn test_adaptive_team_priority_disabled() {
+        let now = 1_000_000i64;
+        // With team_priority=false, Team should not get +500 bonus
+        let mut a = make_candidate("a", 0.0, Some(now + 18000), 10.0, Some(now + 5 * 86400));
+        a.team_priority = false;
+        let mut b = make_candidate("b", 50.0, Some(now + 7200), 10.0, Some(now + 5 * 86400));
+        b.is_team = true;
+        b.team_priority = false;
+        let sa = score_unified(&a, 20.0);
+        let sb = score_unified(&b, 20.0);
+        assert!(sa > sb, "without team_priority, more remaining should win: {sa} > {sb}");
     }
 
     #[test]
-    fn test_score_no_primary() {
-        // No data at all: base 50 + no-7d penalty (-50) = 0
-        assert_eq!(score(&UsageInfo::default(), 20.0), 0.0);
+    fn test_adaptive_drain_near_reset() {
+        let now = 1_000_000i64;
+        // Account A: 40% used, resets in 30 min (within drain window)
+        let a = make_candidate("a", 40.0, Some(now + 1800), 20.0, Some(now + 5 * 86400));
+        // Account B: 40% used, resets in 4h (outside drain window)
+        let b = make_candidate("b", 40.0, Some(now + 14400), 20.0, Some(now + 5 * 86400));
+        let sa = score_unified(&a, 20.0);
+        let sb = score_unified(&b, 20.0);
+        assert!(sa > sb, "near-reset account should score higher due to drain: {sa} > {sb}");
     }
 
     #[test]
-    fn test_score_primary_exhausted_7d_ok() {
-        let now = auth::now_unix_secs();
-        // 5h exhausted, resets in 60 min → base = 500 - 60 = 440
-        // 7d at 50% (healthy) → adj = 0 → final = 440
-        let usage = usage_with(
-            Some(window(100.0, Some(now + 3_600))),
-            Some(window(50.0, Some(now + 86_400))),
-        );
-        assert_eq!(score(&usage, 20.0), 440.0);
+    fn test_adaptive_no_drain_outside_window() {
+        let now = 1_000_000i64;
+        // Both accounts reset in 2h+ (outside 60-min drain window)
+        // A: 40% used, resets in 2h → elapsed 3h → burn=40/3h → low rate, more headroom
+        // B: 40% used, resets in 4h → elapsed 1h → burn=40/1h → high rate, less headroom
+        let a = make_candidate("a", 40.0, Some(now + 7200), 20.0, Some(now + 5 * 86400));
+        let b = make_candidate("b", 40.0, Some(now + 14400), 20.0, Some(now + 5 * 86400));
+        let sa = score_unified(&a, 20.0);
+        let sb = score_unified(&b, 20.0);
+        assert!(sa > 1000.0 && sb > 1000.0, "both should be usable: {sa}, {sb}");
+        // A consumed 40% over 3h (lower burn rate) → more projected headroom
+        assert!(sa > sb, "lower burn rate gives more headroom: {sa} > {sb}");
     }
 
     #[test]
-    fn test_score_multi_account_ordering() {
-        let now = auth::now_unix_secs();
-        // A: 5h 10% used, 7d healthy → highest
-        let a = usage_with(Some(window(10.0, Some(now + 14_400))), Some(window(20.0, Some(now + 86_400))));
-        // B: 5h 50% used, 7d healthy → medium
-        let b = usage_with(Some(window(50.0, Some(now + 7_200))), Some(window(20.0, Some(now + 86_400))));
-        // C: 5h 10% used, 7d 95% (critical), far reset → 7d penalty drags it down
-        let c = usage_with(Some(window(10.0, Some(now + 14_400))), Some(window(95.0, Some(now + 6 * 86_400))));
-        // D: 5h exhausted, 7d healthy → lowest usable
-        let d = usage_with(Some(window(100.0, Some(now + 1_800))), Some(window(20.0, Some(now + 86_400))));
-
-        let sa = score(&a, 20.0);
-        let sb = score(&b, 20.0);
-        let sc = score(&c, 20.0);
-        let sd = score(&d, 20.0);
-
-        assert!(sa > sb, "A > B: {sa} > {sb}");
-        assert!(sb > sc, "B > C (7d penalty): {sb} > {sc}");
-        assert!(sc > sd, "C > D (exhausted): {sc} > {sd}");
-    }
-
-    // ── eligibility tests ───────────────────────────────────
-
-    #[test]
-    fn test_eligible_healthy_account() {
-        let usage = usage_with(
-            Some(window(30.0, Some(1_000))),
-            Some(window(50.0, Some(9_999))),
-        );
-        assert!(is_eligible(&usage, 20.0));
+    fn test_adaptive_7d_critical_overrides_5h() {
+        let now = 1_000_000i64;
+        let a = make_candidate("a", 0.0, Some(now + 18000), 95.0, Some(now + 6 * 86400));
+        let b = make_candidate("b", 50.0, Some(now + 7200), 30.0, Some(now + 5 * 86400));
+        assert!(score_unified(&b, 20.0) > score_unified(&a, 20.0), "7d-critical should lose");
     }
 
     #[test]
-    fn test_ineligible_7d_critical_far_reset() {
-        let now = auth::now_unix_secs();
+    fn test_adaptive_7d_budget_per_window() {
+        let now = 1_000_000i64;
+        // Account A: 7d 15% remaining, resets in 3 windows (15h) → 5%/window (tight)
+        let a = make_candidate("a", 30.0, Some(now + 3600), 85.0, Some(now + 15 * 3600));
+        // Account B: 7d 15% remaining, resets in 1 window (5h) → 15%/window (ok)
+        let b = make_candidate("b", 30.0, Some(now + 3600), 85.0, Some(now + 5 * 3600));
+        let sa = score_unified(&a, 20.0);
+        let sb = score_unified(&b, 20.0);
+        assert!(sb > sa, "higher budget-per-window should score better: {sb} > {sa}");
+    }
+
+    #[test]
+    fn test_adaptive_recency_breaks_tie() {
+        let now = 1_000_000i64;
+        let mut a = make_candidate("a", 40.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        a.last_used = now - 5; // used 5 seconds ago
+        let mut b = make_candidate("b", 40.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        b.last_used = now - 1200; // used 20 minutes ago
+        assert!(score_unified(&b, 20.0) > score_unified(&a, 20.0), "recently-used should score lower");
+    }
+
+    #[test]
+    fn test_adaptive_reset_aware() {
+        let now = 1_000_000i64;
+        let a = make_candidate("a", 80.0, Some(now - 600), 20.0, Some(now + 5 * 86400));
+        let score = score_unified(&a, 20.0);
+        assert!(score > 1000.0, "past-reset account should score as fully available, got {score}");
+    }
+
+    #[test]
+    fn test_adaptive_exhausted_scores_low() {
+        let now = 1_000_000i64;
+        let a = make_candidate("a", 100.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        let b = make_candidate("b", 50.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        let sa = score_unified(&a, 20.0);
+        let sb = score_unified(&b, 20.0);
+        assert!(sb > sa, "exhausted should score much lower: {sb} > {sa}");
+        assert!(sa < 500.0, "exhausted score should be low: {sa}");
+    }
+
+    #[test]
+    fn test_adaptive_pool_exhausted_conservative_drain() {
+        let now = 1_000_000i64;
+        // Most accounts exhausted → drain weight should be low
+        let mut a = make_candidate("a", 40.0, Some(now + 1800), 20.0, Some(now + 5 * 86400));
+        a.pool_size = 10;
+        a.pool_exhausted = 8; // 80% exhausted
+        let mut b = make_candidate("b", 40.0, Some(now + 1800), 20.0, Some(now + 5 * 86400));
+        b.pool_size = 10;
+        b.pool_exhausted = 1; // 10% exhausted
+        // Both should have drain but b's pool allows more aggressive drain
+        let sa = score_unified(&a, 20.0);
+        let sb = score_unified(&b, 20.0);
+        assert!(sb > sa, "healthy pool should allow more drain: {sb} > {sa}");
+    }
+
+    #[test]
+    fn test_adaptive_free_floor_ineligible() {
+        let now = 1_000_000i64;
+        let mut c = make_candidate("free1", 70.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        c.is_free = true;
+        assert!(!is_candidate_eligible(&c, 20.0));
+    }
+
+    #[test]
+    fn test_adaptive_no_data_low_score() {
+        let c = Candidate {
+            alias: "unknown".to_string(),
+            used_5h: 0.0, resets_at_5h: None,
+            used_7d: 0.0, resets_at_7d: None,
+            has_5h_data: false, has_7d_data: false,
+            is_team: false, is_free: false,
+            last_used: 0, now: 1_000_000,
+            pool_size: 1, pool_exhausted: 0,
+            team_priority: true,
+        };
+        // headroom=50 (no 5h data) + sustain=-50 (no 7d data) = 0
+        assert_eq!(score_unified(&c, 20.0), 0.0, "no-data account should score exactly 0");
+    }
+
+    #[test]
+    fn test_adaptive_both_windows_exhausted() {
+        let now = 1_000_000i64;
+        // 5h exhausted (no reset info) + 7d exhausted (resets in 7 days)
+        let mut c = make_candidate("both_dead", 100.0, None, 100.0, Some(now + 7 * 86400));
+        c.has_5h_data = true;
+        c.has_7d_data = true;
+        let s = score_unified(&c, 20.0);
+        // headroom=0 (exhausted, no reset), sustain should still be heavily negative
+        assert!(s < -700.0, "doubly-exhausted account must score very low, got {s}");
+    }
+
+    #[test]
+    fn test_adaptive_both_windows_exhausted_no_reset_info() {
+        // Worst case: both exhausted, no reset info at all
+        let c = Candidate {
+            alias: "dead".to_string(),
+            used_5h: 100.0, resets_at_5h: None,
+            used_7d: 100.0, resets_at_7d: None,
+            has_5h_data: true, has_7d_data: true,
+            is_team: false, is_free: false,
+            last_used: 0, now: 1_000_000,
+            pool_size: 1, pool_exhausted: 1,
+            team_priority: false,
+        };
+        let s = score_unified(&c, 20.0);
+        assert!(s < -700.0, "doubly-exhausted no-reset account must score very low, got {s}");
+    }
+
+    #[test]
+    fn test_adaptive_pace_aware_headroom() {
+        let now = 1_000_000i64;
+        // Account A: 30% used, resets in 4h → elapsed 1h → burn=30%/3600s (fast)
+        // projected exhaustion = 70 / (30/3600) / 60 ≈ 140 min
+        let a = make_candidate("a", 30.0, Some(now + 4 * 3600), 20.0, Some(now + 5 * 86400));
+        // Account B: 30% used, resets in 1h → elapsed 4h → burn=30%/14400s (slow)
+        // projected exhaustion = 70 / (30/14400) / 60 ≈ 560 min → capped 300 min
+        let b = make_candidate("b", 30.0, Some(now + 1 * 3600), 20.0, Some(now + 5 * 86400));
+        let sa = score_unified(&a, 20.0);
+        let sb = score_unified(&b, 20.0);
+        // B has slower burn rate → higher projected exhaustion → higher headroom
+        assert!(sb > sa, "slower burn rate should give higher headroom: {sb} > {sa}");
+    }
+
+    #[test]
+    fn test_candidate_eligible_basic() {
+        let now = 1_000_000i64;
+        let c = make_candidate("ok", 30.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        assert!(is_candidate_eligible(&c, 20.0));
+    }
+
+    #[test]
+    fn test_candidate_ineligible_5h_exhausted() {
+        let now = 1_000_000i64;
+        let c = make_candidate("ex", 100.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
+        assert!(!is_candidate_eligible(&c, 20.0));
+    }
+
+    #[test]
+    fn test_candidate_ineligible_7d_critical_far() {
+        let now = 1_000_000i64;
         // 7d at 97% (3% remaining < critical 5%), resets in 5 days
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(97.0, Some(now + 5 * 86_400))),
-        );
-        assert!(!is_eligible(&usage, 20.0));
+        let c = make_candidate("crit", 30.0, Some(now + 3600), 97.0, Some(now + 5 * 86400));
+        assert!(!is_candidate_eligible(&c, 20.0));
     }
 
     #[test]
-    fn test_eligible_7d_critical_but_near_reset() {
-        let now = auth::now_unix_secs();
-        // 7d at 97% (3% remaining), but resets in 12h → still eligible
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(97.0, Some(now + 12 * 3_600))),
-        );
-        assert!(is_eligible(&usage, 20.0));
-    }
-
-    #[test]
-    fn test_ineligible_exhausted() {
-        let usage = usage_with(Some(window(100.0, Some(1_000))), None);
-        assert!(!is_eligible(&usage, 20.0));
-    }
-
-    // ── drain-first tests ───────────────────────────────────
-
-    #[test]
-    fn test_drain_first_prefers_sooner_reset() {
-        let now = auth::now_unix_secs();
-        let a = usage_with(Some(window(50.0, Some(now + 1_800))), Some(window(10.0, Some(now + 86_400))));
-        let b = usage_with(Some(window(0.0, Some(now + 14_400))), Some(window(10.0, Some(now + 86_400))));
-
-        let sa = score_drain_first(&a, 5.0, 20.0);
-        let sb = score_drain_first(&b, 5.0, 20.0);
-
-        assert!(sa > sb, "drain-first should prefer sooner reset: {sa} > {sb}");
-    }
-
-    #[test]
-    fn test_drain_first_demotes_below_threshold() {
-        let now = auth::now_unix_secs();
-        let a = usage_with(Some(window(97.0, Some(now + 600))), Some(window(10.0, Some(now + 86_400))));
-        let b = usage_with(Some(window(50.0, Some(now + 7_200))), Some(window(10.0, Some(now + 86_400))));
-
-        let sa = score_drain_first(&a, 5.0, 20.0);
-        let sb = score_drain_first(&b, 5.0, 20.0);
-
-        assert!(sb > sa, "drain-first should demote below-threshold: {sb} > {sa}");
-        assert!((500.0..=600.0).contains(&sa), "demoted score in 500-600 range: {sa}");
-    }
-
-    #[test]
-    fn test_drain_first_below_threshold_beats_exhausted() {
-        let now = auth::now_unix_secs();
-        let a = usage_with(Some(window(97.0, Some(now + 600))), Some(window(10.0, Some(now + 86_400))));
-        let b = usage_with(Some(window(100.0, Some(now + 300))), Some(window(10.0, Some(now + 86_400))));
-
-        let sa = score_drain_first(&a, 5.0, 20.0);
-        let sb = score_drain_first(&b, 5.0, 20.0);
-
-        assert!(sa > sb, "below-threshold must beat exhausted: {sa} > {sb}");
-    }
-
-    #[test]
-    fn test_drain_first_7d_exhausted() {
-        let now = auth::now_unix_secs();
-        // 7d exhausted, resets in 1 day (1440 min) → score = 100 - 1440 → clamped to 0
-        let usage = usage_with(
-            Some(window(50.0, Some(now + 1_800))),
-            Some(window(100.0, Some(now + 86_400))),
-        );
-        let scored = score_drain_first(&usage, 5.0, 20.0);
-        assert_eq!(scored, 0.0);
-    }
-
-    #[test]
-    fn test_drain_first_no_primary() {
-        assert_eq!(score_drain_first(&UsageInfo::default(), 5.0, 20.0), 0.0);
-    }
-
-    #[test]
-    fn test_drain_first_exact_min_remaining_boundary() {
-        let now = auth::now_unix_secs();
-        // remaining = 5.0, min_remaining = 5.0 → NOT demoted (code uses `<`, not `<=`)
-        let usage = usage_with(
-            Some(window(95.0, Some(now + 1_800))),
-            Some(window(10.0, Some(now + 86_400))),
-        );
-        let scored = score_drain_first(&usage, 5.0, 20.0);
-        assert!(scored >= 1000.0, "exact boundary should be in usable tier: {scored}");
-    }
-
-    #[test]
-    fn test_drain_first_7d_penalty_overrides_5h_advantage() {
-        let now = auth::now_unix_secs();
-        // Account A: 5h 0% used (full), 7d 95% used (5% remaining), resets in 6d
-        let a = usage_with(
-            Some(window(0.0, Some(now + 1_800))),
-            Some(window(95.0, Some(now + 6 * 86_400))),
-        );
-        // Account B: 5h 50% used, 7d 30% used (70% remaining)
-        let b = usage_with(
-            Some(window(50.0, Some(now + 7_200))),
-            Some(window(30.0, Some(now + 5 * 86_400))),
-        );
-
-        let sa = score_drain_first(&a, 5.0, 20.0);
-        let sb = score_drain_first(&b, 5.0, 20.0);
-
-        assert!(sb > sa, "7d-endangered account should lose to 7d-healthy one: {sb} > {sa}");
-    }
-
-    // ── round-robin tests ───────────────────────────────────
-
-    #[test]
-    fn test_round_robin_prefers_least_recent() {
-        let a = usage_with(Some(window(30.0, Some(1_000))), Some(window(10.0, Some(9_999))));
-        let b = usage_with(Some(window(30.0, Some(1_000))), Some(window(10.0, Some(9_999))));
-
-        let sa = score_round_robin(&a, 100, false, 20.0);
-        let sb = score_round_robin(&b, 200, false, 20.0);
-
-        assert!(sa > sb, "round-robin should prefer least recently used: {sa} > {sb}");
-    }
-
-    #[test]
-    fn test_round_robin_team_beats_non_team() {
-        let a = usage_with(Some(window(30.0, Some(1_000))), Some(window(10.0, Some(9_999))));
-        let b = usage_with(Some(window(30.0, Some(1_000))), Some(window(10.0, Some(9_999))));
-
-        let sa = score_round_robin(&a, 100, true, 20.0);   // team, used at t=100
-        let sb = score_round_robin(&b, 50, false, 20.0);    // non-team, used earlier
-
-        assert!(sa > sb, "team should beat non-team in round-robin: {sa} > {sb}");
-    }
-
-    #[test]
-    fn test_round_robin_excludes_unavailable() {
-        let exhausted = usage_with(Some(window(100.0, Some(1_000))), None);
-        let scored = score_round_robin(&exhausted, 0, false, 20.0);
-        assert_eq!(scored, f64::NEG_INFINITY);
-    }
-
-    #[test]
-    fn test_round_robin_excludes_7d_critical() {
-        let now = auth::now_unix_secs();
-        // 7d at 98%, resets in 5 days → ineligible
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(98.0, Some(now + 5 * 86_400))),
-        );
-        let scored = score_round_robin(&usage, 0, false, 20.0);
-        assert_eq!(scored, f64::NEG_INFINITY);
-    }
-
-    #[test]
-    fn test_round_robin_real_epoch_timestamps_preserve_1s_ordering() {
-        let healthy = usage_with(Some(window(30.0, Some(1_000))), Some(window(10.0, Some(9_999))));
-
-        // Real-world epoch timestamps ~2024, differing by 1 second
-        let ts_a: i64 = 1_700_000_000;
-        let ts_b: i64 = 1_700_000_001;
-
-        let sa = score_round_robin(&healthy, ts_a, true, 20.0);
-        let sb = score_round_robin(&healthy, ts_b, true, 20.0);
-
-        assert!(sa > sb, "1-second difference must be distinguishable at real epoch: {sa} vs {sb}");
-        assert_ne!(sa, sb);
-    }
-
-    #[test]
-    fn test_round_robin_same_last_used_is_stable() {
-        let a = usage_with(Some(window(30.0, Some(1_000))), Some(window(10.0, Some(9_999))));
-        let b = usage_with(Some(window(60.0, Some(1_000))), Some(window(10.0, Some(9_999))));
-
-        // Same last_used → same score regardless of usage differences
-        let sa = score_round_robin(&a, 100, false, 20.0);
-        let sb = score_round_robin(&b, 100, false, 20.0);
-
-        assert_eq!(sa, sb, "same last_used should produce same score");
-    }
-
-    // ── eligibility boundary tests ──────────────────────────
-
-    #[test]
-    fn test_eligible_at_exact_safety_margin() {
-        let now = auth::now_unix_secs();
-        // 7d at 80% (remaining = 20% = safety_margin) → eligible (>= check)
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(80.0, Some(now + 5 * 86_400))),
-        );
-        assert!(is_eligible(&usage, 20.0));
-    }
-
-    #[test]
-    fn test_eligible_with_safety_margin_zero() {
-        let now = auth::now_unix_secs();
-        // safety_margin = 0 → critical_pct = max(0*0.25, 1.0) = 1.0
-        // 7d at 99.5% (remaining 0.5% < 1%), far reset → ineligible
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(99.5, Some(now + 5 * 86_400))),
-        );
-        assert!(!is_eligible(&usage, 0.0));
-
-        // 7d at 98% (remaining 2% > 1%) → eligible
-        let usage2 = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(98.0, Some(now + 5 * 86_400))),
-        );
-        assert!(is_eligible(&usage2, 0.0));
-    }
-
-    #[test]
-    fn test_eligible_no_7d_data() {
-        // No secondary window → eligible (no 7d data = no 7d gate)
-        let usage = usage_with(Some(window(30.0, Some(1_000))), None);
-        assert!(is_eligible(&usage, 20.0));
-    }
-
-    // ── 7d adjustment tests ─────────────────────────────────
-
-    #[test]
-    fn test_7d_adjustment_safe_zone() {
-        let usage = usage_with(
-            Some(window(30.0, Some(1_000))),
-            Some(window(50.0, Some(9_999))), // 50% remaining > 20% safety
-        );
-        assert_eq!(compute_7d_adjustment(&usage, 20.0), 0.0);
-    }
-
-    #[test]
-    fn test_7d_adjustment_no_data() {
-        assert_eq!(compute_7d_adjustment(&UsageInfo::default(), 20.0), -50.0);
-    }
-
-    #[test]
-    fn test_7d_adjustment_critical_far_reset() {
-        let now = auth::now_unix_secs();
-        // 7d at 95% (5% remaining), resets in 6 days
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(95.0, Some(now + 6 * 86_400))),
-        );
-        let adj = compute_7d_adjustment(&usage, 20.0);
-        // pressure = (20-5)/20 = 0.75, no time relief → adj = -225
-        assert!(
-            (-230.0..=-220.0).contains(&adj),
-            "expected ~-225: {adj}"
-        );
-    }
-
-    #[test]
-    fn test_7d_adjustment_critical_near_reset() {
-        let now = auth::now_unix_secs();
-        // 7d at 95% (5% remaining), resets in 12h
-        // pressure = 0.75, time_relief = 1-12/48 = 0.75
-        // effective = 0.75 × (1 - 0.75×0.8) = 0.75 × 0.4 = 0.3
-        // adj = -300 × 0.3 = -90
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(95.0, Some(now + 12 * 3_600))),
-        );
-        let adj = compute_7d_adjustment(&usage, 20.0);
-        assert!((adj - (-90.0)).abs() < 0.01, "expected -90.0, got {adj}");
-    }
-
-    #[test]
-    fn test_7d_adjustment_at_exact_safety_margin() {
-        // 7d at 80% (remaining = 20% = safety_margin) → 0 (boundary is >=)
-        let usage = usage_with(
-            Some(window(30.0, Some(1_000))),
-            Some(window(80.0, Some(9_999))),
-        );
-        assert_eq!(compute_7d_adjustment(&usage, 20.0), 0.0);
-    }
-
-    #[test]
-    fn test_7d_adjustment_reset_in_past() {
-        let now = auth::now_unix_secs();
-        // 7d at 95% but reset time is in the past → time_relief = max(0, ...) = 0
-        // pressure = 0.75, no relief → adj = -225
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(95.0, Some(now - 3_600))),
-        );
-        // resets_at in past → remaining_hours = max(0, negative) = 0 → within 48h → time_relief = 1.0
-        // effective = 0.75 × (1 - 1.0 × 0.8) = 0.75 × 0.2 = 0.15
-        // adj = -300 × 0.15 = -45
-        let adj = compute_7d_adjustment(&usage, 20.0);
-        assert!((adj - (-45.0)).abs() < 0.01, "expected -45.0, got {adj}");
-    }
-
-    #[test]
-    fn test_7d_adjustment_exactly_48h() {
-        let now = auth::now_unix_secs();
-        // 7d at 95%, resets in exactly 48h → time_relief = 1 - 48/48 = 0 → no relief
-        let usage = usage_with(
-            Some(window(30.0, Some(now + 3_600))),
-            Some(window(95.0, Some(now + 48 * 3_600))),
-        );
-        // pressure = 0.75, time_relief = 0 → adj = -225
-        assert_eq!(compute_7d_adjustment(&usage, 20.0), -225.0);
-    }
-
-    #[test]
-    fn test_7d_adjustment_cannot_make_usable_score_negative() {
-        let now = auth::now_unix_secs();
-        // Worst case: 7d at 100% is handled before adjustment, but 99.9% with far reset:
-        // pressure = (20-0.1)/20 ≈ 0.995, adj ≈ -298.5
-        // base score for 5h 0% = 1100, final ≈ 801.5 → still positive
-        let usage = usage_with(
-            Some(window(0.0, Some(now + 3_600))),
-            Some(window(99.9, Some(now + 7 * 86_400))),
-        );
-        let scored = score(&usage, 20.0);
-        assert!(scored > 700.0, "usable account should never go very low: {scored}");
-    }
-
-    #[test]
-    fn test_7d_adjustment_safety_margin_zero() {
-        // safety_margin = 0 → pressure = 1.0 for any remaining < 0 (impossible),
-        // but remaining = 50 >= 0 → safe zone → adj = 0
-        let usage = usage_with(
-            Some(window(30.0, Some(1_000))),
-            Some(window(50.0, Some(9_999))),
-        );
-        assert_eq!(compute_7d_adjustment(&usage, 0.0), 0.0);
+    fn test_candidate_eligible_7d_critical_near_reset() {
+        let now = 1_000_000i64;
+        // 7d at 97%, but resets in 12h → still eligible
+        let c = make_candidate("near", 30.0, Some(now + 3600), 97.0, Some(now + 12 * 3600));
+        assert!(is_candidate_eligible(&c, 20.0));
     }
 }
