@@ -9,6 +9,10 @@ repository = "https://github.com/xjoker/codex-switch"
 keywords = ["codex", "openai", "account", "switcher", "cli"]
 categories = ["command-line-utilities"]
 
+[lib]
+name = "codex_switch"
+path = "src/lib.rs"
+
 [[bin]]
 name = "codex-switch"
 path = "src/main.rs"
@@ -43,6 +47,9 @@ supports-color = "3"
 owo-colors = "4"
 tar = "0.4"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+axum = "0.8"
 
 [profile.release]
 strip = true

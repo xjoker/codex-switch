@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
-use crate::auth::{self, CLIENT_ID, TOKEN_URL, format_reqwest_error};
+use crate::auth::{self, CLIENT_ID, format_reqwest_error};
 
 #[derive(Debug, Default, Clone)]
 pub struct WindowUsage {
@@ -132,8 +132,11 @@ impl std::fmt::Display for UsageError {
     }
 }
 
-fn usage_url() -> String {
-    std::env::var("CS_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
+fn usage_url() -> &'static str {
+    static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| {
+        std::env::var("CS_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
+    })
 }
 
 /// Extract a short summary from an error message for user-facing display.
@@ -296,7 +299,7 @@ pub async fn fetch_usage_with_refresh(
         match do_refresh_token(alias, &client, rt).await {
             Ok(new_tokens) => {
                 let resp = client
-                    .get(&usage_url)
+                    .get(usage_url)
                     .header(
                         "Authorization",
                         format!("Bearer {}", new_tokens.access_token),
@@ -322,7 +325,7 @@ pub async fn fetch_usage_with_refresh(
     }
 
     let resp = client
-        .get(&usage_url)
+        .get(usage_url)
         .header("Authorization", format!("Bearer {access_token}"))
         .send()
         .await
@@ -347,7 +350,7 @@ pub async fn fetch_usage_with_refresh(
         match do_refresh_token(alias, &client, rt).await {
             Ok(new_tokens) => {
                 let resp2 = client
-                    .get(&usage_url)
+                    .get(usage_url)
                     .header(
                         "Authorization",
                         format!("Bearer {}", new_tokens.access_token),
@@ -445,10 +448,11 @@ pub(crate) async fn do_refresh_token(
         urlencoding::encode(CLIENT_ID),
     );
 
-    debug!("[{alias}] sending token refresh request to {TOKEN_URL}");
+    let token_url = auth::token_url();
+    debug!("[{alias}] sending token refresh request to {token_url}");
 
     let resp = client
-        .post(TOKEN_URL)
+        .post(token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
