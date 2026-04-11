@@ -15,6 +15,8 @@ fn now_unix() -> i64 {
 /// - `reset_5h_in`: seconds until 5h window resets
 /// - `used_7d`: secondary window used_percent (0.0..100.0)
 /// - `reset_7d_in`: seconds until 7d window resets
+///
+/// Uses a single clock reading for all timestamps to avoid skew.
 pub fn base_response(
     plan_type: &str,
     used_5h: f64,
@@ -22,7 +24,18 @@ pub fn base_response(
     used_7d: f64,
     reset_7d_in: i64,
 ) -> Value {
-    let now = now_unix();
+    base_response_at(plan_type, used_5h, reset_5h_in, used_7d, reset_7d_in, now_unix())
+}
+
+/// Build a response with a specific `now` timestamp (for clock-consistent test scenarios).
+pub fn base_response_at(
+    plan_type: &str,
+    used_5h: f64,
+    reset_5h_in: i64,
+    used_7d: f64,
+    reset_7d_in: i64,
+    now: i64,
+) -> Value {
     let reset_5h_at = now + reset_5h_in;
     let reset_7d_at = now + reset_7d_in;
 

@@ -136,13 +136,13 @@ fn warn_deprecated_keys(raw: &str) {
     };
     if use_cfg.mode.is_some() {
         tracing::warn!(
-            "config: [use] 'mode' is deprecated and ignored in v0.0.12+, \
+            "config: [use] 'mode' is deprecated and ignored in v0.0.13+, \
              the adaptive algorithm replaces all selection modes"
         );
     }
     if use_cfg.min_remaining.is_some() {
         tracing::warn!(
-            "config: [use] 'min_remaining' is deprecated and ignored in v0.0.12+, \
+            "config: [use] 'min_remaining' is deprecated and ignored in v0.0.13+, \
              the adaptive algorithm replaces all selection modes"
         );
     }
@@ -206,7 +206,6 @@ pub fn resolve_proxy() -> Option<String> {
     None
 }
 
-
 pub fn resolve_no_proxy() -> Option<String> {
     if let Some(np) = &get().proxy.no_proxy
         && !np.is_empty()
@@ -216,14 +215,43 @@ pub fn resolve_no_proxy() -> Option<String> {
     None
 }
 
+/// Minimal struct to extract only daemon.log_level without triggering tracing calls.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DaemonLogLevelProbe {
+    daemon: DaemonLogLevelField,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct DaemonLogLevelField {
+    log_level: String,
+}
+
+impl Default for DaemonLogLevelField {
+    fn default() -> Self {
+        Self {
+            log_level: "info".to_string(),
+        }
+    }
+}
+
 /// Read daemon log_level from config file without initializing the global config.
 /// Called before tracing is set up, so it must not use tracing.
+/// Uses a minimal probe struct to avoid triggering warn_deprecated_keys/tracing calls.
 pub fn daemon_log_level() -> String {
-    let level = load_from_file().daemon.log_level;
-    let trimmed = level.trim();
-    if trimmed.is_empty() {
-        "info".to_string()
-    } else {
-        trimmed.to_string()
+    let path = match config_path() {
+        Ok(p) => p,
+        Err(_) => return "info".to_string(),
+    };
+    if !path.exists() {
+        return "info".to_string();
     }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return "info".to_string(),
+    };
+    let probe: DaemonLogLevelProbe = toml::from_str(&content).unwrap_or_default();
+    let trimmed = probe.daemon.log_level.trim().to_string();
+    if trimmed.is_empty() { "info".to_string() } else { trimmed }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "codex-switch"
-version = "0.0.12-dev"
+version = "0.0.13"
 edition = "2024"
 rust-version = "1.88"
 description = "Codex account switcher — multi-profile manager with usage dashboard"
@@ -47,6 +47,7 @@ supports-color = "3"
 owo-colors = "4"
 tar = "0.4"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+libc = "0.2"
 
 [dev-dependencies]
 axum = "0.8"

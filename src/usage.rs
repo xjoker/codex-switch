@@ -99,6 +99,19 @@ pub fn pace_percent(w: &WindowUsage, window_secs: i64) -> Option<f64> {
     Some((elapsed_secs / window_secs as f64 * 100.0).clamp(0.0, 100.0))
 }
 
+/// Pace marker for UI/text rendering.
+/// Hide it when the UI would already render `0% left`, because there is no meaningful
+/// remaining quota to pace against.
+pub fn visible_pace_percent(w: &WindowUsage, window_secs: i64) -> Option<f64> {
+    let used = w.used_percent.unwrap_or(0.0).min(100.0);
+    let remaining = (100.0 - used).max(0.0);
+    if remaining.round() <= 0.0 {
+        None
+    } else {
+        pace_percent(w, window_secs)
+    }
+}
+
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const MAX_RETRIES: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -507,12 +520,12 @@ pub(crate) async fn do_refresh_token(
 }
 
 fn parse_window(val: &Value) -> Option<WindowUsage> {
+    // Require used_percent to be present for meaningful scoring data.
+    // A window with only resets_at but no used_percent would cause
+    // has_5h_data=true with used_5h=0.0, incorrectly treating it as "fully available".
     let used_percent = val.get("used_percent").and_then(|v| v.as_f64());
+    used_percent?;
     let resets_at = val.get("reset_at").and_then(|v| v.as_i64());
-
-    if used_percent.is_none() && resets_at.is_none() {
-        return None;
-    }
 
     Some(WindowUsage {
         used_percent,
@@ -591,7 +604,11 @@ pub fn score_unified(c: &Candidate, safety_margin_7d: f64) -> f64 {
     let headroom = if !c.has_5h_data {
         50.0
     } else if used_5h >= 100.0 {
-        // Exhausted: score by time-to-reset (closer = higher, range 0..500)
+        // Exhausted: score by time-to-reset (closer = higher, range 0..500).
+        // The 500 ceiling (vs 1000+ for active accounts) is intentional:
+        // is_candidate_eligible() marks exhausted accounts as ineligible,
+        // and the caller sorts eligible-first. This branch only ranks among
+        // ineligible fallback candidates when no eligible account exists.
         match c.resets_at_5h {
             None => 0.0,
             Some(reset_ts) => {
@@ -658,12 +675,11 @@ pub fn score_unified(c: &Candidate, safety_margin_7d: f64) -> f64 {
                 }
             } else {
                 // No reset time: use simple pressure
-                let pressure = if safety_margin_7d > 0.0 {
+                if safety_margin_7d > 0.0 {
                     ((safety_margin_7d - remaining_7d) / safety_margin_7d).clamp(0.0, 1.0)
                 } else {
                     1.0
-                };
-                pressure
+                }
             };
 
             // Time relief: if 7d resets within 48h, reduce penalty
@@ -1253,5 +1269,25 @@ mod tests {
         // 7d at 97%, but resets in 12h → still eligible
         let c = make_candidate("near", 30.0, Some(now + 3600), 97.0, Some(now + 12 * 3600));
         assert!(is_candidate_eligible(&c, 20.0));
+    }
+
+    #[test]
+    fn test_visible_pace_percent_hidden_when_ui_shows_zero_left() {
+        let w = WindowUsage {
+            used_percent: Some(99.6),
+            resets_at: Some(auth::now_unix_secs() + 3600),
+            ..Default::default()
+        };
+        assert_eq!(visible_pace_percent(&w, WINDOW_5H_SECS), None);
+    }
+
+    #[test]
+    fn test_visible_pace_percent_shown_when_remaining_exists() {
+        let w = WindowUsage {
+            used_percent: Some(99.4),
+            resets_at: Some(auth::now_unix_secs() + 3600),
+            ..Default::default()
+        };
+        assert!(visible_pace_percent(&w, WINDOW_5H_SECS).is_some());
     }
 }

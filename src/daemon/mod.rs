@@ -3,9 +3,9 @@ pub mod notify;
 pub mod pidfile;
 pub mod service;
 
-use anyhow::Result;
 use crate::cli::DaemonCommand;
 use crate::output::user_println;
+use anyhow::Result;
 
 pub async fn dispatch(cmd: DaemonCommand) -> Result<()> {
     match cmd {
@@ -16,6 +16,8 @@ pub async fn dispatch(cmd: DaemonCommand) -> Result<()> {
                     pidfile::read_pidfile().unwrap_or(0)
                 );
             }
+            // Clean up stale PID file before starting
+            pidfile::cleanup_pidfile()?;
             if foreground {
                 run_foreground().await
             } else {
@@ -30,11 +32,11 @@ pub async fn dispatch(cmd: DaemonCommand) -> Result<()> {
 }
 
 async fn run_foreground() -> Result<()> {
-    pidfile::write_pidfile()?;
+    pidfile::write_pidfile_exclusive()?;
+    // RAII guard ensures PID file is cleaned up even on panic
+    let _guard = pidfile::PidGuard;
     tracing::info!("codex-switch daemon started (PID {})", std::process::id());
-    let result = loop_runner::run_daemon_loop().await;
-    pidfile::cleanup_pidfile()?;
-    result
+    loop_runner::run_daemon_loop().await
 }
 
 fn start_detached() -> Result<()> {
@@ -45,7 +47,16 @@ fn start_detached() -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
-    user_println(&format!("Daemon started (PID {})", child.id()));
+
+    let pid = child.id();
+    // Give the child a moment to detect startup failures
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    if !pidfile::process_alive(pid) {
+        anyhow::bail!(
+            "Daemon process (PID {pid}) exited immediately after start; check logs for details"
+        );
+    }
+    user_println(&format!("Daemon started (PID {pid})"));
     Ok(())
 }
 
@@ -57,22 +68,7 @@ fn stop() -> Result<()> {
         user_println("Daemon was not running (stale PID file cleaned up)");
         return Ok(());
     }
-    #[cfg(unix)]
-    {
-        // Send SIGTERM via command (no libc dependency needed)
-        let status = std::process::Command::new("kill")
-            .args([&pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if let Err(e) = status {
-            anyhow::bail!("Failed to send stop signal to PID {pid}: {e}");
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        anyhow::bail!("Stopping daemon is only supported on Unix; use Task Manager on Windows");
-    }
+    pidfile::send_sigterm(pid)?;
     user_println(&format!("Sent stop signal to daemon (PID {pid})"));
     Ok(())
 }

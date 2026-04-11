@@ -12,19 +12,19 @@ pub enum ColorMode {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum DaemonCommand {
-    /// Start the daemon (foreground if --foreground, otherwise detached)
+    /// Start the daemon (Beta; foreground if --foreground, otherwise detached)
     Start {
         /// Run in foreground (for service managers)
         #[arg(long)]
         foreground: bool,
     },
-    /// Stop a running daemon
+    /// Stop a running Beta daemon
     Stop,
-    /// Show daemon status
+    /// Show Beta daemon status
     Status,
-    /// Install as a system service (LaunchAgent on macOS, systemd on Linux)
+    /// Install the Beta daemon as a system service (LaunchAgent on macOS, systemd on Linux)
     Install,
-    /// Uninstall the system service
+    /// Uninstall the Beta daemon system service
     Uninstall,
 }
 
@@ -145,7 +145,7 @@ pub enum Commands {
     Tui,
     /// Open the ~/.codex-switch directory in the system file manager
     Open,
-    /// Background daemon for automatic account switching
+    /// Background daemon (Beta) for automatic account switching
     #[command(subcommand)]
     Daemon(DaemonCommand),
 }

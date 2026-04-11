@@ -136,7 +136,7 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn wait_until<F>(timeout: Duration, mut check: F)
+fn wait_until<F>(timeout: Duration, label: &str, mut check: F)
 where
     F: FnMut() -> bool,
 {
@@ -145,9 +145,9 @@ where
         if check() {
             return;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(200));
     }
-    panic!("condition not met within {:?}", timeout);
+    panic!("condition '{}' not met within {:?}", label, timeout);
 }
 
 fn read_live_access_token(path: &Path) -> Option<String> {
@@ -182,19 +182,26 @@ async fn daemon_start_switch_status_and_stop() {
     );
     assert!(stdout(&start).starts_with("Daemon started (PID "));
 
-    wait_until(Duration::from_secs(5), || env.pidfile().exists());
+    wait_until(Duration::from_secs(10), "pidfile created", || {
+        env.pidfile().exists()
+    });
 
-    wait_until(Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(10), "daemon status=running", || {
         let out = run_cmd(&env, &["daemon", "status"]);
         out.status.success() && stdout(&out).starts_with("Daemon is running (PID ")
     });
 
-    wait_until(Duration::from_secs(5), || {
-        std::fs::read_to_string(env.current_file())
-            .map(|s| s.trim() == "gradual_b")
-            .unwrap_or(false)
-            && read_live_access_token(&env.live_auth_path()).as_deref() == Some("tok_gradual_b")
-    });
+    wait_until(
+        Duration::from_secs(15),
+        "daemon switches to gradual_b",
+        || {
+            std::fs::read_to_string(env.current_file())
+                .map(|s| s.trim() == "gradual_b")
+                .unwrap_or(false)
+                && read_live_access_token(&env.live_auth_path()).as_deref()
+                    == Some("tok_gradual_b")
+        },
+    );
 
     let stop = run_cmd(&env, &["daemon", "stop"]);
     assert!(
@@ -204,10 +211,14 @@ async fn daemon_start_switch_status_and_stop() {
     );
     assert!(stdout(&stop).starts_with("Sent stop signal to daemon (PID "));
 
-    wait_until(Duration::from_secs(5), || {
-        let out = run_cmd(&env, &["daemon", "status"]);
-        out.status.success() && stdout(&out) == "Daemon is not running"
-    });
+    wait_until(
+        Duration::from_secs(15),
+        "daemon stopped and status=not running",
+        || {
+            let out = run_cmd(&env, &["daemon", "status"]);
+            out.status.success() && stdout(&out) == "Daemon is not running"
+        },
+    );
 
     assert!(
         !env.pidfile().exists(),

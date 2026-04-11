@@ -1,6 +1,6 @@
 mod mock;
 
-use codex_switch::usage::{self, Candidate, UsageInfo, WindowUsage};
+use codex_switch::usage::{self, Candidate};
 use mock::scenarios;
 
 /// Build a Candidate from a mock usage JSON response.
@@ -18,7 +18,10 @@ fn candidate_from_json(
 /// Score and sort candidates, returning aliases in best-to-worst order.
 fn rank(mut candidates: Vec<Candidate>, safety_margin_7d: f64) -> Vec<String> {
     let pool_size = candidates.len();
-    let exhausted = candidates.iter().filter(|c| c.effective_used_5h() >= 100.0).count();
+    let exhausted = candidates
+        .iter()
+        .filter(|c| c.effective_used_5h() >= 100.0)
+        .count();
     for c in &mut candidates {
         c.pool_size = pool_size;
         c.pool_exhausted = exhausted;

@@ -20,7 +20,7 @@
 - **Auto-Detection** — Automatically discovers and tracks the current `auth.json`
 - **Usage Dashboard** — Live quota monitoring (5h and 7d windows) with status indicators and per-account refresh timestamps
 - **Adaptive Auto-Switch** — `codex-switch use` without arguments ranks accounts with a unified 5-component scoring algorithm, with Team accounts prioritized by default
-- **Background Daemon** — Optional `daemon` command keeps the next session ready by monitoring usage and switching automatically when the current account crosses a threshold
+- **Background Daemon (Beta)** — Optional `daemon` command keeps the next session ready by monitoring usage and switching automatically when the current account crosses a threshold
 - **Stale-Only Refresh** — `use`, `list`, and TUI refresh only accounts whose cached usage has expired
 - **Progress Display** — Long-running `use`, `list`, and directory `import` operations show a single-line cross-platform progress indicator
 - **Interactive TUI** — Full terminal UI with live usage data, color-coded status, and keyboard shortcuts
@@ -133,7 +133,7 @@ codex-switch use
 # 6. Launch interactive TUI
 codex-switch tui
 
-# 7. Start the background daemon (optional)
+# 7. Start the background daemon (Beta, optional)
 codex-switch daemon start
 
 # 8. Check daemon status
@@ -154,11 +154,11 @@ codex-switch self-update --check
 | `codex-switch rename <old> <new>` | Rename a profile |
 | `codex-switch delete <alias>` | Delete a profile |
 | `codex-switch import <path> [alias]` | Import one auth.json file, or recursively validate and import all JSON files under a directory |
-| `codex-switch daemon start [--foreground]` | Start the auto-switch daemon. Detached by default; use `--foreground` for service managers |
-| `codex-switch daemon stop` | Stop a running daemon |
-| `codex-switch daemon status` | Show daemon status |
-| `codex-switch daemon install` | Install a user service (LaunchAgent on macOS, systemd user service on Linux) |
-| `codex-switch daemon uninstall` | Remove the installed user service |
+| `codex-switch daemon start [--foreground]` | Start the auto-switch daemon (Beta). Detached by default; use `--foreground` for service managers |
+| `codex-switch daemon stop` | Stop a running Beta daemon |
+| `codex-switch daemon status` | Show Beta daemon status |
+| `codex-switch daemon install` | Install the Beta daemon as a user service (LaunchAgent on macOS, systemd user service on Linux) |
+| `codex-switch daemon uninstall` | Remove the Beta daemon user service |
 | `codex-switch self-update [--check] [--dev]` | Manually check GitHub Releases or update the current direct-install binary. `--dev` switches to the dev channel |
 | `codex-switch tui` | Launch the interactive terminal UI |
 | `codex-switch open` | Open the config directory in file manager |
@@ -278,9 +278,9 @@ codex-switch list
 codex-switch use && codex
 ```
 
-### Keep the next session ready with the daemon
+### Keep the next session ready with the daemon (Beta)
 
-Use the daemon when you want `codex-switch` to monitor the current account continuously and prepare the next Codex launch in the background:
+Use the Beta daemon when you want `codex-switch` to monitor the current account continuously and prepare the next Codex launch in the background:
 
 ```bash
 # Start a detached daemon
@@ -297,7 +297,7 @@ codex-switch daemon install
 codex-switch daemon uninstall
 ```
 
-The daemon uses the same adaptive scoring logic as `codex-switch use`. It refreshes the current account on each poll, switches only when `daemon.switch_threshold` is met or exceeded and a better candidate exists, and refreshes expiring tokens on a separate timer. It prepares future Codex launches; an already-running Codex process still needs to be restarted after a switch.
+The Beta daemon uses the same adaptive scoring logic as `codex-switch use`. It refreshes the current account on each poll, switches only when `daemon.switch_threshold` is met or exceeded and a better candidate exists, and refreshes expiring tokens on a separate timer. It prepares future Codex launches; an already-running Codex process still needs to be restarted after a switch.
 
 ### Scheduled token refresh via cron (optional)
 
@@ -386,7 +386,7 @@ score = tier_bonus + headroom + sustain + drain_value + recency
 - `drain_value` (0..300) — Bonus for spending quota that will reset within 60 minutes; the weight adapts to pool size and exhaustion ratio.
 - `recency` (-60..0) — Small spread penalty to avoid repeatedly hammering the same account.
 
-This replaces `max-remaining`, `drain-first`, and `round-robin`. There is no mode selection in v0.0.12+.
+This replaces `max-remaining`, `drain-first`, and `round-robin`. There is no mode selection in v0.0.13+.
 
 > **Note:** After switching accounts, you must **restart Codex** for it to pick up the new `auth.json`. The Codex CLI reads `auth.json` at startup and does not watch for file changes.
 
@@ -407,7 +407,7 @@ Ineligible accounts are excluded from selection unless ALL accounts are ineligib
 - `safety_margin_7d` — Weekly safety threshold used by the sustain component and the eligibility gate
 - `team_priority` — Default `true`; grants Team accounts a `+500` tier bonus
 
-Legacy `mode` and `min_remaining` are ignored with a warning in v0.0.12+.
+Legacy `mode` and `min_remaining` are ignored with a warning in v0.0.13+.
 
 ### Cache Behavior
 
