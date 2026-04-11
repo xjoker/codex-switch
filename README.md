@@ -1,14 +1,18 @@
 # codex-switch
 
-Multi-account profile manager for [OpenAI Codex CLI](https://github.com/openai/codex) with usage dashboard and interactive TUI.
+**The multi-account manager for [OpenAI Codex CLI](https://github.com/openai/codex)** — manage unlimited accounts, monitor live quota across all of them, and auto-switch to the best one before each session. No other tool gives you real-time, per-account usage tracking with smart rotation.
 
 [**中文文档 →**](README_CN.md)
 
 ---
 
-| TUI | CLI |
-|:---:|:---:|
-| ![TUI](docs/tui.png) | ![CLI](docs/cli.png) |
+### TUI
+
+![TUI](docs/tui.png)
+
+### CLI
+
+![CLI](docs/cli.png)
 
 ## Features
 
