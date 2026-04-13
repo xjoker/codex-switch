@@ -3,15 +3,27 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
 };
 
 use super::app::{App, UsageStatus};
 use crate::output::{format_local_time, format_reset_short, format_reset_time};
 use crate::usage::{UsageInfo, is_available};
 
+/// Base background color for the entire TUI.
+/// Forces a consistent dark background regardless of terminal theme
+/// (e.g. PowerShell blue, light-mode terminals).
+const BG: Color = Color::Black;
+
 pub fn render(f: &mut Frame, app: &App) {
     let area = f.area();
+
+    // Paint the entire area with a solid background first
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Block::default().style(Style::default().bg(BG)),
+        area,
+    );
 
     let status_height = status_bar_height(app, area.width);
 
@@ -225,7 +237,8 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         Style::default()
             .bg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
-    );
+    )
+    .style(Style::default().bg(BG));
 
     f.render_stateful_widget(table, area, &mut table_state);
 }
@@ -252,7 +265,8 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             Color::Green
         } else {
             Color::Blue
-        }));
+        }))
+        .style(Style::default().bg(BG));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
