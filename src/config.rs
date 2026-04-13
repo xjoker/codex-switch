@@ -92,7 +92,7 @@ pub struct DaemonConfig {
     pub token_check_interval_secs: u64,
     /// Send desktop notification on switch (default: false)
     pub notify: bool,
-    /// Log level for daemon (default: "info")
+    /// Log level for daemon (default: "error")
     pub log_level: String,
 }
 
@@ -103,7 +103,7 @@ impl Default for DaemonConfig {
             switch_threshold: 80.0,
             token_check_interval_secs: 300,
             notify: false,
-            log_level: "info".to_string(),
+            log_level: "error".to_string(),
         }
     }
 }
@@ -231,7 +231,7 @@ struct DaemonLogLevelField {
 impl Default for DaemonLogLevelField {
     fn default() -> Self {
         Self {
-            log_level: "info".to_string(),
+            log_level: "error".to_string(),
         }
     }
 }
@@ -242,16 +242,16 @@ impl Default for DaemonLogLevelField {
 pub fn daemon_log_level() -> String {
     let path = match config_path() {
         Ok(p) => p,
-        Err(_) => return "info".to_string(),
+        Err(_) => return "error".to_string(),
     };
     if !path.exists() {
-        return "info".to_string();
+        return "error".to_string();
     }
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return "info".to_string(),
+        Err(_) => return "error".to_string(),
     };
     let probe: DaemonLogLevelProbe = toml::from_str(&content).unwrap_or_default();
     let trimmed = probe.daemon.log_level.trim().to_string();
-    if trimmed.is_empty() { "info".to_string() } else { trimmed }
+    if trimmed.is_empty() { "error".to_string() } else { trimmed }
 }

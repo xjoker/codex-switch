@@ -28,7 +28,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     let cli = Cli::parse();
 
-    // Priority: --debug flag > RUST_LOG env > config.toml daemon.log_level > default "info"
+    // Priority: --debug flag > RUST_LOG env > config.toml daemon.log_level > default "error"
     let filter = if cli.debug {
         EnvFilter::new("codex_switch=debug")
     } else if std::env::var_os("RUST_LOG").is_some() {
@@ -37,8 +37,7 @@ async fn main() {
         let level = config::daemon_log_level();
         EnvFilter::new(format!("codex_switch={level}"))
     } else {
-        EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("codex_switch=info"))
+        EnvFilter::new("codex_switch=error")
     };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
