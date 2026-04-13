@@ -10,17 +10,22 @@ use super::app::{App, UsageStatus};
 use crate::output::{format_local_time, format_reset_short, format_reset_time};
 use crate::usage::{UsageInfo, is_available};
 
-/// Base background color for the entire TUI.
-/// Uses a very dark gray instead of pure black to improve contrast
-/// with DarkGray text on Windows terminals (cmd.exe, PowerShell).
-const BG: Color = Color::Rgb(24, 24, 24);
+// ── RGB-only color palette ───────────────────────────────
+// All colors are explicit RGB to avoid mixing ANSI-16 + 24-bit,
+// which causes rendering glitches on Windows conhost (cmd.exe / PowerShell).
 
-/// Dim foreground — replaces DarkGray which is nearly invisible on
-/// dark backgrounds in Windows terminals.
-const DIM: Color = Color::Rgb(140, 140, 140);
+const BG: Color = Color::Rgb(24, 24, 24);        // near-black background
+const C_WHITE: Color = Color::Rgb(240, 240, 240); // primary text
+const C_GRAY: Color = Color::Rgb(180, 180, 180);  // secondary text
+const DIM: Color = Color::Rgb(120, 120, 120);     // dim labels / placeholders
+const C_RED: Color = Color::Rgb(255, 90, 90);     // errors, warnings
+const C_GREEN: Color = Color::Rgb(80, 220, 120);  // OK, active
+const C_YELLOW: Color = Color::Rgb(255, 220, 80); // keys, markers
+const C_CYAN: Color = Color::Rgb(100, 210, 255);  // headers, prompts
+const C_MAGENTA: Color = Color::Rgb(220, 130, 255); // team plans
+const C_BLUE: Color = Color::Rgb(80, 140, 220);   // borders (inactive)
+const C_HIGHLIGHT_BG: Color = Color::Rgb(55, 55, 65); // selected row bg
 
-/// Base style: black background, no foreground override.
-/// Every widget should build on top of this to guarantee no terminal-default bleed.
 fn base() -> Style {
     Style::default().bg(BG)
 }
@@ -49,7 +54,7 @@ pub fn render(f: &mut Frame, app: &App) {
 
 fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
     let hdr = base()
-        .fg(Color::Cyan)
+        .fg(C_CYAN)
         .add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
         Cell::from(" ").style(base().fg(DIM)),
@@ -80,11 +85,11 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             };
             let marker_style = if is_marked {
                 base()
-                    .fg(Color::Yellow)
+                    .fg(C_YELLOW)
                     .add_modifier(Modifier::BOLD)
             } else if entry.is_current {
                 base()
-                    .fg(Color::Green)
+                    .fg(C_GREEN)
                     .add_modifier(Modifier::BOLD)
             } else {
                 base()
@@ -93,10 +98,10 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             let is_selected = view_i == app.selected;
             let row_style = if is_selected {
                 base()
-                    .fg(Color::White)
+                    .fg(C_WHITE)
                     .add_modifier(Modifier::BOLD)
             } else {
-                base().fg(Color::Gray)
+                base().fg(C_GRAY)
             };
 
             let email = entry.info.email.as_deref().unwrap_or("--").to_string();
@@ -127,7 +132,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 ),
                 UsageStatus::Loading => (
                     "...".into(),
-                    Color::Yellow,
+                    C_YELLOW,
                     "...".into(),
                     "...".into(),
                     "loading".into(),
@@ -137,7 +142,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 ),
                 UsageStatus::Error(_) => (
                     "Error".into(),
-                    Color::Red,
+                    C_RED,
                     "Err".into(),
                     "Err".into(),
                     "--".into(),
@@ -169,9 +174,9 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                         .map(|ts| reset_color(ts - now))
                         .unwrap_or(DIM);
                     if is_available(u) {
-                        ("OK".into(), Color::Green, p5, p7, r5, r5c, r7, r7c)
+                        ("OK".into(), C_GREEN, p5, p7, r5, r5c, r7, r7c)
                     } else {
-                        ("Limited".into(), Color::Red, p5, p7, r5, r5c, r7, r7c)
+                        ("Limited".into(), C_RED, p5, p7, r5, r5c, r7, r7c)
                     }
                 }
             };
@@ -237,12 +242,12 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(base().fg(Color::Rgb(80, 120, 200)))
+            .border_style(base().fg(C_BLUE))
             .style(base()),
     )
     .row_highlight_style(
         Style::default()
-            .bg(Color::Rgb(60, 60, 60))
+            .bg(C_HIGHLIGHT_BG)
             .add_modifier(Modifier::BOLD),
     )
     .style(base());
@@ -269,9 +274,9 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         .title(title)
         .borders(Borders::ALL)
         .border_style(base().fg(if entry.is_current {
-            Color::Green
+            C_GREEN
         } else {
-            Color::Rgb(80, 120, 200)
+            C_BLUE
         }))
         .style(base());
 
@@ -295,7 +300,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let info_line = Line::from(vec![
         Span::styled("Email ", base().fg(DIM)),
-        Span::styled(email, base().fg(Color::White)),
+        Span::styled(email, base().fg(C_WHITE)),
         Span::styled("  ", base()),
         Span::styled("Plan ", base().fg(DIM)),
         Span::styled(
@@ -323,12 +328,12 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Loading => {
-            let p = Paragraph::new("Fetching usage...").style(base().fg(Color::Yellow));
+            let p = Paragraph::new("Fetching usage...").style(base().fg(C_YELLOW));
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Error(e) => {
             let p = Paragraph::new(format!("Error: {}", e.detail))
-                .style(base().fg(Color::Red));
+                .style(base().fg(C_RED));
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Loaded(u) => {
@@ -395,16 +400,16 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 " Rename: ",
                 base()
-                    .fg(Color::Cyan)
+                    .fg(C_CYAN)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 &rs.input,
                 base()
-                    .fg(Color::White)
+                    .fg(C_WHITE)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("#", base().fg(Color::Gray)),
+            Span::styled("#", base().fg(C_GRAY)),
             Span::styled(
                 "  (Enter confirm / Esc cancel)",
                 base().fg(DIM),
@@ -423,7 +428,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         };
         let line = Line::from(Span::styled(
             msg,
-            base().fg(Color::Red).add_modifier(Modifier::BOLD),
+            base().fg(C_RED).add_modifier(Modifier::BOLD),
         ));
         f.render_widget(Paragraph::new(line).style(base()), area);
         return;
@@ -436,16 +441,16 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 " /",
                 base()
-                    .fg(Color::Cyan)
+                    .fg(C_CYAN)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 &s.query,
                 base()
-                    .fg(Color::White)
+                    .fg(C_WHITE)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("#", base().fg(Color::Gray)),
+            Span::styled("#", base().fg(C_GRAY)),
             Span::styled(
                 "  (Enter accept / Esc clear)",
                 base().fg(DIM),
@@ -456,7 +461,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     }
 
     if let Some(s) = &app.status_msg {
-        let msg = Line::from(Span::styled(s.as_str(), base().fg(Color::Green)));
+        let msg = Line::from(Span::styled(s.as_str(), base().fg(C_GREEN)));
         f.render_widget(Paragraph::new(msg).style(base()), area);
     } else {
         let lines = build_help_lines(area.width as usize);
@@ -491,10 +496,10 @@ fn render_usage_gauge(
         .saturating_sub(label_text.len())
         .saturating_sub(suffix.len());
 
-    let used_style = base().fg(if over { Color::Yellow } else { Color::Green });
+    let used_style = base().fg(if over { C_YELLOW } else { C_GREEN });
     let remaining_style = base().fg(remaining_color(remaining_pct));
     let pace_style = base()
-        .fg(Color::White)
+        .fg(C_WHITE)
         .add_modifier(Modifier::BOLD);
 
     // L2: if bar_width is 0 (extremely narrow terminal), skip bar rendering entirely
@@ -517,7 +522,7 @@ fn render_usage_gauge(
         .round()
         .clamp(0.0, bar_width as f64) as usize;
 
-    let mut spans = vec![Span::styled(label_text.clone(), base().fg(Color::White))];
+    let mut spans = vec![Span::styled(label_text.clone(), base().fg(C_WHITE))];
 
     if let Some(pp) = pace_pos {
         let before_used = pp.min(used_pos);
@@ -547,7 +552,7 @@ fn render_usage_gauge(
         }
     }
 
-    let suffix_color = if over { Color::Yellow } else { DIM };
+    let suffix_color = if over { C_YELLOW } else { DIM };
     spans.push(Span::styled(suffix, base().fg(suffix_color)));
 
     f.render_widget(Paragraph::new(Line::from(spans)).style(base()), gauge_area);
@@ -629,19 +634,19 @@ fn render_usage_gauge(
 /// Color for remaining percentage: green > 30%, yellow > 10%, red <= 10%
 fn remaining_color(remaining_pct: f64) -> Color {
     if remaining_pct > 30.0 {
-        Color::Green
+        C_GREEN
     } else if remaining_pct > 10.0 {
-        Color::Yellow
+        C_YELLOW
     } else {
-        Color::Red
+        C_RED
     }
 }
 
 fn plan_color(plan: Option<&str>, is_selected: bool) -> Style {
     let fg = match plan {
-        Some("pro") => Color::Yellow,
-        Some("plus") => Color::Cyan,
-        Some("team") => Color::Magenta,
+        Some("pro") => C_YELLOW,
+        Some("plus") => C_CYAN,
+        Some("team") => C_MAGENTA,
         _ => DIM,
     };
     let s = base().fg(fg);
@@ -655,22 +660,22 @@ fn plan_color(plan: Option<&str>, is_selected: bool) -> Style {
 /// Color for reset countdown: green = soon (< 1h), yellow = medium (< 4h), red = far (>= 4h)
 fn reset_color(remaining_secs: i64) -> Color {
     if remaining_secs < 3600 {
-        Color::Green
+        C_GREEN
     } else if remaining_secs < 14400 {
-        Color::Yellow
+        C_YELLOW
     } else {
-        Color::Red
+        C_RED
     }
 }
 
 /// Color for credits balance: green >= $10, yellow >= $2, red < $2
 fn credits_color(balance: f64, unlimited: bool) -> Color {
     if unlimited || balance >= 10.0 {
-        Color::Green
+        C_GREEN
     } else if balance >= 2.0 {
-        Color::Yellow
+        C_YELLOW
     } else {
-        Color::Red
+        C_RED
     }
 }
 
@@ -702,7 +707,7 @@ const HELP_ITEMS: &[(&str, &str)] = &[
 ];
 
 fn build_help_lines(width: usize) -> Vec<Line<'static>> {
-    let key_style = base().fg(Color::Yellow);
+    let key_style = base().fg(C_YELLOW);
     let dim_style = base().fg(DIM);
     let space_style = base();
     let mut lines: Vec<Line<'static>> = Vec::new();
