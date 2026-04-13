@@ -11,9 +11,13 @@ use crate::output::{format_local_time, format_reset_short, format_reset_time};
 use crate::usage::{UsageInfo, is_available};
 
 /// Base background color for the entire TUI.
-/// Forces a consistent dark background regardless of terminal theme
-/// (e.g. PowerShell blue, light-mode terminals).
-const BG: Color = Color::Black;
+/// Uses a very dark gray instead of pure black to improve contrast
+/// with DarkGray text on Windows terminals (cmd.exe, PowerShell).
+const BG: Color = Color::Rgb(24, 24, 24);
+
+/// Dim foreground — replaces DarkGray which is nearly invisible on
+/// dark backgrounds in Windows terminals.
+const DIM: Color = Color::Rgb(140, 140, 140);
 
 /// Base style: black background, no foreground override.
 /// Every widget should build on top of this to guarantee no terminal-default bleed.
@@ -48,7 +52,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
-        Cell::from(" ").style(base().fg(Color::DarkGray)),
+        Cell::from(" ").style(base().fg(DIM)),
         Cell::from("Alias").style(hdr),
         Cell::from("Email").style(hdr),
         Cell::from("Plan").style(hdr),
@@ -113,13 +117,13 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             ): (String, Color, String, String, String, Color, String, Color) = match &entry.usage {
                 UsageStatus::Idle => (
                     "--".into(),
-                    Color::DarkGray,
+                    DIM,
                     "--".into(),
                     "--".into(),
                     "--".into(),
-                    Color::DarkGray,
+                    DIM,
                     "--".into(),
-                    Color::DarkGray,
+                    DIM,
                 ),
                 UsageStatus::Loading => (
                     "...".into(),
@@ -127,9 +131,9 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                     "...".into(),
                     "...".into(),
                     "loading".into(),
-                    Color::DarkGray,
+                    DIM,
                     "loading".into(),
-                    Color::DarkGray,
+                    DIM,
                 ),
                 UsageStatus::Error(_) => (
                     "Error".into(),
@@ -137,9 +141,9 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                     "Err".into(),
                     "Err".into(),
                     "--".into(),
-                    Color::DarkGray,
+                    DIM,
                     "--".into(),
-                    Color::DarkGray,
+                    DIM,
                 ),
                 UsageStatus::Loaded(u) => {
                     let p5 = u
@@ -158,12 +162,12 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                     let r5 = r5_ts.map(format_reset_short).unwrap_or_else(|| "--".into());
                     let r5c = r5_ts
                         .map(|ts| reset_color(ts - now))
-                        .unwrap_or(Color::DarkGray);
+                        .unwrap_or(DIM);
                     let r7_ts = u.secondary.as_ref().and_then(|w| w.resets_at);
                     let r7 = r7_ts.map(format_reset_short).unwrap_or_else(|| "--".into());
                     let r7c = r7_ts
                         .map(|ts| reset_color(ts - now))
-                        .unwrap_or(Color::DarkGray);
+                        .unwrap_or(DIM);
                     if is_available(u) {
                         ("OK".into(), Color::Green, p5, p7, r5, r5c, r7, r7c)
                     } else {
@@ -233,12 +237,12 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(base().fg(Color::Blue))
+            .border_style(base().fg(Color::Rgb(80, 120, 200)))
             .style(base()),
     )
     .row_highlight_style(
         Style::default()
-            .bg(Color::DarkGray)
+            .bg(Color::Rgb(60, 60, 60))
             .add_modifier(Modifier::BOLD),
     )
     .style(base());
@@ -267,7 +271,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         .border_style(base().fg(if entry.is_current {
             Color::Green
         } else {
-            Color::Blue
+            Color::Rgb(80, 120, 200)
         }))
         .style(base());
 
@@ -290,23 +294,23 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     let email = entry.info.email.as_deref().unwrap_or("--");
 
     let info_line = Line::from(vec![
-        Span::styled("Email ", base().fg(Color::DarkGray)),
+        Span::styled("Email ", base().fg(DIM)),
         Span::styled(email, base().fg(Color::White)),
         Span::styled("  ", base()),
-        Span::styled("Plan ", base().fg(Color::DarkGray)),
+        Span::styled("Plan ", base().fg(DIM)),
         Span::styled(
             &plan_label,
             plan_color(entry.info.plan_type.as_deref(), true),
         ),
         Span::styled("  ", base()),
-        Span::styled("ID ", base().fg(Color::DarkGray)),
+        Span::styled("ID ", base().fg(DIM)),
         Span::styled(
             if acct_id.len() > 20 {
                 &acct_id[..20]
             } else {
                 acct_id
             },
-            base().fg(Color::DarkGray),
+            base().fg(DIM),
         ),
     ]);
     f.render_widget(Paragraph::new(info_line).style(base()), layout[0]);
@@ -315,7 +319,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     match &entry.usage {
         UsageStatus::Idle => {
             let p = Paragraph::new("Press r to refresh usage")
-                .style(base().fg(Color::DarkGray));
+                .style(base().fg(DIM));
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Loading => {
@@ -379,7 +383,7 @@ fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
     }
 
     if u.primary.is_none() && u.secondary.is_none() && !has_credits {
-        let p = Paragraph::new("No usage data").style(base().fg(Color::DarkGray));
+        let p = Paragraph::new("No usage data").style(base().fg(DIM));
         f.render_widget(p, layout[0]);
     }
 }
@@ -403,7 +407,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("#", base().fg(Color::Gray)),
             Span::styled(
                 "  (Enter confirm / Esc cancel)",
-                base().fg(Color::DarkGray),
+                base().fg(DIM),
             ),
         ]);
         f.render_widget(Paragraph::new(line).style(base()), area);
@@ -444,7 +448,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("#", base().fg(Color::Gray)),
             Span::styled(
                 "  (Enter accept / Esc clear)",
-                base().fg(Color::DarkGray),
+                base().fg(DIM),
             ),
         ]);
         f.render_widget(Paragraph::new(line).style(base()), area);
@@ -543,7 +547,7 @@ fn render_usage_gauge(
         }
     }
 
-    let suffix_color = if over { Color::Yellow } else { Color::DarkGray };
+    let suffix_color = if over { Color::Yellow } else { DIM };
     spans.push(Span::styled(suffix, base().fg(suffix_color)));
 
     f.render_widget(Paragraph::new(Line::from(spans)).style(base()), gauge_area);
@@ -577,9 +581,9 @@ fn render_usage_gauge(
             && pace_end + 2 <= reset_start
         {
             Line::from(vec![
-                Span::styled(&started_text, base().fg(Color::DarkGray)),
+                Span::styled(&started_text, base().fg(DIM)),
                 Span::styled(" ".repeat(arrow_offset - started_len), base()),
-                Span::styled(pace_label, base().fg(Color::DarkGray)),
+                Span::styled(pace_label, base().fg(DIM)),
                 Span::styled(" ".repeat(reset_start - pace_end), base()),
                 Span::styled(reset_text, reset_style),
             ])
@@ -587,7 +591,7 @@ fn render_usage_gauge(
             // No room for started, show pace + reset
             Line::from(vec![
                 Span::styled(" ".repeat(arrow_offset), base()),
-                Span::styled(pace_label, base().fg(Color::DarkGray)),
+                Span::styled(pace_label, base().fg(DIM)),
                 Span::styled(" ".repeat(reset_start - pace_end), base()),
                 Span::styled(reset_text, reset_style),
             ])
@@ -595,7 +599,7 @@ fn render_usage_gauge(
             // Tight: started left, reset right
             let mut spans = Vec::new();
             if !started_text.is_empty() && started_len + 2 <= reset_start {
-                spans.push(Span::styled(&started_text, base().fg(Color::DarkGray)));
+                spans.push(Span::styled(&started_text, base().fg(DIM)));
                 spans.push(Span::styled(" ".repeat(reset_start - started_len), base()));
             } else {
                 spans.push(Span::styled(" ".repeat(reset_start), base()));
@@ -607,7 +611,7 @@ fn render_usage_gauge(
         // No pace marker: started left, reset after label offset
         let mut spans = Vec::new();
         if !started_text.is_empty() {
-            spans.push(Span::styled(&started_text, base().fg(Color::DarkGray)));
+            spans.push(Span::styled(&started_text, base().fg(DIM)));
             let gap = reset_start.saturating_sub(started_len);
             spans.push(Span::styled(" ".repeat(gap), base()));
         } else {
@@ -638,7 +642,7 @@ fn plan_color(plan: Option<&str>, is_selected: bool) -> Style {
         Some("pro") => Color::Yellow,
         Some("plus") => Color::Cyan,
         Some("team") => Color::Magenta,
-        _ => Color::DarkGray,
+        _ => DIM,
     };
     let s = base().fg(fg);
     if is_selected {
@@ -673,7 +677,7 @@ fn credits_color(balance: f64, unlimited: bool) -> Color {
 fn usage_pct_style(remaining_pct_str: &str, is_selected: bool) -> Style {
     let fg = match remaining_pct_str.trim_end_matches('%').parse::<f64>() {
         Ok(n) => remaining_color(n),
-        Err(_) => Color::DarkGray,
+        Err(_) => DIM,
     };
     let s = base().fg(fg);
     if is_selected {
@@ -699,7 +703,7 @@ const HELP_ITEMS: &[(&str, &str)] = &[
 
 fn build_help_lines(width: usize) -> Vec<Line<'static>> {
     let key_style = base().fg(Color::Yellow);
-    let dim_style = base().fg(Color::DarkGray);
+    let dim_style = base().fg(DIM);
     let space_style = base();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spans: Vec<Span<'static>> = vec![Span::styled(" ", space_style)];
