@@ -141,6 +141,14 @@ pub enum Commands {
         /// Profile alias to warm up (omit to warm up all profiles)
         alias: Option<String>,
     },
+    /// Launch codex CLI with the best (or specified) profile's auth
+    Launch {
+        /// Profile alias (omit to auto-select best available)
+        alias: Option<String>,
+        /// All remaining arguments passed through to codex
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Launch the interactive TUI
     Tui,
     /// Open the ~/.codex-switch directory in the system file manager

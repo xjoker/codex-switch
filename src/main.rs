@@ -22,6 +22,7 @@ use output::{
     MessageMode, ProgressReporter, account_to_json, print_error, print_json,
     usage_to_json, user_println,
 };
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -79,6 +80,7 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
                 | Commands::Import { .. }
                 | Commands::SelfUpdate { .. }
                 | Commands::Open
+                | Commands::Launch { .. }
         );
         if should_check {
             check_auth_change()
@@ -106,6 +108,7 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
             self_update_cmd(check, version.as_deref(), dev, stable, json).await?
         }
         Commands::Warmup { alias } => warmup_cmd(alias.as_deref(), json).await?,
+        Commands::Launch { alias, args } => launch_cmd(alias.as_deref(), args, json).await?,
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => open_cmd()?,
         Commands::Daemon(sub) => daemon::dispatch(sub).await?,
@@ -594,19 +597,69 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
 
 // ── best (internal, called by `use` with no alias) ────────
 
-async fn best_cmd(json: bool) -> Result<()> {
-    let profiles = profile::list_profiles()?;
-    if profiles.is_empty() {
-        if json {
-            print_error("no saved profiles");
-        } else {
-            println!("{}", color::dim("(no saved profiles)"));
-        }
-        return Ok(());
+fn score_profile_candidates(
+    fetched: Vec<(String, usage::UsageInfo)>,
+    now: i64,
+    safety_7d: f64,
+    team_priority: bool,
+) -> Vec<(usage::Candidate, usage::UsageInfo, f64)> {
+    let pool_size = fetched.len();
+
+    let mut candidates: Vec<(usage::Candidate, usage::UsageInfo)> = fetched
+        .into_iter()
+        .map(|(alias, u)| {
+            let info = profile::profile_auth_path(&alias)
+                .map(|p| auth::read_account_info(&p))
+                .unwrap_or_default();
+            let last_used = cache::get_last_used(&alias);
+            let mut candidate = usage::Candidate::from_usage(
+                alias,
+                &u,
+                info.is_team(),
+                info.is_free(),
+                last_used,
+                now,
+            );
+            candidate.pool_size = pool_size;
+            candidate.team_priority = team_priority;
+            (candidate, u)
+        })
+        .collect();
+
+    let pool_exhausted = candidates
+        .iter()
+        .filter(|(candidate, _)| candidate.effective_used_5h() >= 100.0)
+        .count();
+    for (candidate, _) in &mut candidates {
+        candidate.pool_exhausted = pool_exhausted;
     }
 
-    let safety_7d = config::get().use_cfg.safety_margin_7d;
-    let now = auth::now_unix_secs();
+    let mut scored: Vec<(usage::Candidate, usage::UsageInfo, f64)> = candidates
+        .into_iter()
+        .map(|(candidate, usage)| {
+            let score = usage::score_unified(&candidate, safety_7d);
+            (candidate, usage, score)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        let eligible_a = usage::is_candidate_eligible(&a.0, safety_7d);
+        let eligible_b = usage::is_candidate_eligible(&b.0, safety_7d);
+        eligible_b
+            .cmp(&eligible_a)
+            .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+            .then(a.0.last_used.cmp(&b.0.last_used))
+            .then(a.0.alias.cmp(&b.0.alias))
+    });
+
+    scored
+}
+
+async fn select_best_profile(json: bool) -> Result<(String, usage::UsageInfo, f64)> {
+    let profiles = profile::list_profiles()?;
+    if profiles.is_empty() {
+        anyhow::bail!("no saved profiles");
+    }
 
     let current = profile::read_current();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
@@ -669,67 +722,23 @@ async fn best_cmd(json: bool) -> Result<()> {
     }
 
     if fetched.is_empty() {
-        if json {
-            print_error("all usage queries failed");
-        } else {
-            println!("{}", color::error("All usage queries failed"));
-        }
-        return Ok(());
+        anyhow::bail!("all usage queries failed");
     }
 
-    // Build candidates with pool-level signals and score with adaptive algorithm
+    let safety_7d = config::get().use_cfg.safety_margin_7d;
     let team_priority = config::get().use_cfg.team_priority;
-    let pool_size = fetched.len();
-
-    let mut candidates: Vec<(usage::Candidate, usage::UsageInfo)> = fetched
+    let now = auth::now_unix_secs();
+    let scored = score_profile_candidates(fetched, now, safety_7d, team_priority);
+    let (best_candidate, best_usage, best_score) = scored
         .into_iter()
-        .map(|(alias, u)| {
-            let info = profile::profile_auth_path(&alias)
-                .map(|p| auth::read_account_info(&p))
-                .unwrap_or_default();
-            let last_used = cache::get_last_used(&alias);
-            let mut candidate = usage::Candidate::from_usage(
-                alias,
-                &u,
-                info.is_team(),
-                info.is_free(),
-                last_used,
-                now,
-            );
-            candidate.pool_size = pool_size;
-            candidate.team_priority = team_priority;
-            (candidate, u)
-        })
-        .collect();
+        .next()
+        .context("failed to select best profile")?;
 
-    // Count exhausted accounts for pool-adaptive scoring
-    let pool_exhausted = candidates.iter()
-        .filter(|(c, _)| c.effective_used_5h() >= 100.0)
-        .count();
-    for (c, _) in &mut candidates {
-        c.pool_exhausted = pool_exhausted;
-    }
+    Ok((best_candidate.alias, best_usage, best_score))
+}
 
-    let mut scored: Vec<(usage::Candidate, usage::UsageInfo, f64)> = candidates
-        .into_iter()
-        .map(|(c, u)| {
-            let s = usage::score_unified(&c, safety_7d);
-            (c, u, s)
-        })
-        .collect();
-
-    // Deterministic sort: eligible first, then score desc, then LRU, then alias
-    scored.sort_by(|a, b| {
-        let ea = usage::is_candidate_eligible(&a.0, safety_7d);
-        let eb = usage::is_candidate_eligible(&b.0, safety_7d);
-        eb.cmp(&ea)
-            .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
-            .then(a.0.last_used.cmp(&b.0.last_used))
-            .then(a.0.alias.cmp(&b.0.alias))
-    });
-
-    let (best_candidate, best_usage, best_score) = scored.remove(0);
-    let best_alias = best_candidate.alias;
+async fn best_cmd(json: bool) -> Result<()> {
+    let (best_alias, best_usage, best_score) = select_best_profile(json).await?;
 
     profile::switch_profile(&best_alias)?;
     cache::set_last_used(&best_alias)?;
@@ -755,6 +764,102 @@ async fn best_cmd(json: bool) -> Result<()> {
 
     // Opportunistically refresh tokens about to expire (background, bounded)
     usage::refresh_expiring_tokens().await;
+
+    Ok(())
+}
+
+async fn launch_cmd(alias: Option<&str>, args: Vec<String>, json: bool) -> Result<()> {
+    let target_alias = match alias {
+        Some(alias) => {
+            let profiles = profile::list_profiles()?;
+            if !profiles.iter().any(|profile| profile == alias) {
+                anyhow::bail!("Profile '{}' not found", alias);
+            }
+            alias.to_string()
+        }
+        None => {
+            let (alias, _, _) = select_best_profile(json).await?;
+            alias
+        }
+    };
+
+    match std::process::Command::new("codex")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(_) => {}
+        Err(_) => anyhow::bail!("codex not found in PATH. Install: npm install -g @openai/codex"),
+    }
+
+    let codex_auth = auth::codex_auth_path()?;
+    let backup = codex_auth.with_extension("json.bak");
+    let had_original = codex_auth.exists();
+
+    struct AuthGuard {
+        codex_auth: PathBuf,
+        backup: PathBuf,
+        had_original: bool,
+    }
+
+    impl Drop for AuthGuard {
+        fn drop(&mut self) {
+            if self.had_original {
+                // Use copy + remove instead of rename for cross-platform safety
+                // (rename fails on Windows when the target file already exists)
+                let _ = std::fs::copy(&self.backup, &self.codex_auth);
+                let _ = std::fs::remove_file(&self.backup);
+            } else {
+                let _ = std::fs::remove_file(&self.codex_auth);
+            }
+        }
+    }
+
+    if had_original {
+        std::fs::copy(&codex_auth, &backup)
+            .with_context(|| format!("backing up {}", codex_auth.display()))?;
+    }
+
+    let guard = AuthGuard {
+        codex_auth: codex_auth.clone(),
+        backup: backup.clone(),
+        had_original,
+    };
+
+    profile::stage_profile_auth(&target_alias)?;
+
+    if !json {
+        user_println(&format!("Launching codex with profile '{target_alias}'..."));
+    }
+
+    let status = std::process::Command::new("codex")
+        .args(&args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .context("Failed to start codex")?;
+
+    let exit_code = status.code().unwrap_or(-1);
+
+    drop(guard);
+
+    if json {
+        print_json(&serde_json::json!({
+            "ok": status.success(),
+            "alias": target_alias,
+            "action": "launched",
+            "exit_code": exit_code,
+        }));
+    } else {
+        user_println("codex exited, restored auth to previous state");
+    }
+
+    // Propagate codex exit code
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
 
     Ok(())
 }

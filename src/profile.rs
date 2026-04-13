@@ -519,6 +519,21 @@ pub fn switch_profile(alias: &str) -> Result<()> {
     switch_live_auth(alias)
 }
 
+/// Write a profile's auth.json to the live codex auth path WITHOUT updating
+/// the current-profile marker.  Used by `launch` for temporary switching.
+pub fn stage_profile_auth(alias: &str) -> Result<()> {
+    validate_alias(alias)?;
+    let src = profile_auth_path(alias)?;
+    if !src.exists() {
+        return Err(CsError::NotFound(alias.to_string()).into());
+    }
+    let val = read_auth(&src)?;
+    let _lock = lock_live_auth()?;
+    let dst = codex_auth_path()?;
+    write_auth(&dst, &val)?;
+    Ok(())
+}
+
 pub fn cmd_delete(alias: &str) -> Result<()> {
     validate_alias(alias)?;
     let dir = profiles_dir()?.join(alias);
