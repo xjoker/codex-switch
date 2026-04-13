@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
 };
 
 use super::app::{App, UsageStatus};
@@ -15,15 +15,17 @@ use crate::usage::{UsageInfo, is_available};
 /// (e.g. PowerShell blue, light-mode terminals).
 const BG: Color = Color::Black;
 
+/// Base style: black background, no foreground override.
+/// Every widget should build on top of this to guarantee no terminal-default bleed.
+fn base() -> Style {
+    Style::default().bg(BG)
+}
+
 pub fn render(f: &mut Frame, app: &App) {
     let area = f.area();
 
     // Paint the entire area with a solid background first
-    f.render_widget(Clear, area);
-    f.render_widget(
-        Block::default().style(Style::default().bg(BG)),
-        area,
-    );
+    f.render_widget(Block::default().style(base()), area);
 
     let status_height = status_bar_height(app, area.width);
 
@@ -42,11 +44,11 @@ pub fn render(f: &mut Frame, app: &App) {
 }
 
 fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
-    let hdr = Style::default()
+    let hdr = base()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
     let header = Row::new(vec![
-        Cell::from(" ").style(Style::default().fg(Color::DarkGray)),
+        Cell::from(" ").style(base().fg(Color::DarkGray)),
         Cell::from("Alias").style(hdr),
         Cell::from("Email").style(hdr),
         Cell::from("Plan").style(hdr),
@@ -73,24 +75,24 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 " "
             };
             let marker_style = if is_marked {
-                Style::default()
+                base()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else if entry.is_current {
-                Style::default()
+                base()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
+                base()
             };
 
             let is_selected = view_i == app.selected;
             let row_style = if is_selected {
-                Style::default()
+                base()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                base().fg(Color::Gray)
             };
 
             let email = entry.info.email.as_deref().unwrap_or("--").to_string();
@@ -175,7 +177,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(entry.alias.clone()).style(row_style),
                 Cell::from(email).style(row_style),
                 Cell::from(plan_label).style(plan_style),
-                Cell::from(status_text).style(Style::default().fg(status_color).add_modifier(
+                Cell::from(status_text).style(base().fg(status_color).add_modifier(
                     if is_selected {
                         Modifier::BOLD
                     } else {
@@ -184,8 +186,8 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 )),
                 Cell::from(pct_5h.clone()).style(usage_pct_style(&pct_5h, is_selected)),
                 Cell::from(pct_7d.clone()).style(usage_pct_style(&pct_7d, is_selected)),
-                Cell::from(reset_5h).style(Style::default().fg(reset_5h_color)),
-                Cell::from(reset_7d).style(Style::default().fg(reset_7d_color)),
+                Cell::from(reset_5h).style(base().fg(reset_5h_color)),
+                Cell::from(reset_7d).style(base().fg(reset_7d_color)),
             ])
             .height(1)
         })
@@ -231,14 +233,15 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue)),
+            .border_style(base().fg(Color::Blue))
+            .style(base()),
     )
     .row_highlight_style(
         Style::default()
             .bg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
     )
-    .style(Style::default().bg(BG));
+    .style(base());
 
     f.render_stateful_widget(table, area, &mut table_state);
 }
@@ -261,12 +264,12 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if entry.is_current {
+        .border_style(base().fg(if entry.is_current {
             Color::Green
         } else {
             Color::Blue
         }))
-        .style(Style::default().bg(BG));
+        .style(base());
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -287,41 +290,41 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     let email = entry.info.email.as_deref().unwrap_or("--");
 
     let info_line = Line::from(vec![
-        Span::styled("Email ", Style::default().fg(Color::DarkGray)),
-        Span::styled(email, Style::default().fg(Color::White)),
-        Span::raw("  "),
-        Span::styled("Plan ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Email ", base().fg(Color::DarkGray)),
+        Span::styled(email, base().fg(Color::White)),
+        Span::styled("  ", base()),
+        Span::styled("Plan ", base().fg(Color::DarkGray)),
         Span::styled(
             &plan_label,
             plan_color(entry.info.plan_type.as_deref(), true),
         ),
-        Span::raw("  "),
-        Span::styled("ID ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  ", base()),
+        Span::styled("ID ", base().fg(Color::DarkGray)),
         Span::styled(
             if acct_id.len() > 20 {
                 &acct_id[..20]
             } else {
                 acct_id
             },
-            Style::default().fg(Color::DarkGray),
+            base().fg(Color::DarkGray),
         ),
     ]);
-    f.render_widget(Paragraph::new(info_line), layout[0]);
+    f.render_widget(Paragraph::new(info_line).style(base()), layout[0]);
 
     // Usage area
     match &entry.usage {
         UsageStatus::Idle => {
             let p = Paragraph::new("Press r to refresh usage")
-                .style(Style::default().fg(Color::DarkGray));
+                .style(base().fg(Color::DarkGray));
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Loading => {
-            let p = Paragraph::new("Fetching usage...").style(Style::default().fg(Color::Yellow));
+            let p = Paragraph::new("Fetching usage...").style(base().fg(Color::Yellow));
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Error(e) => {
             let p = Paragraph::new(format!("Error: {}", e.detail))
-                .style(Style::default().fg(Color::Red));
+                .style(base().fg(Color::Red));
             f.render_widget(p, layout[2]);
         }
         UsageStatus::Loaded(u) => {
@@ -371,12 +374,12 @@ fn render_usage_gauges(f: &mut Frame, u: &UsageInfo, area: Rect) {
         } else {
             format!("Credits: ${balance:.2}")
         };
-        let p = Paragraph::new(text).style(Style::default().fg(credits_color(balance, unlimited)));
+        let p = Paragraph::new(text).style(base().fg(credits_color(balance, unlimited)));
         f.render_widget(p, layout[idx]);
     }
 
     if u.primary.is_none() && u.secondary.is_none() && !has_credits {
-        let p = Paragraph::new("No usage data").style(Style::default().fg(Color::DarkGray));
+        let p = Paragraph::new("No usage data").style(base().fg(Color::DarkGray));
         f.render_widget(p, layout[0]);
     }
 }
@@ -387,23 +390,23 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         let line = Line::from(vec![
             Span::styled(
                 " Rename: ",
-                Style::default()
+                base()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 &rs.input,
-                Style::default()
+                base()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("#", Style::default().fg(Color::Gray)),
+            Span::styled("#", base().fg(Color::Gray)),
             Span::styled(
                 "  (Enter confirm / Esc cancel)",
-                Style::default().fg(Color::DarkGray),
+                base().fg(Color::DarkGray),
             ),
         ]);
-        f.render_widget(Paragraph::new(line), area);
+        f.render_widget(Paragraph::new(line).style(base()), area);
         return;
     }
 
@@ -416,9 +419,9 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         };
         let line = Line::from(Span::styled(
             msg,
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            base().fg(Color::Red).add_modifier(Modifier::BOLD),
         ));
-        f.render_widget(Paragraph::new(line), area);
+        f.render_widget(Paragraph::new(line).style(base()), area);
         return;
     }
 
@@ -428,32 +431,32 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         let line = Line::from(vec![
             Span::styled(
                 " /",
-                Style::default()
+                base()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 &s.query,
-                Style::default()
+                base()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("#", Style::default().fg(Color::Gray)),
+            Span::styled("#", base().fg(Color::Gray)),
             Span::styled(
                 "  (Enter accept / Esc clear)",
-                Style::default().fg(Color::DarkGray),
+                base().fg(Color::DarkGray),
             ),
         ]);
-        f.render_widget(Paragraph::new(line), area);
+        f.render_widget(Paragraph::new(line).style(base()), area);
         return;
     }
 
     if let Some(s) = &app.status_msg {
-        let msg = Line::from(Span::styled(s.as_str(), Style::default().fg(Color::Green)));
-        f.render_widget(Paragraph::new(msg), area);
+        let msg = Line::from(Span::styled(s.as_str(), base().fg(Color::Green)));
+        f.render_widget(Paragraph::new(msg).style(base()), area);
     } else {
         let lines = build_help_lines(area.width as usize);
-        f.render_widget(Paragraph::new(lines), area);
+        f.render_widget(Paragraph::new(lines).style(base()), area);
     }
 }
 
@@ -484,9 +487,9 @@ fn render_usage_gauge(
         .saturating_sub(label_text.len())
         .saturating_sub(suffix.len());
 
-    let used_style = Style::default().fg(if over { Color::Yellow } else { Color::Green });
-    let remaining_style = Style::default().fg(remaining_color(remaining_pct));
-    let pace_style = Style::default()
+    let used_style = base().fg(if over { Color::Yellow } else { Color::Green });
+    let remaining_style = base().fg(remaining_color(remaining_pct));
+    let pace_style = base()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
 
@@ -495,7 +498,7 @@ fn render_usage_gauge(
         let reset_area = Rect { y: area.y + 1, height: 1, ..area };
         let reset_text = format!("resets in {reset_str}");
         f.render_widget(
-            Paragraph::new(reset_text).style(Style::default().fg(reset_color(remaining_secs))),
+            Paragraph::new(reset_text).style(base().fg(reset_color(remaining_secs))),
             reset_area,
         );
         return;
@@ -510,7 +513,7 @@ fn render_usage_gauge(
         .round()
         .clamp(0.0, bar_width as f64) as usize;
 
-    let mut spans = vec![Span::styled(label_text.clone(), Style::default().fg(Color::White))];
+    let mut spans = vec![Span::styled(label_text.clone(), base().fg(Color::White))];
 
     if let Some(pp) = pace_pos {
         let before_used = pp.min(used_pos);
@@ -541,9 +544,9 @@ fn render_usage_gauge(
     }
 
     let suffix_color = if over { Color::Yellow } else { Color::DarkGray };
-    spans.push(Span::styled(suffix, Style::default().fg(suffix_color)));
+    spans.push(Span::styled(suffix, base().fg(suffix_color)));
 
-    f.render_widget(Paragraph::new(Line::from(spans)), gauge_area);
+    f.render_widget(Paragraph::new(Line::from(spans)).style(base()), gauge_area);
 
     // Row 2: "started HH:MM" left, "↑ pace" at pace position, "resets in ..." right
     let reset_area = Rect {
@@ -552,7 +555,7 @@ fn render_usage_gauge(
         ..area
     };
     let reset_text = format!("resets in {reset_str}");
-    let reset_style = Style::default().fg(reset_color(remaining_secs));
+    let reset_style = base().fg(reset_color(remaining_secs));
     let started_text = w
         .resets_at
         .map(|ts| format!("started {}", format_local_time(ts - window_secs)))
@@ -574,28 +577,28 @@ fn render_usage_gauge(
             && pace_end + 2 <= reset_start
         {
             Line::from(vec![
-                Span::styled(&started_text, Style::default().fg(Color::DarkGray)),
-                Span::raw(" ".repeat(arrow_offset - started_len)),
-                Span::styled(pace_label, Style::default().fg(Color::DarkGray)),
-                Span::raw(" ".repeat(reset_start - pace_end)),
+                Span::styled(&started_text, base().fg(Color::DarkGray)),
+                Span::styled(" ".repeat(arrow_offset - started_len), base()),
+                Span::styled(pace_label, base().fg(Color::DarkGray)),
+                Span::styled(" ".repeat(reset_start - pace_end), base()),
                 Span::styled(reset_text, reset_style),
             ])
         } else if pace_end + 2 <= reset_start {
             // No room for started, show pace + reset
             Line::from(vec![
-                Span::raw(" ".repeat(arrow_offset)),
-                Span::styled(pace_label, Style::default().fg(Color::DarkGray)),
-                Span::raw(" ".repeat(reset_start - pace_end)),
+                Span::styled(" ".repeat(arrow_offset), base()),
+                Span::styled(pace_label, base().fg(Color::DarkGray)),
+                Span::styled(" ".repeat(reset_start - pace_end), base()),
                 Span::styled(reset_text, reset_style),
             ])
         } else {
             // Tight: started left, reset right
             let mut spans = Vec::new();
             if !started_text.is_empty() && started_len + 2 <= reset_start {
-                spans.push(Span::styled(&started_text, Style::default().fg(Color::DarkGray)));
-                spans.push(Span::raw(" ".repeat(reset_start - started_len)));
+                spans.push(Span::styled(&started_text, base().fg(Color::DarkGray)));
+                spans.push(Span::styled(" ".repeat(reset_start - started_len), base()));
             } else {
-                spans.push(Span::raw(" ".repeat(reset_start)));
+                spans.push(Span::styled(" ".repeat(reset_start), base()));
             }
             spans.push(Span::styled(reset_text, reset_style));
             Line::from(spans)
@@ -604,17 +607,17 @@ fn render_usage_gauge(
         // No pace marker: started left, reset after label offset
         let mut spans = Vec::new();
         if !started_text.is_empty() {
-            spans.push(Span::styled(&started_text, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(&started_text, base().fg(Color::DarkGray)));
             let gap = reset_start.saturating_sub(started_len);
-            spans.push(Span::raw(" ".repeat(gap)));
+            spans.push(Span::styled(" ".repeat(gap), base()));
         } else {
-            spans.push(Span::raw(" ".repeat(label_text.len())));
+            spans.push(Span::styled(" ".repeat(label_text.len()), base()));
         }
         spans.push(Span::styled(reset_text, reset_style));
         Line::from(spans)
     };
 
-    f.render_widget(Paragraph::new(row2), reset_area);
+    f.render_widget(Paragraph::new(row2).style(base()), reset_area);
 }
 
 // ── Style helpers ─────────────────────────────────────────
@@ -637,7 +640,7 @@ fn plan_color(plan: Option<&str>, is_selected: bool) -> Style {
         Some("team") => Color::Magenta,
         _ => Color::DarkGray,
     };
-    let s = Style::default().fg(fg);
+    let s = base().fg(fg);
     if is_selected {
         s.add_modifier(Modifier::BOLD)
     } else {
@@ -672,7 +675,7 @@ fn usage_pct_style(remaining_pct_str: &str, is_selected: bool) -> Style {
         Ok(n) => remaining_color(n),
         Err(_) => Color::DarkGray,
     };
-    let s = Style::default().fg(fg);
+    let s = base().fg(fg);
     if is_selected {
         s.add_modifier(Modifier::BOLD)
     } else {
@@ -695,29 +698,30 @@ const HELP_ITEMS: &[(&str, &str)] = &[
 ];
 
 fn build_help_lines(width: usize) -> Vec<Line<'static>> {
-    let key_style = Style::default().fg(Color::Yellow);
-    let dim_style = Style::default().fg(Color::DarkGray);
+    let key_style = base().fg(Color::Yellow);
+    let dim_style = base().fg(Color::DarkGray);
+    let space_style = base();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(" ", space_style)];
     let mut used = 1usize;
 
     for (k, label) in HELP_ITEMS {
         let item_len = k.len() + label.len();
         if used + item_len > width && used > 1 {
             lines.push(Line::from(spans));
-            spans = vec![Span::raw(" ")];
+            spans = vec![Span::styled(" ", space_style)];
             used = 1;
         }
         let style = if *k == "jk" { dim_style } else { key_style };
         spans.push(Span::styled(*k, style));
-        spans.push(Span::raw(*label));
+        spans.push(Span::styled(*label, space_style));
         used += item_len;
     }
     if spans.len() > 1 {
         lines.push(Line::from(spans));
     }
     if lines.is_empty() {
-        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled("", space_style)));
     }
     lines
 }
