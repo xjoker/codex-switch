@@ -151,12 +151,12 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                     DIM,
                 ),
                 UsageStatus::Loaded(u) => {
-                    let over_5h = u.primary.as_ref().map_or(false, |w| {
+                    let over_5h = u.primary.as_ref().is_some_and(|w| {
                         let used = w.used_percent.unwrap_or(0.0);
                         crate::usage::visible_pace_percent(w, crate::usage::WINDOW_5H_SECS)
                             .is_some_and(|pace| used > pace)
                     });
-                    let over_7d = u.secondary.as_ref().map_or(false, |w| {
+                    let over_7d = u.secondary.as_ref().is_some_and(|w| {
                         let used = w.used_percent.unwrap_or(0.0);
                         crate::usage::visible_pace_percent(w, crate::usage::WINDOW_7D_SECS)
                             .is_some_and(|pace| used > pace)
@@ -539,9 +539,7 @@ fn render_usage_gauge(
 
     let used_color = if used >= 90.0 {
         C_RED
-    } else if over {
-        C_YELLOW
-    } else if used >= 70.0 {
+    } else if over || used >= 70.0 {
         C_YELLOW
     } else {
         C_GREEN
