@@ -488,11 +488,15 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let version = crate::update::current_version();
     let ver_spans: Vec<Span> = if let Some(latest) = &app.update_available {
         vec![
-            Span::styled(format!("v{version} "), base().fg(DIM)),
-            Span::styled(format!("-> v{latest} "), base().fg(C_YELLOW)),
+            Span::styled(" \u{2502} ", base().fg(DIM)),
+            Span::styled(format!("v{version}"), base().fg(DIM)),
+            Span::styled(format!(" -> v{latest} "), base().fg(C_YELLOW)),
         ]
     } else {
-        vec![Span::styled(format!("v{version} "), base().fg(DIM))]
+        vec![
+            Span::styled(" \u{2502} ", base().fg(DIM)),
+            Span::styled(format!("v{version} "), base().fg(DIM)),
+        ]
     };
     let ver_width: usize = ver_spans.iter().map(|s| s.width()).sum();
     if (area.width as usize) > ver_width {
