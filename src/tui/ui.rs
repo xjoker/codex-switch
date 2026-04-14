@@ -237,20 +237,6 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
     }
     title.push_str(&format!(" sort:{} ", app.sort_mode.as_str()));
 
-    // Right-aligned version indicator
-    let version = crate::update::current_version();
-    let version_title: Line = if let Some(latest) = &app.update_available {
-        Line::from(vec![
-            Span::styled(format!("v{version} "), base().fg(DIM)),
-            Span::styled(
-                format!("new: v{latest} "),
-                base().fg(C_YELLOW),
-            ),
-        ])
-    } else {
-        Line::from(Span::styled(format!("v{version} "), base().fg(DIM)))
-    };
-
     let mut table_state = TableState::default().with_selected(app.selected);
 
     let table = Table::new(
@@ -271,7 +257,6 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
     .block(
         Block::default()
             .title(title)
-            .title_bottom(version_title.alignment(ratatui::layout::Alignment::Right))
             .borders(Borders::ALL)
             .border_style(base().fg(C_BLUE))
             .style(base()),
@@ -497,6 +482,27 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     } else {
         let lines = build_help_lines(area.width as usize);
         f.render_widget(Paragraph::new(lines).style(base()), area);
+    }
+
+    // Version indicator — always rendered at bottom-right corner
+    let version = crate::update::current_version();
+    let ver_spans: Vec<Span> = if let Some(latest) = &app.update_available {
+        vec![
+            Span::styled(format!("v{version} "), base().fg(DIM)),
+            Span::styled(format!("-> v{latest} "), base().fg(C_YELLOW)),
+        ]
+    } else {
+        vec![Span::styled(format!("v{version} "), base().fg(DIM))]
+    };
+    let ver_width: usize = ver_spans.iter().map(|s| s.width()).sum();
+    if (area.width as usize) > ver_width {
+        let ver_area = Rect {
+            x: area.x + area.width - ver_width as u16,
+            y: area.y + area.height.saturating_sub(1),
+            width: ver_width as u16,
+            height: 1,
+        };
+        f.render_widget(Paragraph::new(Line::from(ver_spans)).style(base()), ver_area);
     }
 }
 

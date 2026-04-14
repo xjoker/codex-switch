@@ -789,8 +789,14 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         app.update_rx = Some(rx);
+        let is_dev = crate::update::current_version().contains("-dev");
         tokio::spawn(async move {
-            if let Ok(Some(info)) = crate::update::check_for_update(false).await {
+            let result = if is_dev {
+                crate::update::check_for_dev_update().await
+            } else {
+                crate::update::check_for_update(false).await
+            };
+            if let Ok(Some(info)) = result {
                 let _ = tx.send(info.latest_version);
             }
         });
