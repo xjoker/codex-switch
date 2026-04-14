@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.0.14 — 2026-04-14
+
+### Added
+
+- **`launch` subcommand** — `codex-switch launch [alias] [-- args...]` starts Codex CLI with a specific profile's auth, transparently forwarding all arguments. Omit alias to auto-select the best account using the adaptive scoring algorithm. Auth is swapped only for the few seconds codex needs to read it, then immediately restored — other commands are not blocked during the session
+- **Over-pace warning indicator** — TUI table 5h/7d columns and CLI `list` output now show a red `!` suffix (e.g., `91%!`) when actual usage exceeds the expected pace, making it easy to spot accounts being consumed too fast
+- **TUI version display** — Current version shown at bottom-right of the status bar; background update check (non-blocking, silent on failure) shows yellow `-> vX.Y.Z` hint when a new version is available
+- **TUI gauge color severity** — Usage gauge bars now change color based on consumption: green (<70%), yellow (70-89% or over-pace), red (>=90%)
+
+### Changed
+
+- **Full RGB color palette** — TUI now uses explicit RGB color values instead of ANSI 16-color codes, fixing rendering inconsistencies between Windows cmd.exe, PowerShell, and Unix terminals. All elements (text, borders, backgrounds, gauges) use a unified palette
+- **Forced dark background** — TUI renders a consistent dark background (`Rgb(24,24,24)`) regardless of terminal theme, fixing unreadable output on PowerShell blue and other non-dark terminals
+- **Default log level changed to `error`** — Non-debug CLI and daemon modes no longer emit INFO/WARN tracing output to stderr, preventing log pollution in TUI and CLI output. Use `--debug` or `RUST_LOG=` to opt in
+- **Daemon default log level** — `[daemon] log_level` default changed from `"info"` to `"error"` in config
+
+### Fixed
+
+- **Auth guard safety** — `launch` backup restoration only removes the `.json.bak` file after confirming the restore copy succeeded. Previously, a failed restore would still delete the backup, potentially losing credentials
+- **Launch auth locking** — `launch` now holds `auth.lock` for the entire child process lifetime, preventing concurrent `launch`/`use`/`login` from corrupting `auth.json` or overwriting the backup
+- **Unix signal exit code** — `launch` now propagates child exit codes using the `128+signal` convention instead of returning `-1` when the child is killed by a signal
+- **TUI update check channel** — Dev builds now check the dev release channel instead of stable, preventing false "update available" notifications when already on the latest dev build
+- **TUI poll_update cleanup** — Oneshot channel is now cleared when the sender drops (check failed or no update), stopping unnecessary polling every 100ms
+- **`rand` security fix** — Bumped `rand` from 0.10.0 to 0.10.1 (fixes unsound behavior with custom loggers)
+
 ## v0.0.13 — 2026-04-11
 
 ### Added

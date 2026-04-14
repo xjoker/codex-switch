@@ -30,8 +30,10 @@
 - **配速标记** — 用量条上显示基于窗口已过时间的预期消耗位置，直观判断用量快慢
 - **预热** — `warmup` 发送最小请求以启动配额窗口倒计时，已激活的账号自动跳过
 - **手动自更新** — `self-update --check` 按需检查 GitHub Releases，`self-update` 更新直装版本（支持 stable 和 dev 双渠道）
+- **启动 Codex** — `launch` 使用指定（或最佳）账号的认证启动 Codex CLI，透传所有参数。认证仅在启动时短暂替换，codex 读取后立即还原，不阻塞其他操作
+- **超速预警** — 当用量超过预期配速时，5h/7d 列显示红色 `!` 标记
 - **代理支持** — HTTP/HTTPS/SOCKS4/SOCKS5/SOCKS5H，支持鉴权
-- **跨平台** — macOS、Linux、Windows
+- **跨平台** — macOS、Linux、Windows（全 RGB 调色板确保 TUI 渲染一致）
 - **JSON 输出** — `--json` 参数支持脚本化和自动化
 
 ## 安装
@@ -132,13 +134,16 @@ codex-switch use
 # 6. 启动交互式 TUI
 codex-switch tui
 
-# 7. 启动后台守护进程（Beta，可选）
+# 7. 用最佳账号启动 Codex
+codex-switch launch
+
+# 8. 用指定账号启动 Codex
+codex-switch launch alice -- --model gpt-4o
+
+# 9. 启动后台守护进程（Beta，可选）
 codex-switch daemon start
 
-# 8. 检查守护进程状态
-codex-switch daemon status
-
-# 9. 手动检查新版本
+# 10. 手动检查新版本
 codex-switch self-update --check
 ```
 
@@ -148,6 +153,7 @@ codex-switch self-update --check
 |------|------|
 | `codex-switch use [别名] [--force]` | 切换账号。不带别名则用自适应评分算法自动选择最优账号。`--force` 跳过运行中 Codex 进程的警告 |
 | `codex-switch list [-f]` | 显示所有账号信息、用量和可用状态（`-f` 强制刷新，忽略缓存） |
+| `codex-switch launch [别名] [-- 参数...]` | 用指定账号的认证启动 Codex CLI。不带别名则自适应评分自动选择。`--` 后的参数透传给 codex |
 | `codex-switch warmup [别名]` | 发送最小请求以触发 5h/7d 配额窗口倒计时。不带别名则预热所有账号 |
 | `codex-switch login [--device] [别名]` | OAuth 登录（`--device` 用于无浏览器的服务器）。若别名已存在则重新授权 |
 | `codex-switch rename <旧别名> <新别名>` | 重命名账号 |
@@ -250,7 +256,10 @@ poll_interval_secs = 60         # 用量轮询间隔（秒，默认：60）
 switch_threshold = 80           # 触发切换的 5h 用量百分比（默认：80）
 token_check_interval_secs = 300 # Token 刷新检查间隔（秒，默认：300）
 notify = false                  # 切换时桌面通知（默认：false）
-log_level = "info"              # 守护进程日志级别（默认："info"）
+log_level = "error"             # 守护进程日志级别（默认："error"）
+
+[launch]
+restore_delay_secs = 3          # codex 启动后多少秒还原 auth.json（默认：3）
 ```
 
 ### 示例

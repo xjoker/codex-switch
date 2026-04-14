@@ -18,6 +18,8 @@ pub struct AppConfig {
     pub use_cfg: UseConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub launch: LaunchConfig,
 }
 
 impl AppConfig {
@@ -104,6 +106,23 @@ impl Default for DaemonConfig {
             token_check_interval_secs: 300,
             notify: false,
             log_level: "error".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LaunchConfig {
+    /// Seconds to wait after starting codex before restoring auth.json (default: 3).
+    /// Codex CLI reads auth.json only at startup; this delay ensures it finishes reading
+    /// before the original auth is restored.
+    pub restore_delay_secs: u64,
+}
+
+impl Default for LaunchConfig {
+    fn default() -> Self {
+        Self {
+            restore_delay_secs: 3,
         }
     }
 }

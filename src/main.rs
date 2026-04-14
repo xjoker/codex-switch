@@ -22,7 +22,6 @@ use output::{
     MessageMode, ProgressReporter, account_to_json, print_error, print_json,
     usage_to_json, user_println,
 };
-use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -797,54 +796,52 @@ async fn launch_cmd(alias: Option<&str>, args: Vec<String>, json: bool) -> Resul
     let backup = codex_auth.with_extension("json.bak");
     let had_original = codex_auth.exists();
 
-    struct AuthGuard {
-        codex_auth: PathBuf,
-        backup: PathBuf,
-        had_original: bool,
-    }
+    // Swap auth.json → start codex → wait for it to read auth → restore.
+    // Codex CLI reads auth.json only at startup, so we only need to hold
+    // the swapped state for a few seconds, not the entire session.
+    {
+        let _lock = profile::lock_live_auth().context("acquiring auth lock")?;
 
-    impl Drop for AuthGuard {
-        fn drop(&mut self) {
-            if self.had_original {
-                // Only remove backup after successful restore
-                if std::fs::copy(&self.backup, &self.codex_auth).is_ok() {
-                    let _ = std::fs::remove_file(&self.backup);
-                }
-                // If copy fails, backup is preserved for manual recovery
-            } else {
-                let _ = std::fs::remove_file(&self.codex_auth);
-            }
+        if had_original {
+            std::fs::copy(&codex_auth, &backup)
+                .with_context(|| format!("backing up {}", codex_auth.display()))?;
         }
+
+        profile::stage_profile_auth(&target_alias)?;
     }
-
-    // Hold auth lock for the entire launch lifetime to prevent concurrent
-    // launch/use/login from corrupting auth.json or overwriting our backup.
-    let _lock = profile::lock_live_auth().context("acquiring auth lock")?;
-
-    if had_original {
-        std::fs::copy(&codex_auth, &backup)
-            .with_context(|| format!("backing up {}", codex_auth.display()))?;
-    }
-
-    let guard = AuthGuard {
-        codex_auth: codex_auth.clone(),
-        backup: backup.clone(),
-        had_original,
-    };
-
-    profile::stage_profile_auth(&target_alias)?;
+    // Lock released here — other commands can proceed while codex runs.
 
     if !json {
         user_println(&format!("Launching codex with profile '{target_alias}'..."));
     }
 
-    let status = std::process::Command::new("codex")
+    let mut child = std::process::Command::new("codex")
         .args(&args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
-        .status()
+        .spawn()
         .context("Failed to start codex")?;
+
+    // Give codex time to read auth.json, then restore immediately.
+    // Configurable via [launch] restore_delay_secs (default: 7).
+    let delay = config::get().launch.restore_delay_secs;
+    std::thread::sleep(std::time::Duration::from_secs(delay));
+
+    {
+        let _lock = profile::lock_live_auth().context("acquiring auth lock for restore")?;
+        if had_original {
+            if std::fs::copy(&backup, &codex_auth).is_ok() {
+                let _ = std::fs::remove_file(&backup);
+            }
+            // If copy fails, backup is preserved for manual recovery
+        } else {
+            let _ = std::fs::remove_file(&codex_auth);
+        }
+    }
+
+    // Wait for codex to exit
+    let status = child.wait().context("waiting for codex")?;
 
     // Compute exit code: prefer code(), fall back to 128+signal on Unix
     let exit_code = status.code().unwrap_or_else(|| {
@@ -859,8 +856,6 @@ async fn launch_cmd(alias: Option<&str>, args: Vec<String>, json: bool) -> Resul
         }
     });
 
-    drop(guard);
-
     if json {
         print_json(&serde_json::json!({
             "ok": status.success(),
@@ -869,7 +864,7 @@ async fn launch_cmd(alias: Option<&str>, args: Vec<String>, json: bool) -> Resul
             "exit_code": exit_code,
         }));
     } else {
-        user_println("codex exited, restored auth to previous state");
+        user_println("codex exited");
     }
 
     // Propagate codex exit code

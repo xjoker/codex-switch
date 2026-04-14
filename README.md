@@ -30,8 +30,10 @@
 - **Pace Marker** — Visual indicator on usage bars showing expected consumption based on elapsed window time
 - **Warmup** — `warmup` sends a minimal request to activate the quota window countdown, skipping already-active accounts
 - **Manual Self-Update** — `self-update --check` checks GitHub Releases on demand; `self-update` installs the latest release (supports stable and dev channels)
+- **Launch with Profile** — `launch` starts Codex CLI with a specific (or best) profile's auth, transparently forwarding all arguments. Auth is swapped only during startup, then immediately restored
+- **Over-Pace Warning** — Red `!` indicator on 5h/7d columns when usage exceeds expected pace
 - **Proxy Support** — HTTP/HTTPS/SOCKS4/SOCKS5/SOCKS5H with authentication
-- **Cross-Platform** — macOS, Linux, Windows
+- **Cross-Platform** — macOS, Linux, Windows (full RGB color palette for consistent TUI rendering)
 - **JSON Output** — `--json` flag for scripting and automation
 
 ## Installation
@@ -133,13 +135,16 @@ codex-switch use
 # 6. Launch interactive TUI
 codex-switch tui
 
-# 7. Start the background daemon (Beta, optional)
+# 7. Launch Codex with the best available account
+codex-switch launch
+
+# 8. Launch Codex with a specific account
+codex-switch launch alice -- --model gpt-4o
+
+# 9. Start the background daemon (Beta, optional)
 codex-switch daemon start
 
-# 8. Check daemon status
-codex-switch daemon status
-
-# 9. Check for a new release manually
+# 10. Check for a new release manually
 codex-switch self-update --check
 ```
 
@@ -149,6 +154,7 @@ codex-switch self-update --check
 |---------|-------------|
 | `codex-switch use [alias] [--force]` | Switch to a profile. Omit alias to auto-select with the adaptive scoring algorithm. `--force` skips the running-process warning |
 | `codex-switch list [-f]` | List all profiles with account info, usage, and availability (`-f` force refresh) |
+| `codex-switch launch [alias] [-- args...]` | Launch Codex CLI with a profile's auth. Omit alias to auto-select with adaptive scoring. All arguments after `--` are forwarded to codex |
 | `codex-switch warmup [alias]` | Send a minimal request to start the 5h/7d quota window countdown. Omit alias to warm up all profiles |
 | `codex-switch login [--device] [alias]` | Log in via OAuth (`--device` for headless servers). If alias exists, re-authorizes |
 | `codex-switch rename <old> <new>` | Rename a profile |
@@ -251,7 +257,10 @@ poll_interval_secs = 60         # Usage poll interval (default: 60)
 switch_threshold = 80           # Switch when current 5h usage >= this % (default: 80)
 token_check_interval_secs = 300 # Background token refresh check interval (default: 300)
 notify = false                  # Desktop notification on switch (default: false)
-log_level = "info"              # Daemon log level (default: "info")
+log_level = "error"             # Daemon log level (default: "error")
+
+[launch]
+restore_delay_secs = 3          # Seconds to wait before restoring auth.json after codex starts (default: 3)
 ```
 
 ### Examples
