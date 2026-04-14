@@ -537,7 +537,16 @@ fn render_usage_gauge(
         .saturating_sub(label_text.len())
         .saturating_sub(suffix.len());
 
-    let used_style = base().fg(if over { C_YELLOW } else { C_GREEN });
+    let used_color = if used >= 90.0 {
+        C_RED
+    } else if over {
+        C_YELLOW
+    } else if used >= 70.0 {
+        C_YELLOW
+    } else {
+        C_GREEN
+    };
+    let used_style = base().fg(used_color);
     let remaining_style = base().fg(remaining_color(remaining_pct));
     let pace_style = base()
         .fg(C_WHITE)
