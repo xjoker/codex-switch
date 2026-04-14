@@ -87,6 +87,8 @@ pub struct App {
     pub confirm: Option<ConfirmAction>,
     pub rename: Option<RenameState>,
     pub usage_limiter: Arc<Semaphore>,
+    pub update_available: Option<String>,
+    pub update_rx: Option<tokio::sync::oneshot::Receiver<String>>,
 }
 
 impl App {
@@ -112,6 +114,8 @@ impl App {
             confirm: None,
             rename: None,
             usage_limiter: Arc::new(Semaphore::new(crate::config::get().network.max_concurrent)),
+            update_available: None,
+            update_rx: None,
         }
     }
 
@@ -350,6 +354,15 @@ impl App {
                 .map_err(|e| e.to_string());
             let _ = tx.send((task_id, alias, result)).await;
         });
+    }
+
+    pub fn poll_update(&mut self) {
+        if let Some(rx) = &mut self.update_rx {
+            if let Ok(version) = rx.try_recv() {
+                self.update_available = Some(version);
+                self.update_rx = None;
+            }
+        }
     }
 
     pub fn poll_warmup_results(&mut self) {
@@ -772,9 +785,21 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
 
     app.refresh(false);
 
+    // Background version check — fire and forget
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.update_rx = Some(rx);
+        tokio::spawn(async move {
+            if let Ok(Some(info)) = crate::update::check_for_update(false).await {
+                let _ = tx.send(info.latest_version);
+            }
+        });
+    }
+
     loop {
         app.poll_results();
         app.poll_warmup_results();
+        app.poll_update();
         app.tick();
 
         terminal

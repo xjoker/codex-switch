@@ -151,17 +151,33 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                     DIM,
                 ),
                 UsageStatus::Loaded(u) => {
+                    let over_5h = u.primary.as_ref().map_or(false, |w| {
+                        let used = w.used_percent.unwrap_or(0.0);
+                        crate::usage::visible_pace_percent(w, crate::usage::WINDOW_5H_SECS)
+                            .is_some_and(|pace| used > pace)
+                    });
+                    let over_7d = u.secondary.as_ref().map_or(false, |w| {
+                        let used = w.used_percent.unwrap_or(0.0);
+                        crate::usage::visible_pace_percent(w, crate::usage::WINDOW_7D_SECS)
+                            .is_some_and(|pace| used > pace)
+                    });
                     let p5 = u
                         .primary
                         .as_ref()
                         .and_then(|w| w.used_percent)
-                        .map(|p| format!("{:.0}%", (100.0 - p).max(0.0)))
+                        .map(|p| {
+                            let s = format!("{:.0}%", (100.0 - p).max(0.0));
+                            if over_5h { format!("{s}!") } else { s }
+                        })
                         .unwrap_or_else(|| "--".into());
                     let p7 = u
                         .secondary
                         .as_ref()
                         .and_then(|w| w.used_percent)
-                        .map(|p| format!("{:.0}%", (100.0 - p).max(0.0)))
+                        .map(|p| {
+                            let s = format!("{:.0}%", (100.0 - p).max(0.0));
+                            if over_7d { format!("{s}!") } else { s }
+                        })
                         .unwrap_or_else(|| "--".into());
                     let r5_ts = u.primary.as_ref().and_then(|w| w.resets_at);
                     let r5 = r5_ts.map(format_reset_short).unwrap_or_else(|| "--".into());
@@ -221,6 +237,20 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
     }
     title.push_str(&format!(" sort:{} ", app.sort_mode.as_str()));
 
+    // Right-aligned version indicator
+    let version = crate::update::current_version();
+    let version_title: Line = if let Some(latest) = &app.update_available {
+        Line::from(vec![
+            Span::styled(format!("v{version} "), base().fg(DIM)),
+            Span::styled(
+                format!("new: v{latest} "),
+                base().fg(C_YELLOW),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(format!("v{version} "), base().fg(DIM)))
+    };
+
     let mut table_state = TableState::default().with_selected(app.selected);
 
     let table = Table::new(
@@ -241,6 +271,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
     .block(
         Block::default()
             .title(title)
+            .title_bottom(version_title.alignment(ratatui::layout::Alignment::Right))
             .borders(Borders::ALL)
             .border_style(base().fg(C_BLUE))
             .style(base()),
@@ -680,9 +711,15 @@ fn credits_color(balance: f64, unlimited: bool) -> Color {
 }
 
 fn usage_pct_style(remaining_pct_str: &str, is_selected: bool) -> Style {
-    let fg = match remaining_pct_str.trim_end_matches('%').parse::<f64>() {
-        Ok(n) => remaining_color(n),
-        Err(_) => DIM,
+    let over_pace = remaining_pct_str.ends_with('!');
+    let clean = remaining_pct_str.trim_end_matches('!');
+    let fg = if over_pace {
+        C_RED
+    } else {
+        match clean.trim_end_matches('%').parse::<f64>() {
+            Ok(n) => remaining_color(n),
+            Err(_) => DIM,
+        }
     };
     let s = base().fg(fg);
     if is_selected {
