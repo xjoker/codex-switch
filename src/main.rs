@@ -806,15 +806,20 @@ async fn launch_cmd(alias: Option<&str>, args: Vec<String>, json: bool) -> Resul
     impl Drop for AuthGuard {
         fn drop(&mut self) {
             if self.had_original {
-                // Use copy + remove instead of rename for cross-platform safety
-                // (rename fails on Windows when the target file already exists)
-                let _ = std::fs::copy(&self.backup, &self.codex_auth);
-                let _ = std::fs::remove_file(&self.backup);
+                // Only remove backup after successful restore
+                if std::fs::copy(&self.backup, &self.codex_auth).is_ok() {
+                    let _ = std::fs::remove_file(&self.backup);
+                }
+                // If copy fails, backup is preserved for manual recovery
             } else {
                 let _ = std::fs::remove_file(&self.codex_auth);
             }
         }
     }
+
+    // Hold auth lock for the entire launch lifetime to prevent concurrent
+    // launch/use/login from corrupting auth.json or overwriting our backup.
+    let _lock = profile::lock_live_auth().context("acquiring auth lock")?;
 
     if had_original {
         std::fs::copy(&codex_auth, &backup)
@@ -841,7 +846,18 @@ async fn launch_cmd(alias: Option<&str>, args: Vec<String>, json: bool) -> Resul
         .status()
         .context("Failed to start codex")?;
 
-    let exit_code = status.code().unwrap_or(-1);
+    // Compute exit code: prefer code(), fall back to 128+signal on Unix
+    let exit_code = status.code().unwrap_or_else(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal().map(|s| 128 + s).unwrap_or(1)
+        }
+        #[cfg(not(unix))]
+        {
+            1
+        }
+    });
 
     drop(guard);
 

@@ -358,9 +358,18 @@ impl App {
 
     pub fn poll_update(&mut self) {
         if let Some(rx) = &mut self.update_rx {
-            if let Ok(version) = rx.try_recv() {
-                self.update_available = Some(version);
-                self.update_rx = None;
+            match rx.try_recv() {
+                Ok(version) => {
+                    self.update_available = Some(version);
+                    self.update_rx = None;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    // Sender dropped without sending (no update or check failed)
+                    self.update_rx = None;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    // Still waiting, keep polling
+                }
             }
         }
     }

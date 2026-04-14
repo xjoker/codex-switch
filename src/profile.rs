@@ -84,7 +84,7 @@ fn auth_lock_path() -> Result<PathBuf> {
     Ok(app_home()?.join("auth.lock"))
 }
 
-fn lock_live_auth() -> Result<std::fs::File> {
+pub fn lock_live_auth() -> Result<std::fs::File> {
     let path = auth_lock_path()?;
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
@@ -521,6 +521,7 @@ pub fn switch_profile(alias: &str) -> Result<()> {
 
 /// Write a profile's auth.json to the live codex auth path WITHOUT updating
 /// the current-profile marker.  Used by `launch` for temporary switching.
+/// Caller MUST hold the lock from `lock_live_auth()`.
 pub fn stage_profile_auth(alias: &str) -> Result<()> {
     validate_alias(alias)?;
     let src = profile_auth_path(alias)?;
@@ -528,7 +529,6 @@ pub fn stage_profile_auth(alias: &str) -> Result<()> {
         return Err(CsError::NotFound(alias.to_string()).into());
     }
     let val = read_auth(&src)?;
-    let _lock = lock_live_auth()?;
     let dst = codex_auth_path()?;
     write_auth(&dst, &val)?;
     Ok(())
