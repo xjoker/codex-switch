@@ -1272,12 +1272,15 @@ fn print_usage_line(u: &usage::UsageInfo) {
         let pct = w.used_percent.unwrap_or(0.0);
         let remaining_pct = (100.0 - pct).max(0.0);
         let pace = usage::visible_pace_percent(w, usage::WINDOW_5H_SECS);
+        let over = pace.is_some_and(|p| pct > p);
         let bar = render_progress_bar(pct, pace, bar_width);
         let reset = format_reset_short_relative(w);
+        let warn = if over { color::error("!") } else { String::new() };
         println!(
-            "  5h  {}  {}   {}",
+            "  5h  {}  {}{}   {}",
             color::usage_pct(&bar, pct),
             color::usage_pct(&format!("{remaining_pct:>3.0}% left"), pct),
+            warn,
             color::dim(&reset),
         );
     }
@@ -1285,12 +1288,15 @@ fn print_usage_line(u: &usage::UsageInfo) {
         let pct = w.used_percent.unwrap_or(0.0);
         let remaining_pct = (100.0 - pct).max(0.0);
         let pace = usage::visible_pace_percent(w, usage::WINDOW_7D_SECS);
+        let over = pace.is_some_and(|p| pct > p);
         let bar = render_progress_bar(pct, pace, bar_width);
         let reset = format_reset_short_relative(w);
+        let warn = if over { color::error("!") } else { String::new() };
         println!(
-            "  7d  {}  {}   {}",
+            "  7d  {}  {}{}   {}",
             color::usage_pct(&bar, pct),
             color::usage_pct(&format!("{remaining_pct:>3.0}% left"), pct),
+            warn,
             color::dim(&reset),
         );
     }
