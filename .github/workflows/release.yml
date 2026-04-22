@@ -200,7 +200,7 @@ jobs:
 
       - name: Create GitHub Release (dev)
         if: needs.meta.outputs.is_dev == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: dev
           name: "dev (${{ needs.meta.outputs.version }})"
@@ -213,7 +213,7 @@ jobs:
 
       - name: Create GitHub Release (stable)
         if: needs.meta.outputs.is_dev != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.meta.outputs.version }}
           name: v${{ needs.meta.outputs.version }}
