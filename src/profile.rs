@@ -141,6 +141,31 @@ pub fn find_matching_profile(auth_path: &Path) -> Option<String> {
     })
 }
 
+pub fn active_profile_from_live() -> Option<String> {
+    let src = codex_auth_path().ok()?;
+    if !src.exists() {
+        return None;
+    }
+
+    if let Some(alias) = find_matching_profile(&src) {
+        return Some(alias);
+    }
+
+    let val = read_auth(&src).ok()?;
+    let identity = extract_identity(&val);
+    find_profile_by_identity_exact(&identity)
+}
+
+pub fn sync_current_from_live() -> Option<String> {
+    let alias = active_profile_from_live()?;
+    if read_current() != alias
+        && let Err(e) = write_current(&alias)
+    {
+        tracing::debug!("sync_current_from_live: could not sync current pointer: {e}");
+    }
+    Some(alias)
+}
+
 // ── Deduplication ─────────────────────────────────────────
 
 #[derive(Debug)]
@@ -864,6 +889,28 @@ mod tests {
             Some("acc_new")
         );
         assert_eq!(super::read_current(), "next-profile");
+    }
+
+    #[test]
+    fn sync_current_from_live_matches_live_identity() {
+        let _env = TestEnv::new();
+
+        let alpha = realistic_auth_json("alpha@example.com", "acct_alpha", "acc_a", "ref_a");
+        let alpha_path = super::profile_auth_path("alpha").unwrap();
+        super::ensure_profile_parent(&alpha_path).unwrap();
+        crate::auth::write_auth(&alpha_path, &alpha).unwrap();
+
+        let beta = realistic_auth_json("beta@example.com", "acct_beta", "acc_b_old", "ref_b_old");
+        let beta_path = super::profile_auth_path("beta").unwrap();
+        super::ensure_profile_parent(&beta_path).unwrap();
+        crate::auth::write_auth(&beta_path, &beta).unwrap();
+
+        super::write_current("alpha").unwrap();
+        let live = realistic_auth_json("beta@example.com", "acct_beta", "acc_b_new", "ref_b_new");
+        crate::auth::write_auth(&crate::auth::codex_auth_path().unwrap(), &live).unwrap();
+
+        assert_eq!(super::sync_current_from_live().as_deref(), Some("beta"));
+        assert_eq!(super::read_current(), "beta");
     }
 
     // ── detect_auth_change tests ─────────────────────────────

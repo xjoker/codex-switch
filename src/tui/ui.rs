@@ -235,6 +235,9 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
     if !app.marked.is_empty() {
         title.push_str(&format!(" [{} marked]", app.marked.len()));
     }
+    if let Some(secs) = app.auto_refresh_remaining_secs() {
+        title.push_str(&format!(" auto:{}", format_auto_refresh_remaining(secs)));
+    }
     title.push_str(&format!(" sort:{} ", app.sort_mode.as_str()));
 
     let mut table_state = TableState::default().with_selected(app.selected);
@@ -751,6 +754,7 @@ const HELP_ITEMS: &[(&str, &str)] = &[
     ("Enter", " switch "),
     ("/", " search "),
     ("r", " refresh "),
+    ("a", " auto "),
     ("s", " sort "),
     ("Space", " mark "),
     ("w", " warmup "),
@@ -787,6 +791,22 @@ fn build_help_lines(width: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled("", space_style)));
     }
     lines
+}
+
+fn format_auto_refresh_remaining(secs: u64) -> String {
+    if secs == 0 {
+        return "now".to_string();
+    }
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let mins = secs / 60;
+    let rem = secs % 60;
+    if rem == 0 {
+        format!("{mins}m")
+    } else {
+        format!("{mins}m{rem}s")
+    }
 }
 
 fn status_bar_height(app: &App, width: u16) -> usize {

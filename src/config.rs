@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub proxy: ProxyConfig,
     pub cache: CacheConfig,
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub tui: TuiConfig,
     #[serde(rename = "use")]
     pub use_cfg: UseConfig,
     #[serde(default)]
@@ -27,6 +29,13 @@ impl AppConfig {
         if self.network.max_concurrent == 0 {
             tracing::warn!("config.network.max_concurrent=0 is invalid; using 1 instead");
             self.network.max_concurrent = 1;
+        }
+        if self.tui.auto_refresh_interval_secs < 30 {
+            tracing::warn!(
+                "config.tui.auto_refresh_interval_secs={} is invalid; using 30 instead",
+                self.tui.auto_refresh_interval_secs
+            );
+            self.tui.auto_refresh_interval_secs = 30;
         }
         self
     }
@@ -62,6 +71,21 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self { max_concurrent: 20 }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TuiConfig {
+    /// TUI auto-refresh interval in seconds (default: 120, minimum: 30)
+    pub auto_refresh_interval_secs: u64,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            auto_refresh_interval_secs: 120,
+        }
     }
 }
 

@@ -11,8 +11,8 @@ use crate::auth;
 use crate::cache;
 use crate::jwt::AccountInfo;
 use crate::profile::{
-    cmd_delete, list_profiles, profile_auth_path, read_current, rename_profile, switch_profile,
-    validate_alias,
+    cmd_delete, list_profiles, profile_auth_path, read_current, rename_profile,
+    sync_current_from_live, switch_profile, validate_alias,
 };
 use crate::usage::{UsageError, UsageInfo, fetch_usage_retried, fetch_usage_retried_force};
 
@@ -89,12 +89,16 @@ pub struct App {
     pub usage_limiter: Arc<Semaphore>,
     pub update_available: Option<String>,
     pub update_rx: Option<tokio::sync::oneshot::Receiver<String>>,
+    pub auto_refresh_enabled: bool,
+    pub auto_refresh_interval: Duration,
+    pub next_auto_refresh: Option<Instant>,
 }
 
 impl App {
     pub fn new() -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let (warmup_tx, warmup_rx) = tokio::sync::mpsc::channel(64);
+        let cfg = crate::config::get();
         App {
             accounts: vec![],
             selected: 0,
@@ -113,9 +117,12 @@ impl App {
             warmup_next_id: 0,
             confirm: None,
             rename: None,
-            usage_limiter: Arc::new(Semaphore::new(crate::config::get().network.max_concurrent)),
+            usage_limiter: Arc::new(Semaphore::new(cfg.network.max_concurrent)),
             update_available: None,
             update_rx: None,
+            auto_refresh_enabled: false,
+            auto_refresh_interval: Duration::from_secs(cfg.tui.auto_refresh_interval_secs),
+            next_auto_refresh: None,
         }
     }
 
@@ -124,7 +131,7 @@ impl App {
             tracing::warn!("failed to load profiles: {e}");
             Vec::new()
         });
-        let current = read_current();
+        let current = sync_current_from_live().unwrap_or_else(read_current);
         self.accounts = profiles
             .into_iter()
             .filter_map(|alias| {
@@ -148,6 +155,22 @@ impl App {
         self.view_indices.clear();
         self.update_view();
         if let Some(account_idx) = self.accounts.iter().position(|a| a.is_current)
+            && let Some(view_idx) = self.view_indices.iter().position(|&idx| idx == account_idx)
+        {
+            self.selected = view_idx;
+        }
+    }
+
+    pub fn load_profiles_preserving_selection(&mut self) {
+        let selected_alias = self
+            .selected_account_idx()
+            .and_then(|idx| self.accounts.get(idx))
+            .map(|entry| entry.alias.clone());
+
+        self.load_profiles();
+
+        if let Some(alias) = selected_alias
+            && let Some(account_idx) = self.accounts.iter().position(|a| a.alias == alias)
             && let Some(view_idx) = self.view_indices.iter().position(|&idx| idx == account_idx)
         {
             self.selected = view_idx;
@@ -286,40 +309,54 @@ impl App {
             })
     }
 
-    /// Warmup: marked accounts if any are marked, otherwise all.
-    /// Skips already-active and errored accounts.
-    pub fn warmup(&mut self) {
-        let candidates: Vec<&AccountEntry> = if self.marked.is_empty() {
-            self.accounts.iter().collect()
-        } else {
-            self.accounts
-                .iter()
-                .filter(|a| self.marked.contains(&a.alias))
-                .collect()
-        };
+    fn is_warmup_in_flight(&self, alias: &str) -> bool {
+        self.warmup_tasks.values().any(|(a, _)| a == alias)
+    }
 
-        let aliases: Vec<String> = candidates
+    fn warmup_indices(&mut self, target_indices: Vec<usize>) -> (usize, usize, usize) {
+        let candidate_count = target_indices.len();
+        let aliases: Vec<String> = target_indices
             .iter()
+            .filter_map(|&idx| self.accounts.get(idx))
             .filter(|a| {
-                !matches!(a.usage, UsageStatus::Error(_)) && !self.is_already_warmed(&a.alias)
+                !matches!(a.usage, UsageStatus::Error(_))
+                    && !self.is_already_warmed(&a.alias)
+                    && !self.is_warmup_in_flight(&a.alias)
             })
             .map(|a| a.alias.clone())
             .collect();
-        let skipped = candidates.len() - aliases.len();
+        let skipped = candidate_count.saturating_sub(aliases.len());
 
-        if aliases.is_empty() {
-            self.set_status(
-                format!(
-                    "All {} accounts already active or skipped",
-                    candidates.len()
-                ),
-                4,
-            );
-            return;
-        }
         let count = aliases.len();
         for alias in aliases {
             self.spawn_warmup(alias);
+        }
+
+        (count, candidate_count, skipped)
+    }
+
+    /// Warmup: marked accounts if any are marked, otherwise all.
+    /// Skips already-active, in-flight, and errored accounts.
+    pub fn warmup(&mut self) {
+        let target_indices: Vec<usize> = if self.marked.is_empty() {
+            (0..self.accounts.len()).collect()
+        } else {
+            self.accounts
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| self.marked.contains(&a.alias))
+                .map(|(idx, _)| idx)
+                .collect()
+        };
+
+        let (count, candidates, skipped) = self.warmup_indices(target_indices);
+
+        if count == 0 {
+            self.set_status(
+                format!("All {candidates} accounts already active or skipped"),
+                4,
+            );
+            return;
         }
         let mut msg = format!("Warming up {count} account(s)...");
         if skipped > 0 {
@@ -328,9 +365,15 @@ impl App {
         self.set_status(msg, 10);
     }
 
+    pub fn warmup_all(&mut self) -> usize {
+        let target_indices: Vec<usize> = (0..self.accounts.len()).collect();
+        let (count, _, _) = self.warmup_indices(target_indices);
+        count
+    }
+
     fn spawn_warmup(&mut self, alias: String) {
         // Skip if this alias already has an in-flight warmup task.
-        if self.warmup_tasks.values().any(|(a, _)| *a == alias) {
+        if self.is_warmup_in_flight(&alias) {
             return;
         }
         let task_id = self.warmup_next_id;
@@ -372,6 +415,26 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn start_update_check(&mut self) {
+        if self.update_rx.is_some() || self.update_available.is_some() {
+            return;
+        }
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.update_rx = Some(rx);
+        let is_dev = crate::update::current_version().contains("-dev");
+        tokio::spawn(async move {
+            let result = if is_dev {
+                crate::update::check_for_dev_update().await
+            } else {
+                crate::update::check_for_update(false).await
+            };
+            if let Ok(Some(info)) = result {
+                let _ = tx.send(info.latest_version);
+            }
+        });
     }
 
     pub fn poll_warmup_results(&mut self) {
@@ -460,6 +523,24 @@ impl App {
         });
     }
 
+    fn refresh_indices(&mut self, target_indices: &[usize], force: bool) {
+        for &i in target_indices {
+            let entry = &mut self.accounts[i];
+            match &entry.usage {
+                UsageStatus::Error(_) => entry.usage = UsageStatus::Idle,
+                UsageStatus::Loaded(_) if force => entry.usage = UsageStatus::Idle,
+                _ => {}
+            }
+            if !force && let Some(cached) = crate::cache::get(&entry.alias) {
+                entry.usage = UsageStatus::Loaded(cached);
+            }
+        }
+        for &i in target_indices {
+            self.fetch_usage_for(i, force);
+        }
+        self.update_view();
+    }
+
     /// Refresh usage: marked accounts only if any are marked, otherwise all.
     pub fn refresh(&mut self, force: bool) {
         let target_indices: Vec<usize> = if self.marked.is_empty() {
@@ -473,25 +554,16 @@ impl App {
                 .collect()
         };
 
-        for &i in &target_indices {
-            let entry = &mut self.accounts[i];
-            match &entry.usage {
-                UsageStatus::Error(_) => entry.usage = UsageStatus::Idle,
-                UsageStatus::Loaded(_) if force => entry.usage = UsageStatus::Idle,
-                _ => {}
-            }
-            if !force && let Some(cached) = crate::cache::get(&entry.alias) {
-                entry.usage = UsageStatus::Loaded(cached);
-            }
-        }
-        for &i in &target_indices {
-            self.fetch_usage_for(i, force);
-        }
-        self.update_view();
         let count = target_indices.len();
+        self.refresh_indices(&target_indices, force);
         if !self.marked.is_empty() {
             self.set_status(format!("Refreshing {count} marked account(s)..."), 3);
         }
+    }
+
+    pub fn refresh_all(&mut self, force: bool) {
+        let target_indices: Vec<usize> = (0..self.accounts.len()).collect();
+        self.refresh_indices(&target_indices, force);
     }
 
     pub fn poll_results(&mut self) {
@@ -748,6 +820,66 @@ impl App {
         self.status_expiry = Some(Instant::now() + Duration::from_secs(secs));
     }
 
+    pub fn auto_refresh_interval_secs(&self) -> u64 {
+        self.auto_refresh_interval.as_secs()
+    }
+
+    pub fn auto_refresh_remaining_secs(&self) -> Option<u64> {
+        if !self.auto_refresh_enabled {
+            return None;
+        }
+        Some(
+            self.next_auto_refresh
+                .map(|next| next.saturating_duration_since(Instant::now()).as_secs())
+                .unwrap_or(0),
+        )
+    }
+
+    pub fn toggle_auto_refresh(&mut self) {
+        self.auto_refresh_enabled = !self.auto_refresh_enabled;
+        if self.auto_refresh_enabled {
+            self.next_auto_refresh = Some(Instant::now());
+            self.set_status(
+                format!(
+                    "Auto refresh on (every {}s)",
+                    self.auto_refresh_interval_secs()
+                ),
+                4,
+            );
+        } else {
+            self.next_auto_refresh = None;
+            self.set_status("Auto refresh off".to_string(), 3);
+        }
+    }
+
+    pub fn run_due_auto_refresh(&mut self) {
+        if !self.auto_refresh_enabled {
+            return;
+        }
+
+        let now = Instant::now();
+        if self.next_auto_refresh.is_some_and(|next| now < next) {
+            return;
+        }
+
+        if self.loading_count() > 0 || !self.warmup_tasks.is_empty() {
+            self.next_auto_refresh = Some(now + Duration::from_secs(5));
+            return;
+        }
+
+        self.load_profiles_preserving_selection();
+        let account_count = self.accounts.len();
+        let warmup_count = self.warmup_all();
+        self.refresh_all(true);
+        self.next_auto_refresh = Some(now + self.auto_refresh_interval);
+
+        let mut msg = format!("Auto refresh: refreshing {account_count} account(s)");
+        if warmup_count > 0 {
+            msg.push_str(&format!(", warming {warmup_count}"));
+        }
+        self.set_status(msg, 4);
+    }
+
     pub fn tick(&mut self) {
         if let Some(expiry) = self.status_expiry
             && Instant::now() >= expiry
@@ -793,29 +925,14 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
     }
 
     app.refresh(false);
-
-    // Background version check — fire and forget
-    {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        app.update_rx = Some(rx);
-        let is_dev = crate::update::current_version().contains("-dev");
-        tokio::spawn(async move {
-            let result = if is_dev {
-                crate::update::check_for_dev_update().await
-            } else {
-                crate::update::check_for_update(false).await
-            };
-            if let Ok(Some(info)) = result {
-                let _ = tx.send(info.latest_version);
-            }
-        });
-    }
+    app.start_update_check();
 
     loop {
         app.poll_results();
         app.poll_warmup_results();
         app.poll_update();
         app.tick();
+        app.run_due_auto_refresh();
 
         terminal
             .draw(|f| super::ui::render(f, &app))
@@ -866,6 +983,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
                 KeyCode::Enter => app.switch_selected(),
                 KeyCode::Char('r') => app.refresh(true),
+                KeyCode::Char('a') => app.toggle_auto_refresh(),
                 KeyCode::Char('d') => app.request_delete(),
                 KeyCode::Char('n') => app.start_rename(),
                 KeyCode::Char('s') => app.cycle_sort(),

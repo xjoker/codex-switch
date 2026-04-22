@@ -188,6 +188,7 @@ codex-switch self-update --check
 | `Enter` | Switch to selected account |
 | `/` | Search / filter accounts |
 | `r` | Refresh usage data (marked accounts, or all if none marked) |
+| `a` | Toggle auto-refresh for all accounts (usage, active profile detection, warmup checks) |
 | `s` | Cycle sort mode (name / quota / status) |
 | `Space` | Mark / unmark account for batch operations |
 | `w` | Warm up accounts (marked accounts, or all if none marked) |
@@ -198,7 +199,7 @@ codex-switch self-update --check
 
 ## Updating
 
-Update checks are manual only. `codex-switch` does not check for updates automatically during startup, `list`, `use`, or TUI launch.
+Update checks are manual except for TUI launch. `codex-switch tui` checks once at startup; `startup`, `list`, and `use` do not check automatically.
 
 ```bash
 # Check whether a newer release exists
@@ -247,6 +248,9 @@ ttl = 300  # Cache TTL in seconds (default: 300)
 
 [network]
 max_concurrent = 20  # Max concurrent usage requests (default: 20)
+
+[tui]
+auto_refresh_interval_secs = 120  # Auto-refresh interval in seconds (default: 120, minimum: 30)
 
 [use]
 safety_margin_7d = 20       # Weekly safety margin used by adaptive scoring (default: 20)

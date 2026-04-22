@@ -187,6 +187,7 @@ codex-switch self-update --check
 | `Enter` | 切换到选中账号 |
 | `/` | 搜索/过滤账号 |
 | `r` | 刷新用量数据（已标记账号，无标记时刷新全部） |
+| `a` | 开关全账号自动刷新（用量、当前激活配置检测、预热检查） |
 | `s` | 切换排序（名称/配额/状态） |
 | `Space` | 标记/取消标记账号 |
 | `w` | 预热账号（已标记账号，无标记时预热全部） |
@@ -197,7 +198,7 @@ codex-switch self-update --check
 
 ## 更新方式
 
-更新检查完全手动触发。`codex-switch` 不会在启动、`list`、`use` 或 TUI 打开时自动检查更新。
+除 TUI 启动外，更新检查都需要手动触发。`codex-switch tui` 启动时检查一次；普通启动、`list` 和 `use` 不会自动检查更新。
 
 ```bash
 # 检查是否有新版本
@@ -246,6 +247,9 @@ ttl = 300  # 缓存有效期（秒，默认 300）
 
 [network]
 max_concurrent = 20  # 最大并发请求数（默认 20）
+
+[tui]
+auto_refresh_interval_secs = 120  # 自动刷新间隔（秒，默认：120，最小：30）
 
 [use]
 safety_margin_7d = 20       # 7d 安全线：低于此剩余百分比开始惩罚（默认：20）
