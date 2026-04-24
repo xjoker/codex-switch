@@ -1,14 +1,121 @@
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, bail};
 use tracing::{debug, warn};
 
-/// Codex responses endpoint (ChatGPT auth mode).
 const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
+const FALLBACK_MODEL: &str = "gpt-5.3-codex";
 
-/// Model used for the warmup request.
-/// Update if OpenAI renames the model (check `openai/codex` source for current slug).
-pub const WARMUP_MODEL: &str = "gpt-5.2-codex";
+static CODEX_VERSION: OnceLock<String> = OnceLock::new();
+static MODEL_CACHE: Mutex<Option<String>> = Mutex::new(None);
+
+fn detect_codex_version() -> &'static str {
+    CODEX_VERSION.get_or_init(|| {
+        std::process::Command::new("codex")
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.split_whitespace().last().map(|v| v.trim().to_string()))
+            .unwrap_or_else(|| "0.1.0".to_string())
+    })
+}
+
+async fn fetch_warmup_model(client: &reqwest::Client, access_token: &str) -> Result<String> {
+    let version = detect_codex_version();
+    let resp = client
+        .get(MODELS_URL)
+        .query(&[("client_version", version)])
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| crate::auth::format_reqwest_error("models fetch failed", &e))?;
+
+    if !resp.status().is_success() {
+        bail!("models endpoint returned {}", resp.status());
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+    let models = body["models"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("no models array in response"))?;
+
+    let visible: Vec<&serde_json::Value> = models
+        .iter()
+        .filter(|m| m["visibility"].as_str() != Some("hide"))
+        .collect();
+
+    if visible.is_empty() {
+        bail!("no visible models available");
+    }
+
+    // Prefer mini (lightest), fall back to highest priority (lowest number)
+    let selected = visible
+        .iter()
+        .find(|m| m["slug"].as_str().is_some_and(|s| s.contains("mini")))
+        .or_else(|| {
+            visible
+                .iter()
+                .min_by_key(|m| m["priority"].as_i64().unwrap_or(i64::MAX))
+        })
+        .and_then(|m| m["slug"].as_str())
+        .unwrap_or(FALLBACK_MODEL);
+
+    debug!("warmup: model selected from API: {selected}");
+    Ok(selected.to_string())
+}
+
+async fn resolve_model(client: &reqwest::Client, access_token: &str) -> String {
+    if let Some(model) = MODEL_CACHE.lock().unwrap().clone() {
+        return model;
+    }
+    match fetch_warmup_model(client, access_token).await {
+        Ok(model) => {
+            *MODEL_CACHE.lock().unwrap() = Some(model.clone());
+            model
+        }
+        Err(e) => {
+            warn!("failed to fetch warmup model list, using fallback: {e}");
+            FALLBACK_MODEL.to_string()
+        }
+    }
+}
+
+fn build_body(model: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "instructions": "You are a helpful assistant.",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "ping"}]
+        }],
+        "tools": [],
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "stream": true,
+        "store": false,
+        "include": []
+    })
+}
+
+fn make_request(
+    client: &reqwest::Client,
+    access_token: &str,
+    account_id: &Option<String>,
+    body: &serde_json::Value,
+) -> reqwest::RequestBuilder {
+    let mut builder = client
+        .post(RESPONSES_URL)
+        .bearer_auth(access_token)
+        .header("Content-Type", "application/json");
+    if let Some(acct_id) = account_id {
+        builder = builder.header("ChatGPT-Account-Id", acct_id);
+    }
+    builder.json(body)
+}
 
 /// Send a minimal completion request to trigger the quota window countdown for a profile.
 ///
@@ -45,7 +152,6 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                 ) {
                     warn!("[{alias}] failed to persist refreshed tokens: {e}");
                 }
-                // Sync live auth.json if this is the current profile
                 if crate::profile::read_current() == alias
                     && let Ok(live) = crate::auth::codex_auth_path()
                     && let Err(e) = crate::auth::update_tokens(
@@ -64,36 +170,12 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
         }
     }
 
-    // Minimal valid Responses API body — 1-token input, streaming enabled.
-    let body = serde_json::json!({
-        "model": WARMUP_MODEL,
-        "instructions": "You are a helpful assistant.",
-        "input": [{
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": "ping"}]
-        }],
-        "tools": [],
-        "tool_choice": "auto",
-        "parallel_tool_calls": false,
-        "stream": true,
-        "store": false,
-        "include": []
-    });
+    let model = resolve_model(&client, &access_token).await;
+    let body = build_body(&model);
 
-    let mut builder = client
-        .post(RESPONSES_URL)
-        .bearer_auth(&access_token)
-        .header("Content-Type", "application/json");
+    debug!("[{alias}] warmup POST → {RESPONSES_URL} (model={model})");
 
-    if let Some(ref acct_id) = account_id {
-        builder = builder.header("ChatGPT-Account-Id", acct_id);
-    }
-
-    debug!("[{alias}] warmup POST → {RESPONSES_URL}");
-
-    let mut resp = builder
-        .json(&body)
+    let mut resp = make_request(&client, &access_token, &account_id, &body)
         .send()
         .await
         .map_err(|e| crate::auth::format_reqwest_error("warmup request failed", &e))?;
@@ -107,6 +189,33 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
             // Read one chunk to confirm streaming started, then drop.
             let _ = resp.chunk().await;
             Ok(())
+        }
+        400 => {
+            let text = resp.text().await.unwrap_or_default();
+            if text.contains("not supported") {
+                // Model deprecated — clear cache, fetch fresh model list, retry once
+                debug!(
+                    "[{alias}] model {model:?} not supported, refreshing model cache and retrying"
+                );
+                *MODEL_CACHE.lock().unwrap() = None;
+                let new_model = resolve_model(&client, &access_token).await;
+                let retry_body = build_body(&new_model);
+                let mut retry_resp =
+                    make_request(&client, &access_token, &account_id, &retry_body)
+                        .send()
+                        .await
+                        .map_err(|e| crate::auth::format_reqwest_error("warmup retry failed", &e))?;
+                let retry_status = retry_resp.status();
+                if retry_status.is_success() {
+                    let _ = retry_resp.chunk().await;
+                    return Ok(());
+                }
+                let retry_text = retry_resp.text().await.unwrap_or_default();
+                let snippet: String = retry_text.chars().take(160).collect();
+                bail!("{alias}: HTTP {retry_status} after model refresh — {snippet}")
+            }
+            let snippet: String = text.chars().take(160).collect();
+            bail!("{alias}: HTTP 400 — {snippet}")
         }
         401 | 403 => {
             // Retry once with refreshed token
@@ -133,17 +242,13 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                         {
                             warn!("[{alias}] failed to persist refreshed tokens to live auth: {e}");
                         }
-                        let mut retry_builder = client
-                            .post(RESPONSES_URL)
-                            .bearer_auth(&refreshed.access_token)
-                            .header("Content-Type", "application/json");
-                        if let Some(ref acct_id) = account_id {
-                            retry_builder = retry_builder.header("ChatGPT-Account-Id", acct_id);
-                        }
                         let mut retry_resp =
-                            retry_builder.json(&body).send().await.map_err(|e| {
-                                crate::auth::format_reqwest_error("warmup retry failed", &e)
-                            })?;
+                            make_request(&client, &refreshed.access_token, &account_id, &body)
+                                .send()
+                                .await
+                                .map_err(|e| {
+                                    crate::auth::format_reqwest_error("warmup retry failed", &e)
+                                })?;
                         let retry_status = retry_resp.status();
                         if retry_status.is_success() {
                             let _ = retry_resp.chunk().await;
