@@ -1353,12 +1353,13 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
     let now = auth::now_unix_secs();
     let mut to_warmup = Vec::new();
     for alias in &aliases {
-        let already_active = cache::get(alias)
-            .and_then(|u| u.primary)
-            .is_some_and(|w| {
-                w.resets_at.is_some_and(|t| t > now)
-                    && w.used_percent.is_some_and(|p| p > 0.0)
-            });
+        let already_active = cache::is_warmed(alias)
+            || cache::get(alias)
+                .and_then(|u| u.primary)
+                .is_some_and(|w| {
+                    w.resets_at.is_some_and(|t| t > now)
+                        && w.used_percent.is_some_and(|p| p > 0.0)
+                });
         if already_active {
             if json {
                 results.push(serde_json::json!({"alias": alias, "ok": true, "skipped": true}));
@@ -1414,6 +1415,7 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
         let (alias, result) = res.context("warmup task panicked")?;
         match &result {
             Ok(()) => {
+                cache::set_warmed(&alias);
                 if json {
                     results.push(serde_json::json!({"alias": alias, "ok": true}));
                 } else {

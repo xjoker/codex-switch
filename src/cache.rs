@@ -30,6 +30,9 @@ struct CacheFile {
     /// Tracks the last time each profile was selected by `use` (unix seconds).
     #[serde(default)]
     last_used: HashMap<String, i64>,
+    /// Tracks the last successful warmup time per profile (unix seconds).
+    #[serde(default)]
+    warmed_at: HashMap<String, i64>,
 }
 
 fn cache_path() -> Result<PathBuf> {
@@ -172,6 +175,39 @@ pub fn set_last_used(alias: &str) -> Result<()> {
         .insert(alias.to_string(), crate::auth::now_unix_secs());
     save_cache(&cache).context("writing last_used cache")?;
     Ok(())
+}
+
+const WARMUP_TTL_SECS: i64 = 3600;
+
+/// Record that an alias was just successfully warmed up.
+pub fn set_warmed(alias: &str) {
+    let _lock = match CACHE_LOCK.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            tracing::warn!("cache lock poisoned in set_warmed()");
+            return;
+        }
+    };
+    let mut cache = load_cache();
+    cache
+        .warmed_at
+        .insert(alias.to_string(), crate::auth::now_unix_secs());
+    if let Err(err) = save_cache(&cache) {
+        tracing::warn!("Failed to write warmup cache: {err}");
+    }
+}
+
+/// Returns true if this alias was successfully warmed up within the last hour.
+pub fn is_warmed(alias: &str) -> bool {
+    let _lock = match CACHE_LOCK.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    let cache = load_cache();
+    cache
+        .warmed_at
+        .get(alias)
+        .is_some_and(|&t| crate::auth::now_unix_secs() - t < WARMUP_TTL_SECS)
 }
 
 pub fn rename(old: &str, new: &str) -> Result<()> {
