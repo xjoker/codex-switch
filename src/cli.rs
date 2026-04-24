@@ -74,9 +74,6 @@ pub enum Commands {
     Use {
         /// Profile alias (omit to auto-select)
         alias: Option<String>,
-        /// Force switch even if Codex processes are running
-        #[arg(long)]
-        force: bool,
     },
     /// List all profiles with account info, usage, and availability
     List {

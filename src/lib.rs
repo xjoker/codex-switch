@@ -12,7 +12,6 @@ mod error;
 pub mod jwt;
 mod login;
 mod output;
-mod process;
 pub mod profile;
 mod tui;
 mod update;

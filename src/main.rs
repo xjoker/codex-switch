@@ -8,7 +8,6 @@ mod error;
 mod jwt;
 mod login;
 mod output;
-mod process;
 mod profile;
 mod tui;
 mod update;
@@ -92,7 +91,7 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
     let auth_handled = !matches!(auth_check, AuthCheckResult::NoChange);
 
     match cmd {
-        Commands::Use { alias, force } => use_cmd(alias.as_deref(), force, json).await?,
+        Commands::Use { alias } => use_cmd(alias.as_deref(), json).await?,
         Commands::List { force } => list_cmd(force, json, auth_handled).await?,
         Commands::Rename { old, new } => rename_cmd(&old, &new, json)?,
         Commands::Delete { alias } => delete_cmd(&alias, json)?,
@@ -233,29 +232,7 @@ fn confirm(prompt: &str) -> bool {
 
 // ── use ──────────────────────────────────────────────────
 
-async fn use_cmd(alias: Option<&str>, force: bool, json: bool) -> Result<()> {
-    if !force {
-        let procs = process::detect_codex_processes();
-        if !procs.is_empty() {
-            for proc in &procs {
-                tracing::debug!(
-                    pid = proc.pid,
-                    name = %proc.name,
-                    "Blocking switch because Codex process is running"
-                );
-            }
-            let pids: Vec<String> = procs.iter().map(|p| p.pid.to_string()).collect();
-            user_println(&format!(
-                "Warning: {} codex process(es) detected (PID: {})",
-                procs.len(),
-                pids.join(", ")
-            ));
-            user_println("Switching accounts while Codex is running may cause issues.");
-            user_println("Use --force to switch anyway, or stop Codex first.");
-            anyhow::bail!("Codex process(es) running, use --force to override");
-        }
-    }
-
+async fn use_cmd(alias: Option<&str>, json: bool) -> Result<()> {
     match alias {
         Some(a) => {
             profile::cmd_use(a)?;
