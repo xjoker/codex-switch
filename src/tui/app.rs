@@ -291,6 +291,9 @@ impl App {
     /// on every call even for unused accounts, so `resets_at > now` alone is
     /// not sufficient — it would always be true after a usage fetch.
     fn is_already_warmed(&self, alias: &str) -> bool {
+        if crate::cache::is_warmed(alias) {
+            return true;
+        }
         let now = crate::auth::now_unix_secs();
         let loaded = self.accounts.iter().any(|a| {
             a.alias == alias
@@ -447,6 +450,7 @@ impl App {
             }
             match result {
                 Ok(()) => {
+                    crate::cache::set_warmed(&alias);
                     self.set_status(format!("Warmed up {alias} — refreshing usage..."), 4);
                     to_refresh.insert(alias);
                 }
