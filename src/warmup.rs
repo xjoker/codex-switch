@@ -1,7 +1,8 @@
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
@@ -9,7 +10,8 @@ const MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 const FALLBACK_MODEL: &str = "gpt-5.3-codex";
 
 static CODEX_VERSION: OnceLock<String> = OnceLock::new();
-static MODEL_CACHE: Mutex<Option<String>> = Mutex::new(None);
+// tokio Mutex held across the await in resolve_model, ensuring only one fetch per process.
+static MODEL_CACHE: Mutex<Option<String>> = Mutex::const_new(None);
 
 fn detect_codex_version() -> &'static str {
     CODEX_VERSION.get_or_init(|| {
@@ -68,12 +70,15 @@ async fn fetch_warmup_model(client: &reqwest::Client, access_token: &str) -> Res
 }
 
 async fn resolve_model(client: &reqwest::Client, access_token: &str) -> String {
-    if let Some(model) = MODEL_CACHE.lock().unwrap().clone() {
-        return model;
+    let mut guard = MODEL_CACHE.lock().await;
+    if let Some(ref model) = *guard {
+        return model.clone();
     }
+    // Hold the lock across the fetch so concurrent callers wait here instead of
+    // each issuing a redundant request.
     match fetch_warmup_model(client, access_token).await {
         Ok(model) => {
-            *MODEL_CACHE.lock().unwrap() = Some(model.clone());
+            *guard = Some(model.clone());
             model
         }
         Err(e) => {
@@ -197,7 +202,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                 debug!(
                     "[{alias}] model {model:?} not supported, refreshing model cache and retrying"
                 );
-                *MODEL_CACHE.lock().unwrap() = None;
+                *MODEL_CACHE.lock().await = None;
                 let new_model = resolve_model(&client, &access_token).await;
                 let retry_body = build_body(&new_model);
                 let mut retry_resp =
