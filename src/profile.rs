@@ -1,6 +1,7 @@
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -84,23 +85,119 @@ fn auth_lock_path() -> Result<PathBuf> {
     Ok(app_home()?.join("auth.lock"))
 }
 
-pub fn lock_live_auth() -> Result<std::fs::File> {
+/// Maximum time to wait for the auth lock before treating the holder as stale
+/// and forcibly taking over by recreating the lock file (new inode = new lock).
+/// Normal hold time is < 7s (see `restore_delay_secs`), so 15s is comfortable.
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(15);
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+pub fn lock_live_auth() -> Result<File> {
     let path = auth_lock_path()?;
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
     }
 
-    let file = OpenOptions::new()
+    let file = open_lock_file(&path)?;
+
+    let deadline = Instant::now() + LOCK_STALE_AFTER;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                write_lock_holder(&file);
+                return Ok(file);
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    // Holder didn't release within the stale window.
+                    // Force takeover: unlink the old lock file (parent dir is user-owned,
+                    // so unlink succeeds even if the lock file itself is owned by root).
+                    // Any process still holding the old fd keeps its lock on the now-orphan
+                    // inode, but new acquirers race on the freshly created inode instead.
+                    drop(file);
+                    let prev_holder = read_lock_holder(&path);
+                    std::fs::remove_file(&path).with_context(|| {
+                        format!("removing stale auth lock {}", path.display())
+                    })?;
+                    let new_file = open_lock_file(&path)?;
+                    new_file.lock_exclusive().with_context(|| {
+                        format!("locking recreated auth lock {}", path.display())
+                    })?;
+                    tracing::warn!(
+                        "auth lock at {} held >{}s by {}; took over",
+                        path.display(),
+                        LOCK_STALE_AFTER.as_secs(),
+                        prev_holder.as_deref().unwrap_or("unknown holder"),
+                    );
+                    write_lock_holder(&new_file);
+                    return Ok(new_file);
+                }
+                std::thread::sleep(LOCK_POLL_INTERVAL);
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .with_context(|| format!("locking {}", path.display()));
+            }
+        }
+    }
+}
+
+/// Open the lock file; if the open fails because of a permission/ownership
+/// issue (e.g. a stale file left behind by a previous `sudo` invocation),
+/// unlink it and retry once. Removing the file only needs write+execute on
+/// the parent dir — which is owned by the current user — so this self-heals
+/// without requiring `sudo`.
+fn open_lock_file(path: &Path) -> Result<File> {
+    match try_open_lock_file(path) {
+        Ok(f) => Ok(f),
+        Err(e) if matches!(e.kind(), io::ErrorKind::PermissionDenied) => {
+            std::fs::remove_file(path).with_context(|| {
+                format!(
+                    "auth lock {} not openable (permission denied) and could not be removed; \
+                     check ownership of {} and its parent directory",
+                    path.display(),
+                    path.display(),
+                )
+            })?;
+            tracing::warn!(
+                "auth lock {} was not openable; removed and recreating",
+                path.display()
+            );
+            try_open_lock_file(path)
+                .with_context(|| format!("opening auth lock {} after recovery", path.display()))
+        }
+        Err(e) => Err(anyhow::Error::from(e))
+            .with_context(|| format!("opening auth lock {}", path.display())),
+    }
+}
+
+fn try_open_lock_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(&path)
-        .with_context(|| format!("opening auth lock {}", path.display()))?;
+        .open(path)
+}
 
-    file.lock_exclusive()
-        .with_context(|| format!("locking {}", path.display()))?;
-    Ok(file)
+/// Best-effort: write `pid epoch_secs` to the lock file for diagnostics.
+/// Failure is non-fatal — the OS-level flock is the source of truth.
+fn write_lock_holder(file: &File) {
+    let pid = std::process::id();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("{pid} {ts}\n");
+    let _ = file.set_len(0);
+    let mut f = file;
+    let _ = f.write_all(line.as_bytes());
+}
+
+fn read_lock_holder(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn write_current(alias: &str) -> Result<()> {
