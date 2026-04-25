@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.0.15 — Unreleased (dev)
+
+### Added
+
+- **Skip warmup for accounts warmed within the last hour** — `use` and TUI both check `is_warmed`/`set_warmed` to avoid redundant warmup requests when an account was already warmed recently
+- **Dynamic warmup model selection** — Warmup now resolves the target model via the API per process (cached behind a tokio `Mutex`) instead of using a hardcoded slug, keeping warmup correct as upstream models change
+
+### Changed
+
+- **`use` no longer probes Codex process state** — Removed Codex process detection from the `use` command path; switching auth no longer depends on what Codex is doing
+
+### Fixed
+
+- **`auth.lock` self-heal + 15s stale-takeover** — Opening `~/.codex-switch/auth.lock` now recovers automatically when the file was left owned by `root` from a prior `sudo` invocation (unlinks and recreates without sudo). Acquisition uses `try_lock_exclusive` polling with a 15s deadline; after the deadline the holder is treated as stale and the lock file is unlinked + recreated to take over (orphan inode keeps any old fd's lock harmless). Best-effort `pid epoch_secs` is written to the lock file for diagnostics
+
+### Security
+
+- **`rustls-webpki` 0.103.12 → 0.103.13** — `cargo update` for RUSTSEC-2026-0104
+
 ## v0.0.14 — 2026-04-14
 
 ### Added
