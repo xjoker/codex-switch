@@ -497,6 +497,10 @@ rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
 ```
 
+## Releasing
+
+Maintainer-only. See [docs/RELEASE.md](docs/RELEASE.md) for the full procedure (dev rolling tag, stable tag, refspec gotchas).
+
 ## Changelog
 
 See [docs/CHANGELOG.md](docs/CHANGELOG.md) for a detailed list of changes in each release.

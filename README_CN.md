@@ -496,6 +496,10 @@ rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
 ```
 
+## 发布
+
+仅维护者使用。完整流程见 [docs/RELEASE.md](docs/RELEASE.md)（dev 滚动 tag、stable tag、refspec 踩坑）。
+
 ## 更新日志
 
 每个版本的详细变更记录请参见 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
