@@ -7,6 +7,8 @@ use ratatui::{
 };
 
 use super::app::{App, UsageStatus};
+use super::keymap;
+use super::popup;
 use crate::output::{format_local_time, format_reset_short, format_reset_time};
 use crate::usage::{UsageInfo, is_available};
 
@@ -50,6 +52,58 @@ pub fn render(f: &mut Frame, app: &App) {
     render_account_table(f, app, vertical[0]);
     render_detail_panel(f, app, vertical[1]);
     render_status_bar(f, app, vertical[2]);
+
+    // Overlays (rendered last, on top of everything)
+    if let Some(state) = app.help_popup.as_ref() {
+        render_help_popup(f, state, area);
+    }
+}
+
+fn render_help_popup(f: &mut Frame, state: &popup::PopupState, area: ratatui::layout::Rect) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let key_style = Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(C_WHITE);
+    let heading_style = Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(DIM);
+
+    // Compute key column width for alignment within section
+    let groups = keymap::help_sections();
+    let key_col = groups
+        .iter()
+        .flat_map(|(_, items)| items.iter())
+        .map(|(k, _)| display_width(k))
+        .max()
+        .unwrap_or(8);
+
+    for (i, (heading, items)) in groups.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled((*heading).to_string(), heading_style)));
+        for (k, label) in items {
+            let pad = key_col.saturating_sub(display_width(k));
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled((*k).to_string(), key_style));
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled((*label).to_string(), label_style));
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  esc / q / h to close \u{2022} j k arrows / PgUp PgDn to scroll",
+        dim_style,
+    )));
+
+    popup::render_popup(f, "Help", &lines, state, area);
+}
+
+fn display_width(s: &str) -> usize {
+    s.chars().count()
 }
 
 fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
@@ -749,39 +803,33 @@ fn usage_pct_style(remaining_pct_str: &str, is_selected: bool) -> Style {
     }
 }
 
-const HELP_ITEMS: &[(&str, &str)] = &[
-    ("jk", " nav "),
-    ("Enter", " switch "),
-    ("/", " search "),
-    ("r", " refresh "),
-    ("a", " auto "),
-    ("s", " sort "),
-    ("Space", " mark "),
-    ("w", " warmup "),
-    ("c", " clear "),
-    ("n", " rename "),
-    ("d", " del "),
-    ("q", " quit"),
-];
-
 fn build_help_lines(width: usize) -> Vec<Line<'static>> {
     let key_style = base().fg(C_YELLOW);
-    let dim_style = base().fg(DIM);
+    let sep_style = base().fg(DIM);
+    let label_style = base().fg(C_GRAY);
     let space_style = base();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spans: Vec<Span<'static>> = vec![Span::styled(" ", space_style)];
     let mut used = 1usize;
 
-    for (k, label) in HELP_ITEMS {
-        let item_len = k.len() + label.len();
+    let items = keymap::status_bar_items();
+    for (i, (k, label)) in items.iter().enumerate() {
+        let key_disp = (*k).to_string();
+        let label_short = short_label(label);
+        let sep = " \u{2502} ";
+        let item_len = key_disp.chars().count() + 1 + label_short.chars().count()
+            + if i + 1 < items.len() { sep.chars().count() } else { 0 };
         if used + item_len > width && used > 1 {
             lines.push(Line::from(spans));
             spans = vec![Span::styled(" ", space_style)];
             used = 1;
         }
-        let style = if *k == "jk" { dim_style } else { key_style };
-        spans.push(Span::styled(*k, style));
-        spans.push(Span::styled(*label, space_style));
+        spans.push(Span::styled(key_disp, key_style));
+        spans.push(Span::styled(" ", space_style));
+        spans.push(Span::styled(label_short.to_string(), label_style));
+        if i + 1 < items.len() {
+            spans.push(Span::styled(sep, sep_style));
+        }
         used += item_len;
     }
     if spans.len() > 1 {
@@ -791,6 +839,19 @@ fn build_help_lines(width: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled("", space_style)));
     }
     lines
+}
+
+/// Compress verbose keymap labels for status bar.
+fn short_label(label: &str) -> &str {
+    match label {
+        "move selection" => "nav",
+        "search" => "search",
+        "open menu (account or batch)" => "menu",
+        "refresh visible accounts" => "refresh",
+        "show this help" => "help",
+        "quit" => "quit",
+        other => other,
+    }
 }
 
 fn format_auto_refresh_remaining(secs: u64) -> String {

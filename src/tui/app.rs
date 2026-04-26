@@ -49,6 +49,7 @@ impl SortMode {
     }
 }
 
+#[allow(dead_code)] // Delete is constructed by Phase-2 account menu (Enter > delete)
 pub enum ConfirmAction {
     Delete(String),
 }
@@ -92,6 +93,7 @@ pub struct App {
     pub auto_refresh_enabled: bool,
     pub auto_refresh_interval: Duration,
     pub next_auto_refresh: Option<Instant>,
+    pub help_popup: Option<super::popup::PopupState>,
 }
 
 impl App {
@@ -123,7 +125,16 @@ impl App {
             auto_refresh_enabled: false,
             auto_refresh_interval: Duration::from_secs(cfg.tui.auto_refresh_interval_secs),
             next_auto_refresh: None,
+            help_popup: None,
         }
+    }
+
+    pub fn open_help(&mut self) {
+        self.help_popup = Some(super::popup::PopupState::new());
+    }
+
+    pub fn close_help(&mut self) {
+        self.help_popup = None;
     }
 
     pub fn load_profiles(&mut self) {
@@ -340,6 +351,7 @@ impl App {
 
     /// Warmup: marked accounts if any are marked, otherwise all.
     /// Skips already-active, in-flight, and errored accounts.
+    #[allow(dead_code)] // wired via Phase-2 account/batch menu
     pub fn warmup(&mut self) {
         let target_indices: Vec<usize> = if self.marked.is_empty() {
             (0..self.accounts.len()).collect()
@@ -607,6 +619,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)] // wired via Phase-2 account menu
     pub fn request_delete(&mut self) {
         if let Some(entry) = self
             .selected_account_idx()
@@ -641,6 +654,7 @@ impl App {
         self.confirm = None;
     }
 
+    #[allow(dead_code)] // wired via Phase-2 account menu
     pub fn start_rename(&mut self) {
         if let Some(entry) = self
             .selected_account_idx()
@@ -949,30 +963,47 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 continue;
             }
 
+            // Search and rename inputs need raw case-sensitive keystrokes.
             if app.rename.is_some() {
                 app.handle_rename_key(key.code);
                 continue;
             }
-
-            if app.confirm.is_some() {
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_action(),
-                    _ => app.cancel_confirm(),
-                }
-                continue;
-            }
-
             if app.search_active {
                 app.handle_search_key(key.code);
                 continue;
             }
 
-            match key.code {
+            // Normalize letter case for top-level dispatch:
+            // any uppercase letter is treated as its lowercase equivalent.
+            let code = match key.code {
+                KeyCode::Char(c) if c.is_ascii_uppercase() => {
+                    KeyCode::Char(c.to_ascii_lowercase())
+                }
+                other => other,
+            };
+
+            // Help popup: any key (esc/q/h preferred) closes it; arrows scroll.
+            if app.help_popup.is_some() {
+                handle_help_key(&mut app, code);
+                continue;
+            }
+
+            if app.confirm.is_some() {
+                match code {
+                    KeyCode::Char('y') => app.confirm_action(),
+                    _ => app.cancel_confirm(),
+                }
+                continue;
+            }
+
+            match code {
                 KeyCode::Char('q') => break,
                 KeyCode::Esc => {
                     if app.search.is_some() {
                         app.search = None;
                         app.update_view();
+                    } else if !app.marked.is_empty() {
+                        app.clear_marks();
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -987,12 +1018,9 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
                 KeyCode::Enter => app.switch_selected(),
                 KeyCode::Char('r') => app.refresh(true),
-                KeyCode::Char('a') => app.toggle_auto_refresh(),
-                KeyCode::Char('d') => app.request_delete(),
-                KeyCode::Char('n') => app.start_rename(),
+                KeyCode::Char('t') => app.toggle_auto_refresh(),
                 KeyCode::Char('s') => app.cycle_sort(),
-                KeyCode::Char('c') => app.clear_marks(),
-                KeyCode::Char('w') => app.warmup(),
+                KeyCode::Char('h') => app.open_help(),
                 KeyCode::Char(' ') => app.toggle_mark(),
                 KeyCode::Char('/') => {
                     if let Some(search) = &mut app.search {
@@ -1012,6 +1040,21 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_help_key(app: &mut App, code: KeyCode) {
+    let Some(state) = app.help_popup.as_mut() else {
+        return;
+    };
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') => app.close_help(),
+        KeyCode::Down | KeyCode::Char('j') => state.scroll_down(u16::MAX),
+        KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+        KeyCode::PageDown => state.page_down(5, u16::MAX),
+        KeyCode::PageUp => state.page_up(5),
+        KeyCode::Home => state.reset(),
+        _ => app.close_help(),
+    }
 }
 
 /// Convert a char-based cursor position to a byte offset in a string.
