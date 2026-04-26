@@ -501,6 +501,9 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             super::app::ConfirmAction::Delete(alias) => {
                 format!("Delete profile '{alias}'? (y/n)")
             }
+            super::app::ConfirmAction::BatchDelete(aliases) => {
+                format!("Delete {} marked profile(s)? (y/n)", aliases.len())
+            }
         };
         let line = Line::from(Span::styled(
             msg,
@@ -539,6 +542,21 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     if let Some(s) = &app.status_msg {
         let msg = Line::from(Span::styled(s.as_str(), base().fg(C_GREEN)));
         f.render_widget(Paragraph::new(msg).style(base()), area);
+    } else if !app.marked.is_empty() {
+        let line = Line::from(vec![
+            Span::styled(" ", base()),
+            Span::styled(
+                format!("{}", app.marked.len()),
+                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" selected", base().fg(C_YELLOW)),
+            Span::styled(" \u{2014} ", base().fg(DIM)),
+            Span::styled("enter", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" for batch \u{2502} ", base().fg(DIM)),
+            Span::styled("esc", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" to clear", base().fg(DIM)),
+        ]);
+        f.render_widget(Paragraph::new(line).style(base()), area);
     } else {
         let lines = build_help_lines(area.width as usize);
         f.render_widget(Paragraph::new(lines).style(base()), area);
@@ -874,7 +892,12 @@ fn format_auto_refresh_remaining(secs: u64) -> String {
 }
 
 fn status_bar_height(app: &App, width: u16) -> usize {
-    if app.status_msg.is_some() || app.rename.is_some() || app.confirm.is_some() || app.search_active {
+    if app.status_msg.is_some()
+        || app.rename.is_some()
+        || app.confirm.is_some()
+        || app.search_active
+        || !app.marked.is_empty()
+    {
         return 1;
     }
     build_help_lines(width as usize).len()

@@ -32,6 +32,16 @@ pub enum MenuState {
         email: Option<String>,
         popup: PopupState,
     },
+    /// Batch menu shown when one or more accounts are marked.
+    Batch {
+        count: usize,
+        popup: PopupState,
+    },
+    /// Batch re-login flow chooser (browser vs device code).
+    BatchReloginFlow {
+        count: usize,
+        popup: PopupState,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +64,18 @@ pub enum MenuAction {
     WarmupOne(String),
     /// Request delete confirmation for alias.
     DeleteRequest(String),
+
+    // Batch actions ────────────────────────────
+    /// Force-refresh all marked accounts.
+    BatchRefresh,
+    /// Warmup all marked accounts.
+    BatchWarmup,
+    /// Open OAuth flow chooser for batch re-login.
+    BatchReloginRequest,
+    /// Re-login marked accounts sequentially using `device` flow.
+    BatchRelogin { device: bool },
+    /// Request batch-delete confirmation.
+    BatchDeleteRequest,
 }
 
 impl MenuState {
@@ -75,6 +97,20 @@ impl MenuState {
         MenuState::ReloginFlow {
             alias,
             email,
+            popup: PopupState::new(),
+        }
+    }
+
+    pub fn batch(count: usize) -> Self {
+        MenuState::Batch {
+            count,
+            popup: PopupState::new(),
+        }
+    }
+
+    pub fn batch_relogin_flow(count: usize) -> Self {
+        MenuState::BatchReloginFlow {
+            count,
             popup: PopupState::new(),
         }
     }
@@ -109,6 +145,20 @@ impl MenuState {
                     alias: alias.clone(),
                     device: true,
                 },
+                _ => MenuAction::Close,
+            },
+            MenuState::Batch { .. } => match code {
+                KeyCode::Esc | KeyCode::Char('q') => MenuAction::Close,
+                KeyCode::Char('r') => MenuAction::BatchRefresh,
+                KeyCode::Char('w') => MenuAction::BatchWarmup,
+                KeyCode::Char('l') => MenuAction::BatchReloginRequest,
+                KeyCode::Char('d') => MenuAction::BatchDeleteRequest,
+                _ => MenuAction::Close,
+            },
+            MenuState::BatchReloginFlow { .. } => match code {
+                KeyCode::Esc | KeyCode::Char('q') => MenuAction::Close,
+                KeyCode::Char('b') => MenuAction::BatchRelogin { device: false },
+                KeyCode::Char('d') => MenuAction::BatchRelogin { device: true },
                 _ => MenuAction::Close,
             },
         }
@@ -185,6 +235,42 @@ impl MenuState {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
                 render_popup(f, "re-Login", &lines, popup, area);
+            }
+            MenuState::Batch { count, popup } => {
+                let title = "Batch";
+                let header = format!("{count} account(s) marked");
+                let mut lines: Vec<Line<'static>> = Vec::new();
+                lines.push(Line::from(Span::styled(header, header_style)));
+                lines.push(Line::from(""));
+                lines.extend(menu_items(&[
+                    ("r", "Refresh selected"),
+                    ("w", "Warmup selected"),
+                    ("l", "re-Login selected (sequential)"),
+                    ("d", "Delete selected"),
+                ], key_style, label_style));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
+                render_popup(f, title, &lines, popup, area);
+            }
+            MenuState::BatchReloginFlow { count, popup } => {
+                let mut lines: Vec<Line<'static>> = Vec::new();
+                lines.push(Line::from(Span::styled(
+                    format!("{count} account(s) marked"),
+                    header_style,
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Sequential re-login. Browser uses local port 1455 each round.",
+                    Style::default().fg(DIM),
+                )));
+                lines.push(Line::from(""));
+                lines.extend(menu_items(&[
+                    ("b", "Browser (PKCE)"),
+                    ("d", "Device code"),
+                ], key_style, label_style));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
+                render_popup(f, "Batch re-Login", &lines, popup, area);
             }
         }
     }

@@ -6,10 +6,19 @@
 
 - **Skip warmup for accounts warmed within the last hour** — `use` and TUI both check `is_warmed`/`set_warmed` to avoid redundant warmup requests when an account was already warmed recently
 - **Dynamic warmup model selection** — Warmup now resolves the target model via the API per process (cached behind a tokio `Mutex`) instead of using a hardcoded slug, keeping warmup correct as upstream models change
+- **TUI Add account (`a`)** — Add a brand-new account directly from the main view; popup chooses between Browser (PKCE) and Device code OAuth flows. The TUI suspends during OAuth and re-opens with the new profile loaded
+- **TUI re-Login (Enter > l)** — Re-authorize the selected profile from the Account menu; supports both Browser and Device code flows. If the profile is currently active, the live `~/.codex/auth.json` is also refreshed
+- **TUI Account menu (Enter)** — Pressing Enter on a selected account opens a popup with: u Use, l re-Login, n reName, w Warmup, f reFresh this one, d Delete
+- **TUI Batch menu (Enter when accounts marked)** — Pressing Enter while one or more accounts are marked opens a batch popup with: r Refresh selected, w Warmup selected, l re-Login selected (sequential), d Delete selected
+- **TUI Help (`h`)** — Help popup lists every binding, grouped by section. Sources from a single `keymap` module so it stays in sync with the status bar
+- **TUI popups adapt to screen size** — All popups (Help, Account menu, Batch menu, OAuth flow chooser) center on screen, clamp width/height to the terminal, support vertical scrolling with a block-character scrollbar, and fall back to a one-line message when the terminal is too small
 
 ### Changed
 
 - **`use` no longer probes Codex process state** — Removed Codex process detection from the `use` command path; switching auth no longer depends on what Codex is doing
+- **TUI keymap redesigned** — All shortcuts are pure lowercase (uppercase silently treated as the same key); bindings no longer overlap. Top-level keys: `j/k` nav, `space` mark, `enter` menu, `/` search, `r` refresh visible, `s` sort, `t` auto-refresh, `a` add account, `h` help, `q` quit, `esc` clear marks/search. Removed top-level `c/d/n/w/a-as-auto` — those operations now live in the Enter menu (which surfaces them with discoverable labels)
+- **TUI status bar simplified** — Shows only the 6 most-used bindings (`j/k nav │ enter menu │ / search │ r refresh │ h help │ q quit`); full list moved to the Help popup
+- **TUI marks no longer change `r`/`refresh` scope implicitly** — Top-level `r` always refreshes the visible (search-filtered) view. Batch refresh / warmup / re-login / delete are explicit actions in the Enter > Batch menu, eliminating the "why did only some get refreshed" surprise
 
 ### Fixed
 

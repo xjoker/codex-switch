@@ -52,6 +52,7 @@ impl SortMode {
 
 pub enum ConfirmAction {
     Delete(String),
+    BatchDelete(Vec<String>),
 }
 
 pub struct RenameState {
@@ -150,6 +151,22 @@ impl App {
             entry.alias.clone(),
             entry.info.email.clone(),
         ));
+    }
+
+    pub fn open_batch_menu(&mut self) {
+        let count = self.marked.len();
+        if count == 0 {
+            return;
+        }
+        self.menu = Some(super::menu::MenuState::batch(count));
+    }
+
+    pub fn open_batch_relogin_flow(&mut self) {
+        let count = self.marked.len();
+        if count == 0 {
+            return;
+        }
+        self.menu = Some(super::menu::MenuState::batch_relogin_flow(count));
     }
 
     pub fn open_add_menu(&mut self) {
@@ -431,37 +448,6 @@ impl App {
         (count, candidate_count, skipped)
     }
 
-    /// Warmup: marked accounts if any are marked, otherwise all.
-    /// Skips already-active, in-flight, and errored accounts.
-    #[allow(dead_code)] // wired via Phase-2 account/batch menu
-    pub fn warmup(&mut self) {
-        let target_indices: Vec<usize> = if self.marked.is_empty() {
-            (0..self.accounts.len()).collect()
-        } else {
-            self.accounts
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| self.marked.contains(&a.alias))
-                .map(|(idx, _)| idx)
-                .collect()
-        };
-
-        let (count, candidates, skipped) = self.warmup_indices(target_indices);
-
-        if count == 0 {
-            self.set_status(
-                format!("All {candidates} accounts already active or skipped"),
-                4,
-            );
-            return;
-        }
-        let mut msg = format!("Warming up {count} account(s)...");
-        if skipped > 0 {
-            msg.push_str(&format!(" ({skipped} skipped)"));
-        }
-        self.set_status(msg, 10);
-    }
-
     pub fn warmup_all(&mut self) -> usize {
         let target_indices: Vec<usize> = (0..self.accounts.len()).collect();
         let (count, _, _) = self.warmup_indices(target_indices);
@@ -639,24 +625,13 @@ impl App {
         self.update_view();
     }
 
-    /// Refresh usage: marked accounts only if any are marked, otherwise all.
+    /// Refresh usage for all visible accounts (search-filtered view).
+    /// Batch refresh of just the marked accounts is exposed separately
+    /// via the Enter > Batch menu so the implicit "marks change scope"
+    /// behavior is gone.
     pub fn refresh(&mut self, force: bool) {
-        let target_indices: Vec<usize> = if self.marked.is_empty() {
-            (0..self.accounts.len()).collect()
-        } else {
-            self.accounts
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| self.marked.contains(&a.alias))
-                .map(|(i, _)| i)
-                .collect()
-        };
-
-        let count = target_indices.len();
+        let target_indices: Vec<usize> = self.view_indices.clone();
         self.refresh_indices(&target_indices, force);
-        if !self.marked.is_empty() {
-            self.set_status(format!("Refreshing {count} marked account(s)..."), 3);
-        }
     }
 
     pub fn refresh_all(&mut self, force: bool) {
@@ -715,6 +690,80 @@ impl App {
                 }
                 Err(e) => self.set_status(format!("Delete failed: {e}"), 5),
             },
+            ConfirmAction::BatchDelete(aliases) => {
+                let mut ok = 0usize;
+                let mut errors: Vec<String> = Vec::new();
+                let current = read_current();
+                for alias in &aliases {
+                    if alias == &current {
+                        errors.push(format!("{alias}: active, skipped"));
+                        continue;
+                    }
+                    match cmd_delete(alias) {
+                        Ok(()) => ok += 1,
+                        Err(e) => errors.push(format!("{alias}: {e}")),
+                    }
+                }
+                self.marked.clear();
+                self.load_profiles();
+                self.refresh(true);
+                let msg = if errors.is_empty() {
+                    format!("Deleted {ok} account(s)")
+                } else {
+                    format!("Deleted {ok} ok, {} failed", errors.len())
+                };
+                self.set_status(msg, 6);
+            }
+        }
+    }
+
+    pub fn request_batch_delete(&mut self) {
+        if self.marked.is_empty() {
+            return;
+        }
+        let aliases: Vec<String> = self.marked.iter().cloned().collect();
+        self.confirm = Some(ConfirmAction::BatchDelete(aliases));
+    }
+
+    /// Refresh all marked accounts (force).
+    pub fn refresh_marked(&mut self) {
+        if self.marked.is_empty() {
+            return;
+        }
+        let target_indices: Vec<usize> = self
+            .accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| self.marked.contains(&a.alias))
+            .map(|(i, _)| i)
+            .collect();
+        let count = target_indices.len();
+        self.refresh_indices(&target_indices, true);
+        self.set_status(format!("Refreshing {count} marked account(s)..."), 3);
+    }
+
+    /// Warmup all marked accounts (skipping already-active / in-flight / errored).
+    pub fn warmup_marked(&mut self) {
+        if self.marked.is_empty() {
+            return;
+        }
+        let target_indices: Vec<usize> = self
+            .accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| self.marked.contains(&a.alias))
+            .map(|(i, _)| i)
+            .collect();
+        let candidate = target_indices.len();
+        let (count, _, skipped) = self.warmup_indices(target_indices);
+        if count == 0 {
+            self.set_status(format!("All {candidate} marked already active or skipped"), 4);
+        } else {
+            let mut msg = format!("Warming up {count} marked account(s)");
+            if skipped > 0 {
+                msg.push_str(&format!(" ({skipped} skipped)"));
+            }
+            self.set_status(msg, 6);
         }
     }
 
@@ -1074,7 +1123,13 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                         app.selected -= 1;
                     }
                 }
-                KeyCode::Enter => app.open_account_menu(),
+                KeyCode::Enter => {
+                    if app.marked.is_empty() {
+                        app.open_account_menu();
+                    } else {
+                        app.open_batch_menu();
+                    }
+                }
                 KeyCode::Char('a') => app.open_add_menu(),
                 KeyCode::Char('r') => app.refresh(true),
                 KeyCode::Char('t') => app.toggle_auto_refresh(),
@@ -1144,6 +1199,25 @@ async fn handle_menu_key(app: &mut App, terminal: &mut DefaultTerminal, code: Ke
             app.close_menu();
             app.request_delete_alias(&alias);
         }
+        MenuAction::BatchRefresh => {
+            app.close_menu();
+            app.refresh_marked();
+        }
+        MenuAction::BatchWarmup => {
+            app.close_menu();
+            app.warmup_marked();
+        }
+        MenuAction::BatchReloginRequest => {
+            app.open_batch_relogin_flow();
+        }
+        MenuAction::BatchRelogin { device } => {
+            app.close_menu();
+            perform_batch_relogin(terminal, app, device).await;
+        }
+        MenuAction::BatchDeleteRequest => {
+            app.close_menu();
+            app.request_batch_delete();
+        }
     }
 }
 
@@ -1207,6 +1281,75 @@ async fn perform_oauth(
         Err(e) => {
             app.set_status(format!("OAuth failed: {e}"), 7);
         }
+    }
+}
+
+/// Sequentially re-login every marked alias. The TUI is suspended for the
+/// duration; OAuth output goes to the cooked terminal so the user sees
+/// browser prompts / device codes / progress.
+///
+/// User can abort the whole batch with Ctrl+C between rounds (handled by
+/// the underlying login::run_device_*) or by closing the browser tab.
+async fn perform_batch_relogin(terminal: &mut DefaultTerminal, app: &mut App, device: bool) {
+    let aliases: Vec<String> = app.marked.iter().cloned().collect();
+    if aliases.is_empty() {
+        return;
+    }
+
+    ratatui::restore();
+
+    let total = aliases.len();
+    println!("\n=== Batch re-login: {total} account(s) ===");
+    if device {
+        println!("Flow: device code\n");
+    } else {
+        println!("Flow: browser (PKCE)\n");
+    }
+
+    let mut ok = 0usize;
+    let mut failed: Vec<(String, String)> = Vec::new();
+
+    for (i, alias) in aliases.iter().enumerate() {
+        println!("\n--- [{}/{}] {alias} ---", i + 1, total);
+        let mode = OAuthMode::Relogin(alias.clone());
+        match run_oauth_inner(mode, device).await {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                eprintln!("[err] {alias}: {e}");
+                failed.push((alias.clone(), e.to_string()));
+            }
+        }
+    }
+
+    println!(
+        "\n=== Batch complete: {ok} ok, {} failed ===",
+        failed.len()
+    );
+    if !failed.is_empty() {
+        for (a, e) in &failed {
+            println!("  - {a}: {e}");
+        }
+    }
+    println!("\nPress Enter to return to TUI...");
+    let _ = tokio::task::spawn_blocking(|| {
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_line(&mut buf);
+    })
+    .await;
+
+    *terminal = ratatui::init();
+
+    app.marked.clear();
+    let summary = if failed.is_empty() {
+        format!("Batch re-login: {ok} ok")
+    } else {
+        format!("Batch re-login: {ok} ok, {} failed", failed.len())
+    };
+    app.set_status(summary, 8);
+    app.load_profiles_preserving_selection();
+    app.refresh(true);
+    if app.auto_refresh_enabled {
+        app.next_auto_refresh = Some(Instant::now() + app.auto_refresh_interval);
     }
 }
 
