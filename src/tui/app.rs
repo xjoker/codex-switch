@@ -10,8 +10,9 @@ use tokio::sync::Semaphore;
 use crate::auth;
 use crate::cache;
 use crate::jwt::AccountInfo;
+use crate::login;
 use crate::profile::{
-    cmd_delete, list_profiles, profile_auth_path, read_current, rename_profile,
+    self, cmd_delete, list_profiles, profile_auth_path, read_current, rename_profile,
     sync_current_from_live, switch_profile, validate_alias,
 };
 use crate::usage::{UsageError, UsageInfo, fetch_usage_retried, fetch_usage_retried_force};
@@ -49,7 +50,6 @@ impl SortMode {
     }
 }
 
-#[allow(dead_code)] // Delete is constructed by Phase-2 account menu (Enter > delete)
 pub enum ConfirmAction {
     Delete(String),
 }
@@ -94,6 +94,7 @@ pub struct App {
     pub auto_refresh_interval: Duration,
     pub next_auto_refresh: Option<Instant>,
     pub help_popup: Option<super::popup::PopupState>,
+    pub menu: Option<super::menu::MenuState>,
 }
 
 impl App {
@@ -126,6 +127,7 @@ impl App {
             auto_refresh_interval: Duration::from_secs(cfg.tui.auto_refresh_interval_secs),
             next_auto_refresh: None,
             help_popup: None,
+            menu: None,
         }
     }
 
@@ -135,6 +137,86 @@ impl App {
 
     pub fn close_help(&mut self) {
         self.help_popup = None;
+    }
+
+    pub fn open_account_menu(&mut self) {
+        let Some(entry) = self
+            .selected_account_idx()
+            .and_then(|idx| self.accounts.get(idx))
+        else {
+            return;
+        };
+        self.menu = Some(super::menu::MenuState::account(
+            entry.alias.clone(),
+            entry.info.email.clone(),
+        ));
+    }
+
+    pub fn open_add_menu(&mut self) {
+        self.menu = Some(super::menu::MenuState::add());
+    }
+
+    pub fn open_relogin_flow_menu(&mut self, alias: String, email: Option<String>) {
+        self.menu = Some(super::menu::MenuState::relogin_flow(alias, email));
+    }
+
+    pub fn close_menu(&mut self) {
+        self.menu = None;
+    }
+
+    /// Refresh just one alias unconditionally.
+    pub fn refresh_one(&mut self, alias: &str) {
+        if let Some(idx) = self.accounts.iter().position(|a| a.alias == alias) {
+            self.refresh_indices(&[idx], true);
+            self.set_status(format!("Refreshing {alias}..."), 3);
+        }
+    }
+
+    /// Warmup just one alias.
+    pub fn warmup_one(&mut self, alias: &str) {
+        let target_indices: Vec<usize> = self
+            .accounts
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.alias == alias)
+            .map(|(i, _)| i)
+            .collect();
+        let (count, _, skipped) = self.warmup_indices(target_indices);
+        if count == 0 {
+            if skipped > 0 {
+                self.set_status(format!("{alias}: already active or in flight"), 4);
+            } else {
+                self.set_status(format!("{alias}: nothing to warm up"), 4);
+            }
+        } else {
+            self.set_status(format!("Warming up {alias}..."), 6);
+        }
+    }
+
+    /// Request delete confirmation for a specific alias (called from menu).
+    pub fn request_delete_alias(&mut self, alias: &str) {
+        let Some(entry) = self.accounts.iter().find(|a| a.alias == alias) else {
+            return;
+        };
+        if entry.is_current {
+            self.set_status("Cannot delete the active profile".to_string(), 3);
+            return;
+        }
+        self.confirm = Some(ConfirmAction::Delete(entry.alias.clone()));
+    }
+
+    /// Begin rename for a specific alias (called from menu).
+    pub fn start_rename_alias(&mut self, alias: &str) {
+        let Some(entry) = self.accounts.iter().find(|a| a.alias == alias) else {
+            return;
+        };
+        let old = entry.alias.clone();
+        let len = old.len();
+        self.rename = Some(RenameState {
+            old_alias: old.clone(),
+            input: old,
+            cursor: len,
+        });
     }
 
     pub fn load_profiles(&mut self) {
@@ -619,20 +701,6 @@ impl App {
         }
     }
 
-    #[allow(dead_code)] // wired via Phase-2 account menu
-    pub fn request_delete(&mut self) {
-        if let Some(entry) = self
-            .selected_account_idx()
-            .and_then(|idx| self.accounts.get(idx))
-        {
-            if entry.is_current {
-                self.set_status("Cannot delete the active profile".to_string(), 3);
-                return;
-            }
-            self.confirm = Some(ConfirmAction::Delete(entry.alias.clone()));
-        }
-    }
-
     pub fn confirm_action(&mut self) {
         let action = match self.confirm.take() {
             Some(a) => a,
@@ -652,22 +720,6 @@ impl App {
 
     pub fn cancel_confirm(&mut self) {
         self.confirm = None;
-    }
-
-    #[allow(dead_code)] // wired via Phase-2 account menu
-    pub fn start_rename(&mut self) {
-        if let Some(entry) = self
-            .selected_account_idx()
-            .and_then(|idx| self.accounts.get(idx))
-        {
-            let old = entry.alias.clone();
-            let len = old.len();
-            self.rename = Some(RenameState {
-                old_alias: old.clone(),
-                input: old,
-                cursor: len,
-            });
-        }
     }
 
     pub fn handle_rename_key(&mut self, code: KeyCode) -> bool {
@@ -988,6 +1040,12 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 continue;
             }
 
+            // Active menu intercepts everything.
+            if app.menu.is_some() {
+                handle_menu_key(&mut app, terminal, code).await;
+                continue;
+            }
+
             if app.confirm.is_some() {
                 match code {
                     KeyCode::Char('y') => app.confirm_action(),
@@ -1016,7 +1074,8 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                         app.selected -= 1;
                     }
                 }
-                KeyCode::Enter => app.switch_selected(),
+                KeyCode::Enter => app.open_account_menu(),
+                KeyCode::Char('a') => app.open_add_menu(),
                 KeyCode::Char('r') => app.refresh(true),
                 KeyCode::Char('t') => app.toggle_auto_refresh(),
                 KeyCode::Char('s') => app.cycle_sort(),
@@ -1040,6 +1099,148 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn handle_menu_key(app: &mut App, terminal: &mut DefaultTerminal, code: KeyCode) {
+    let Some(menu) = app.menu.as_ref() else { return };
+    let action = menu.handle_key(code);
+    use super::menu::MenuAction;
+    match action {
+        MenuAction::Close => app.close_menu(),
+        MenuAction::Use(alias) => {
+            app.close_menu();
+            // Reuse switch_selected logic by selecting the alias first.
+            if let Some(account_idx) = app.accounts.iter().position(|a| a.alias == alias)
+                && let Some(view_idx) = app.view_indices.iter().position(|&i| i == account_idx)
+            {
+                app.selected = view_idx;
+            }
+            app.switch_selected();
+        }
+        MenuAction::ReloginRequest(alias, email) => {
+            app.open_relogin_flow_menu(alias, email);
+        }
+        MenuAction::Relogin { alias, device } => {
+            app.close_menu();
+            perform_oauth(terminal, app, OAuthMode::Relogin(alias), device).await;
+        }
+        MenuAction::Add { device } => {
+            app.close_menu();
+            perform_oauth(terminal, app, OAuthMode::Add, device).await;
+        }
+        MenuAction::Rename(alias) => {
+            app.close_menu();
+            app.start_rename_alias(&alias);
+        }
+        MenuAction::RefreshOne(alias) => {
+            app.close_menu();
+            app.refresh_one(&alias);
+        }
+        MenuAction::WarmupOne(alias) => {
+            app.close_menu();
+            app.warmup_one(&alias);
+        }
+        MenuAction::DeleteRequest(alias) => {
+            app.close_menu();
+            app.request_delete_alias(&alias);
+        }
+    }
+}
+
+enum OAuthMode {
+    Add,
+    Relogin(String),
+}
+
+/// Suspend the TUI, run OAuth (browser PKCE or device code), persist the
+/// resulting auth.json to the appropriate profile, then restore the TUI.
+///
+/// Always restores the terminal even on error so the caller can keep running.
+async fn perform_oauth(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    mode: OAuthMode,
+    device: bool,
+) {
+    // Tear down TUI: restore cooked mode + clear screen so the OAuth output
+    // (browser prompts, device user_code, polling progress) is visible.
+    ratatui::restore();
+
+    let mode_name = match &mode {
+        OAuthMode::Add => "Add new account".to_string(),
+        OAuthMode::Relogin(alias) => format!("Re-login: {alias}"),
+    };
+    println!("\n=== {mode_name} ===");
+    if device {
+        println!("Flow: device code\n");
+    } else {
+        println!("Flow: browser (PKCE)\n");
+    }
+
+    let result = run_oauth_inner(mode, device).await;
+
+    // Wait briefly so user can read the result line before TUI repaints.
+    if result.is_ok() {
+        println!("\nReturning to TUI...");
+    } else {
+        println!("\nPress Enter to return to TUI...");
+        let _ = tokio::task::spawn_blocking(|| {
+            let mut buf = String::new();
+            let _ = std::io::stdin().read_line(&mut buf);
+        })
+        .await;
+    }
+
+    // Restore TUI.
+    *terminal = ratatui::init();
+
+    match result {
+        Ok(msg) => {
+            app.set_status(msg, 5);
+            app.load_profiles_preserving_selection();
+            app.refresh(true);
+            // Reset auto-refresh timer so it doesn't fire immediately.
+            if app.auto_refresh_enabled {
+                app.next_auto_refresh = Some(Instant::now() + app.auto_refresh_interval);
+            }
+        }
+        Err(e) => {
+            app.set_status(format!("OAuth failed: {e}"), 7);
+        }
+    }
+}
+
+async fn run_oauth_inner(mode: OAuthMode, device: bool) -> Result<String> {
+    let tokens = if device {
+        login::run_device_code_auth().await?
+    } else {
+        login::run_device_auth().await?
+    };
+    let (auth_val, info) = login::build_auth_from_tokens(&tokens);
+
+    match mode {
+        OAuthMode::Add => {
+            let action = profile::save_auth_value(auth_val, None)?;
+            let alias = action.alias().to_string();
+            let verb = action.action(); // "created" / "updated"
+            let email_disp = info.email.as_deref().unwrap_or("unknown");
+            println!("[ok] Account {verb}: {alias} ({email_disp})");
+            Ok(format!("Account {verb}: {alias}"))
+        }
+        OAuthMode::Relogin(alias) => {
+            let dst = profile::profile_auth_path(&alias)?;
+            auth::write_auth(&dst, &auth_val)?;
+            // If this profile is currently active, also refresh the live auth.json.
+            if profile::read_current() == alias {
+                let live = auth::codex_auth_path()?;
+                let _ = auth::backup_auth(&live);
+                auth::write_auth(&live, &auth_val)?;
+            }
+            let email_disp = info.email.as_deref().unwrap_or("unknown");
+            println!("[ok] Re-logged in: {alias} ({email_disp})");
+            Ok(format!("Re-logged in: {alias}"))
+        }
+    }
 }
 
 fn handle_help_key(app: &mut App, code: KeyCode) {

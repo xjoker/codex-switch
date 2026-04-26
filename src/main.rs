@@ -462,16 +462,6 @@ fn delete_cmd(alias: &str, json: bool) -> Result<()> {
 
 // ── login / reauth ────────────────────────────────────────
 
-fn build_auth_from_tokens(tokens: &login::LoginTokens) -> (serde_json::Value, jwt::AccountInfo) {
-    let temp = serde_json::json!({
-        "tokens": { "id_token": tokens.id_token, "access_token": tokens.access_token,
-                    "refresh_token": tokens.refresh_token, "account_id": "" }
-    });
-    let info = jwt::parse_account_info(&temp);
-    let account_id = info.account_id.as_deref().unwrap_or("").to_string();
-    (login::build_auth_json(tokens, &account_id), info)
-}
-
 async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> Result<()> {
     if let Some(a) = alias {
         profile::validate_alias(a)?;
@@ -489,7 +479,7 @@ async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> Result<()> 
     } else {
         login::run_device_auth().await?
     };
-    let (auth_val, _info) = build_auth_from_tokens(&tokens);
+    let (auth_val, _info) = login::build_auth_from_tokens(&tokens);
 
     match profile::save_auth_value(auth_val, alias)? {
         profile::SaveAction::Created(a) => {
@@ -543,7 +533,7 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
     } else {
         login::run_device_auth().await?
     };
-    let (auth_val, new_info) = build_auth_from_tokens(&tokens);
+    let (auth_val, new_info) = login::build_auth_from_tokens(&tokens);
     auth::write_auth(&dst, &auth_val)?;
 
     if profile::read_current() == alias {

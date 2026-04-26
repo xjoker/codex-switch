@@ -53,9 +53,12 @@ pub fn render(f: &mut Frame, app: &App) {
     render_detail_panel(f, app, vertical[1]);
     render_status_bar(f, app, vertical[2]);
 
-    // Overlays (rendered last, on top of everything)
+    // Overlays (rendered last, on top of everything).
+    // Help popup takes top priority since the user invoked it explicitly.
     if let Some(state) = app.help_popup.as_ref() {
         render_help_popup(f, state, area);
+    } else if let Some(menu) = app.menu.as_ref() {
+        menu.render(f, area);
     }
 }
 

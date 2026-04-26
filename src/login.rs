@@ -499,6 +499,24 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
 
 // ── Build auth.json ───────────────────────────────────────
 
+/// Build (auth.json value, parsed AccountInfo) from a fresh token set.
+/// Used by both the CLI `login` flow and the TUI re-login / add flows.
+pub fn build_auth_from_tokens(
+    tokens: &LoginTokens,
+) -> (serde_json::Value, crate::jwt::AccountInfo) {
+    let temp = serde_json::json!({
+        "tokens": {
+            "id_token": tokens.id_token,
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token,
+            "account_id": ""
+        }
+    });
+    let info = crate::jwt::parse_account_info(&temp);
+    let account_id = info.account_id.as_deref().unwrap_or("").to_string();
+    (build_auth_json(tokens, &account_id), info)
+}
+
 pub fn build_auth_json(tokens: &LoginTokens, account_id: &str) -> serde_json::Value {
     use crate::output::format_iso8601;
     let ts = crate::auth::now_unix_secs();
