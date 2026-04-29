@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.0.15 — Unreleased (dev)
+## v0.0.15 — 2026-04-29
 
 ### Added
 
@@ -22,11 +22,13 @@
 
 ### Fixed
 
+- **TUI popup scroll clamps to content bounds** — When the terminal shrank or popup content shortened, the persisted scroll offset could exceed the visible range and leave the popup blank until manually scrolled. Render path now writes the clamped value back to popup state
 - **`auth.lock` self-heal + 15s stale-takeover** — Opening `~/.codex-switch/auth.lock` now recovers automatically when the file was left owned by `root` from a prior `sudo` invocation (unlinks and recreates without sudo). Acquisition uses `try_lock_exclusive` polling with a 15s deadline; after the deadline the holder is treated as stale and the lock file is unlinked + recreated to take over (orphan inode keeps any old fd's lock harmless). Best-effort `pid epoch_secs` is written to the lock file for diagnostics
 
 ### Security
 
-- **`rustls-webpki` 0.103.12 → 0.103.13** — `cargo update` for RUSTSEC-2026-0104
+- **`rustls-webpki` 0.103.12 → 0.103.13** — RUSTSEC-2026-0104 (HIGH, DoS via panic on malformed CRL BIT STRING)
+- **`libc` 0.2.185 → 0.2.186, `zip` 8.5.1 → 8.6.0** — dependabot bumps
 
 ## v0.0.14 — 2026-04-14
 
