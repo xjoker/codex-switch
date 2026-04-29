@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.0.16 — Unreleased (dev)
+
+### Fixed
+
+- **Warmup never sticks for some accounts ("already active or in flight" loop)** — The ChatGPT `responses` endpoint can return 200 OK on a warmup ping without actually consuming quota; `set_warmed()` was then called regardless, flagging the account as warmed in the disk cache for 1h and short-circuiting all subsequent warmup attempts. Now real usage data is authoritative: if loaded or disk-cached usage shows `used == 0`, the account is treated as not warmed regardless of the `warmed_at` flag. Affects both TUI Enter > w and CLI `codex-switch warmup`
+
 ## v0.0.15 — 2026-04-29
 
 ### Added
