@@ -1054,7 +1054,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
         app.run_due_auto_refresh();
 
         terminal
-            .draw(|f| super::ui::render(f, &app))
+            .draw(|f| super::ui::render(f, &mut app))
             .context("drawing TUI")?;
 
         if event::poll(Duration::from_millis(100)).context("polling terminal events")?

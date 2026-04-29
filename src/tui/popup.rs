@@ -66,7 +66,7 @@ pub fn render_popup(
     f: &mut Frame,
     title: &str,
     lines: &[Line<'_>],
-    state: &PopupState,
+    state: &mut PopupState,
     screen: Rect,
 ) {
     if screen.width < MIN_TERM_W || screen.height < MIN_TERM_H {
@@ -116,6 +116,7 @@ pub fn render_popup(
     let scrollable = total_lines > visible_h;
     let max_scroll = total_lines.saturating_sub(visible_h);
     let scroll = state.scroll.min(max_scroll);
+    state.scroll = scroll; // clamp persisted scroll to actual content bounds
 
     // Truncate lines that exceed usable_w (with ellipsis)
     let truncated: Vec<Line<'static>> = lines

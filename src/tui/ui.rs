@@ -32,7 +32,7 @@ fn base() -> Style {
     Style::default().bg(BG)
 }
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     // Paint the entire area with a solid background first
@@ -55,14 +55,14 @@ pub fn render(f: &mut Frame, app: &App) {
 
     // Overlays (rendered last, on top of everything).
     // Help popup takes top priority since the user invoked it explicitly.
-    if let Some(state) = app.help_popup.as_ref() {
+    if let Some(state) = app.help_popup.as_mut() {
         render_help_popup(f, state, area);
-    } else if let Some(menu) = app.menu.as_ref() {
+    } else if let Some(menu) = app.menu.as_mut() {
         menu.render(f, area);
     }
 }
 
-fn render_help_popup(f: &mut Frame, state: &popup::PopupState, area: ratatui::layout::Rect) {
+fn render_help_popup(f: &mut Frame, state: &mut popup::PopupState, area: ratatui::layout::Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let key_style = Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(C_WHITE);

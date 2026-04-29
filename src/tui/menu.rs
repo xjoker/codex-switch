@@ -164,7 +164,7 @@ impl MenuState {
         }
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    pub fn render(&mut self, f: &mut Frame, area: Rect) {
         let key_style = Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD);
         let label_style = Style::default().fg(C_WHITE);
         let dim = Style::default().fg(DIM);
