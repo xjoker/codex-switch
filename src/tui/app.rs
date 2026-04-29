@@ -395,31 +395,36 @@ impl App {
     }
 
     /// Returns true if the account's 5h window is still active (reset time in the future).
-    /// Checks both loaded usage data and the cache (covers Loading/Idle states).
-    /// An account is considered "warmed" only if its 5h window is active AND
-    /// has actual usage (`used_percent > 0`). The usage API returns `resets_at`
-    /// on every call even for unused accounts, so `resets_at > now` alone is
-    /// not sufficient — it would always be true after a usage fetch.
+    /// Real usage data is authoritative: if a fresh fetch shows `used == 0`, the warmup
+    /// did not stick, even if `cache::is_warmed` flagged a recent attempt as successful
+    /// (server can return 200 OK without actually consuming quota — see #warmup-stuck).
+    /// The disk `warmed_at` flag is only used as a fallback when no usage data exists.
     fn is_already_warmed(&self, alias: &str) -> bool {
-        if crate::cache::is_warmed(alias) {
-            return true;
-        }
         let now = crate::auth::now_unix_secs();
-        let loaded = self.accounts.iter().any(|a| {
-            a.alias == alias
-                && matches!(&a.usage, UsageStatus::Loaded(u)
-                    if u.primary.as_ref().is_some_and(|w|
-                        w.resets_at.is_some_and(|t| t > now)
-                        && w.used_percent.is_some_and(|p| p > 0.0)))
-        });
-        if loaded {
-            return true;
+
+        // Prefer in-memory loaded usage — most authoritative.
+        for a in &self.accounts {
+            if a.alias != alias {
+                continue;
+            }
+            if let UsageStatus::Loaded(u) = &a.usage {
+                return u.primary.as_ref().is_some_and(|w| {
+                    w.resets_at.is_some_and(|t| t > now)
+                        && w.used_percent.is_some_and(|p| p > 0.0)
+                });
+            }
         }
-        crate::cache::get(alias)
-            .and_then(|u| u.primary)
-            .is_some_and(|w| {
-                w.resets_at.is_some_and(|t| t > now) && w.used_percent.is_some_and(|p| p > 0.0)
-            })
+
+        // No loaded data: fall back to disk-cached usage.
+        if let Some(u) = crate::cache::get(alias) {
+            return u.primary.is_some_and(|w| {
+                w.resets_at.is_some_and(|t| t > now)
+                    && w.used_percent.is_some_and(|p| p > 0.0)
+            });
+        }
+
+        // No usage data anywhere: trust the recent-warmup flag.
+        crate::cache::is_warmed(alias)
     }
 
     fn is_warmup_in_flight(&self, alias: &str) -> bool {

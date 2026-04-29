@@ -1315,18 +1315,20 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(aliases.len());
 
     // Filter out accounts whose 5h window is genuinely active (has usage AND reset in future).
-    // The usage API returns resets_at on every call, so resets_at > now alone is not enough;
-    // we also require used_percent > 0 to confirm the window was actually activated.
+    // Real usage is authoritative: a 200 OK warmup can leave `warmed_at` set without
+    // actually consuming quota, so trust cached usage data first; the `warmed_at` flag
+    // is only a fallback when no usage data exists.
     let now = auth::now_unix_secs();
     let mut to_warmup = Vec::new();
     for alias in &aliases {
-        let already_active = cache::is_warmed(alias)
-            || cache::get(alias)
-                .and_then(|u| u.primary)
-                .is_some_and(|w| {
-                    w.resets_at.is_some_and(|t| t > now)
-                        && w.used_percent.is_some_and(|p| p > 0.0)
-                });
+        let cached_usage = cache::get(alias);
+        let already_active = match cached_usage {
+            Some(u) => u.primary.is_some_and(|w| {
+                w.resets_at.is_some_and(|t| t > now)
+                    && w.used_percent.is_some_and(|p| p > 0.0)
+            }),
+            None => cache::is_warmed(alias),
+        };
         if already_active {
             if json {
                 results.push(serde_json::json!({"alias": alias, "ok": true, "skipped": true}));
