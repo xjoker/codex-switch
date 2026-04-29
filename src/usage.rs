@@ -1234,7 +1234,7 @@ mod tests {
         let a = make_candidate("a", 30.0, Some(now + 4 * 3600), 20.0, Some(now + 5 * 86400));
         // Account B: 30% used, resets in 1h → elapsed 4h → burn=30%/14400s (slow)
         // projected exhaustion = 70 / (30/14400) / 60 ≈ 560 min → capped 300 min
-        let b = make_candidate("b", 30.0, Some(now + 1 * 3600), 20.0, Some(now + 5 * 86400));
+        let b = make_candidate("b", 30.0, Some(now + 3600), 20.0, Some(now + 5 * 86400));
         let sa = score_unified(&a, 20.0);
         let sb = score_unified(&b, 20.0);
         // B has slower burn rate → higher projected exhaustion → higher headroom
@@ -1276,7 +1276,6 @@ mod tests {
         let w = WindowUsage {
             used_percent: Some(99.6),
             resets_at: Some(auth::now_unix_secs() + 3600),
-            ..Default::default()
         };
         assert_eq!(visible_pace_percent(&w, WINDOW_5H_SECS), None);
     }
@@ -1286,7 +1285,6 @@ mod tests {
         let w = WindowUsage {
             used_percent: Some(99.4),
             resets_at: Some(auth::now_unix_secs() + 3600),
-            ..Default::default()
         };
         assert!(visible_pace_percent(&w, WINDOW_5H_SECS).is_some());
     }

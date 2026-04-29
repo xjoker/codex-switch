@@ -178,7 +178,7 @@ fn gradual_exhaustion_shifts_preference() {
     // (30%/3600s vs 20%/1800s elapsed) but both have ample headroom.
     // The exact ranking at tick 0 depends on pace-aware projections.
     // Key invariant: both should be eligible (scored > 0).
-    let candidates_t0 = vec![
+    let candidates_t0 = [
         candidate_from_json("gradual_a", &a_responses[0], false, now),
         candidate_from_json("gradual_b", &b_responses[0], false, now),
     ];

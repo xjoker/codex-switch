@@ -264,7 +264,7 @@ async fn http_timeline_gradual_exhaustion() {
     for _ in 0..2 {
         for (_alias, _path, token, _) in &profiles {
             let _ = client
-                .get(&server.usage_url())
+                .get(server.usage_url())
                 .header("Authorization", format!("Bearer {token}"))
                 .send()
                 .await
@@ -294,7 +294,7 @@ async fn http_mock_returns_correct_structure() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .get(&server.usage_url())
+        .get(server.usage_url())
         .header("Authorization", "Bearer tok_healthy_a")
         .send()
         .await
@@ -341,7 +341,7 @@ async fn http_unknown_token_returns_401() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .get(&server.usage_url())
+        .get(server.usage_url())
         .header("Authorization", "Bearer unknown_token")
         .send()
         .await

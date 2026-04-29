@@ -949,6 +949,7 @@ mod tests {
         let lock_path = super::auth_lock_path().unwrap();
         let lock_file = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(lock_path)
