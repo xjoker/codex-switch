@@ -394,7 +394,8 @@ impl App {
         self.marked.clear();
     }
 
-    /// Returns true if the account's 5h window is still active (reset time in the future).
+    /// Returns true if the account has any active rate-limit window (reset in future, usage > 0).
+    /// Checks both 5h (primary) and 7d (secondary) windows — free accounts only have the 7d window.
     /// Real usage data is authoritative: if a fresh fetch shows `used == 0`, the warmup
     /// did not stick, even if `cache::is_warmed` flagged a recent attempt as successful
     /// (server can return 200 OK without actually consuming quota — see #warmup-stuck).
@@ -402,25 +403,25 @@ impl App {
     fn is_already_warmed(&self, alias: &str) -> bool {
         let now = crate::auth::now_unix_secs();
 
+        let window_active = |w: &crate::usage::WindowUsage| {
+            w.resets_at.is_some_and(|t| t > now) && w.used_percent.is_some_and(|p| p > 0.0)
+        };
+
         // Prefer in-memory loaded usage — most authoritative.
         for a in &self.accounts {
             if a.alias != alias {
                 continue;
             }
             if let UsageStatus::Loaded(u) = &a.usage {
-                return u.primary.as_ref().is_some_and(|w| {
-                    w.resets_at.is_some_and(|t| t > now)
-                        && w.used_percent.is_some_and(|p| p > 0.0)
-                });
+                return u.primary.as_ref().is_some_and(|w| window_active(w))
+                    || u.secondary.as_ref().is_some_and(|w| window_active(w));
             }
         }
 
         // No loaded data: fall back to disk-cached usage.
         if let Some(u) = crate::cache::get(alias) {
-            return u.primary.is_some_and(|w| {
-                w.resets_at.is_some_and(|t| t > now)
-                    && w.used_percent.is_some_and(|p| p > 0.0)
-            });
+            return u.primary.as_ref().is_some_and(|w| window_active(w))
+                || u.secondary.as_ref().is_some_and(|w| window_active(w));
         }
 
         // No usage data anywhere: trust the recent-warmup flag.
@@ -560,6 +561,8 @@ impl App {
                 .primary
                 .as_ref()
                 .and_then(|w| w.used_percent)
+                // free accounts have no 5h window — fall back to 7d usage for sorting
+                .or_else(|| u.secondary.as_ref().and_then(|w| w.used_percent))
                 .unwrap_or(999.0),
             _ => 999.0,
         }

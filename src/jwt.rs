@@ -25,7 +25,12 @@ pub struct AccountInfo {
 
 impl AccountInfo {
     pub fn plan_label(&self) -> String {
-        let base = self.plan_type.as_deref().unwrap_or("?").to_string();
+        self.plan_label_with(self.plan_type.as_deref())
+    }
+
+    /// Same as `plan_label` but with an overridden plan type (e.g. from API response).
+    pub fn plan_label_with(&self, plan_type: Option<&str>) -> String {
+        let base = plan_type.unwrap_or("?").to_string();
         if let Some(name) = &self.workspace_name
             && !name.is_empty()
         {

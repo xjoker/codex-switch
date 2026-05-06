@@ -22,6 +22,8 @@ struct CacheEntry {
     credits_balance: Option<f64>,
     #[serde(default)]
     unlimited_credits: Option<bool>,
+    #[serde(default)]
+    plan_type: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -88,6 +90,7 @@ fn to_entry(u: &UsageInfo) -> CacheEntry {
         secondary_reset: u.secondary.as_ref().and_then(|w| w.resets_at),
         credits_balance: u.credits_balance,
         unlimited_credits: u.unlimited_credits,
+        plan_type: u.plan_type.clone(),
     }
 }
 
@@ -115,6 +118,7 @@ fn from_entry(e: &CacheEntry) -> UsageInfo {
         secondary,
         credits_balance: e.credits_balance,
         unlimited_credits: e.unlimited_credits,
+        plan_type: e.plan_type.clone(),
     }
 }
 

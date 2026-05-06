@@ -383,7 +383,10 @@ async fn list_cmd(force: bool, json: bool, auth_already_handled: bool) -> Result
             json_items.push(output::JsonProfileWithUsage {
                 alias: row.name,
                 is_current: row.is_current,
-                account: account_to_json(&row.info),
+                account: account_to_json(
+                    &row.info,
+                    usage_result.as_ref().ok().and_then(|u| u.plan_type.as_deref()),
+                ),
                 usage: ju,
             });
         } else {
@@ -401,11 +404,21 @@ async fn list_cmd(force: bool, json: bool, auth_already_handled: bool) -> Result
             if let Some(email) = &row.info.email {
                 print!("  {}", color::dim(email));
             }
-            if row.info.plan_type.is_some() {
-                print!(
-                    "  {}",
-                    color::plan(&row.info.plan_label(), row.info.plan_type.as_deref())
-                );
+            // API plan_type is authoritative over JWT claims (handles plan downgrades)
+            let effective_plan = if let Ok(u) = &usage_result {
+                u.plan_type.as_deref().or(row.info.plan_type.as_deref())
+            } else {
+                row.info.plan_type.as_deref()
+            };
+            if effective_plan.is_some() {
+                let label = if let Ok(u) = &usage_result
+                    && u.plan_type.is_some()
+                {
+                    row.info.plan_label_with(u.plan_type.as_deref())
+                } else {
+                    row.info.plan_label()
+                };
+                print!("  {}", color::plan(&label, effective_plan));
             }
             println!();
             match usage_result {
@@ -578,11 +591,15 @@ fn score_profile_candidates(
                 .map(|p| auth::read_account_info(&p))
                 .unwrap_or_default();
             let last_used = cache::get_last_used(&alias);
+            // API plan_type is authoritative over JWT for scoring (handles plan downgrades)
+            let api_plan = u.plan_type.as_deref();
+            let is_team = api_plan.map(|p| p == "team").unwrap_or_else(|| info.is_team());
+            let is_free = api_plan.map(|p| p == "free").unwrap_or_else(|| info.is_free());
             let mut candidate = usage::Candidate::from_usage(
                 alias,
                 &u,
-                info.is_team(),
-                info.is_free(),
+                is_team,
+                is_free,
                 last_used,
                 now,
             );
@@ -715,7 +732,7 @@ async fn best_cmd(json: bool) -> Result<()> {
     if json {
         print_json(&output::JsonBest {
             switched_to: best_alias.clone(),
-            account: account_to_json(&info),
+            account: account_to_json(&info, best_usage.plan_type.as_deref()),
             usage: usage_to_json(Ok(&best_usage)),
             score: best_score,
             mode: "unified".to_string(),
@@ -916,7 +933,7 @@ async fn import_cmd(path: &str, alias: Option<&str>, json: bool) -> Result<()> {
                     source: item.source.display().to_string(),
                     alias: item.alias.clone(),
                     action: item.action.to_string(),
-                    account: account_to_json(&item.account),
+                    account: account_to_json(&item.account, item.usage.plan_type.as_deref()),
                     usage: usage_to_json(Ok(&item.usage)),
                 })
                 .collect(),
@@ -1314,19 +1331,21 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
 
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(aliases.len());
 
-    // Filter out accounts whose 5h window is genuinely active (has usage AND reset in future).
+    // Filter out accounts that have any active rate-limit window (reset in future, usage > 0).
+    // Checks both 5h (primary) and 7d (secondary) — free accounts only have the 7d window.
     // Real usage is authoritative: a 200 OK warmup can leave `warmed_at` set without
     // actually consuming quota, so trust cached usage data first; the `warmed_at` flag
     // is only a fallback when no usage data exists.
     let now = auth::now_unix_secs();
+    let window_active = |w: &usage::WindowUsage| {
+        w.resets_at.is_some_and(|t| t > now) && w.used_percent.is_some_and(|p| p > 0.0)
+    };
     let mut to_warmup = Vec::new();
     for alias in &aliases {
         let cached_usage = cache::get(alias);
         let already_active = match cached_usage {
-            Some(u) => u.primary.is_some_and(|w| {
-                w.resets_at.is_some_and(|t| t > now)
-                    && w.used_percent.is_some_and(|p| p > 0.0)
-            }),
+            Some(u) => u.primary.as_ref().is_some_and(|w| window_active(w))
+                || u.secondary.as_ref().is_some_and(|w| window_active(w)),
             None => cache::is_warmed(alias),
         };
         if already_active {

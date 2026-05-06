@@ -116,10 +116,12 @@ pub struct JsonSelfUpdate {
 
 // ── Conversion helpers ───────────────────────────────────
 
-pub fn account_to_json(info: &AccountInfo) -> JsonAccount {
+pub fn account_to_json(info: &AccountInfo, api_plan: Option<&str>) -> JsonAccount {
     JsonAccount {
         email: info.email.clone(),
-        plan: info.plan_type.clone(),
+        plan: api_plan
+            .map(|s| s.to_string())
+            .or_else(|| info.plan_type.clone()),
         account_id: info.account_id.clone(),
     }
 }

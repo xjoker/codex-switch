@@ -162,8 +162,14 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let email = entry.info.email.as_deref().unwrap_or("--").to_string();
-            let plan_label = entry.info.plan_label();
-            let plan_style = plan_color(entry.info.plan_type.as_deref(), is_selected);
+            let api_plan = if let UsageStatus::Loaded(u) = &entry.usage {
+                u.plan_type.as_deref()
+            } else {
+                None
+            };
+            let effective_plan = api_plan.or(entry.info.plan_type.as_deref());
+            let plan_label = entry.info.plan_label_with(effective_plan);
+            let plan_style = plan_color(effective_plan, is_selected);
 
             let now = crate::auth::now_unix_secs();
 
@@ -370,7 +376,13 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     // Compact info line
-    let plan_label = entry.info.plan_label();
+    let api_plan_popup = if let UsageStatus::Loaded(u) = &entry.usage {
+        u.plan_type.as_deref()
+    } else {
+        None
+    };
+    let effective_plan_popup = api_plan_popup.or(entry.info.plan_type.as_deref());
+    let plan_label = entry.info.plan_label_with(effective_plan_popup);
     let acct_id = entry.info.account_id.as_deref().unwrap_or("--");
     let email = entry.info.email.as_deref().unwrap_or("--");
 
@@ -381,7 +393,7 @@ fn render_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("Plan ", base().fg(DIM)),
         Span::styled(
             &plan_label,
-            plan_color(entry.info.plan_type.as_deref(), true),
+            plan_color(effective_plan_popup, true),
         ),
         Span::styled("  ", base()),
         Span::styled("ID ", base().fg(DIM)),

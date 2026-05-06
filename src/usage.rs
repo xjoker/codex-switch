@@ -21,6 +21,8 @@ pub struct UsageInfo {
     pub secondary: Option<WindowUsage>, // 7d window
     pub credits_balance: Option<f64>,
     pub unlimited_credits: Option<bool>,
+    /// plan_type from usage API response (authoritative; overrides JWT claims when present)
+    pub plan_type: Option<String>,
 }
 
 /// All data needed to score an account. Pure data, no I/O.
@@ -324,6 +326,7 @@ pub async fn fetch_usage_with_refresh(
                     let body: Value = resp.json().await.map_err(|e| {
                         anyhow::anyhow!("failed to parse usage response (HTTP {status}): {e}")
                     })?;
+                    debug!("[{alias}] Usage API raw body (proactive): {}", body);
                     return Ok((parse_usage(&body), Some(new_tokens)));
                 }
                 anyhow::bail!("Usage API failed (HTTP {status}) after proactive token refresh");
@@ -348,6 +351,7 @@ pub async fn fetch_usage_with_refresh(
             .json()
             .await
             .map_err(|e| anyhow::anyhow!("failed to parse usage response (HTTP {status}): {e}"))?;
+        debug!("[{alias}] Usage API raw body: {}", body);
         return Ok((parse_usage(&body), None));
     }
 
@@ -751,19 +755,61 @@ pub fn score_unified(c: &Candidate, safety_margin_7d: f64) -> f64 {
 }
 
 pub fn parse_usage(body: &Value) -> UsageInfo {
-    let primary = body
+    const SECS_7D: i64 = 7 * 86400; // 604800
+
+    let primary_raw = body
         .pointer("/rate_limit/primary_window")
-        .and_then(|v| if v.is_null() { None } else { Some(v) })
-        .and_then(parse_window);
+        .and_then(|v| if v.is_null() { None } else { Some(v) });
 
-    let secondary = body
+    let secondary_raw = body
         .pointer("/rate_limit/secondary_window")
-        .and_then(|v| if v.is_null() { None } else { Some(v) })
-        .and_then(parse_window);
+        .and_then(|v| if v.is_null() { None } else { Some(v) });
 
-    let credits_balance = body.pointer("/credits/balance").and_then(|v| v.as_f64());
+    let primary_window_secs = primary_raw
+        .and_then(|v| v.get("limit_window_seconds"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let primary_parsed = primary_raw.and_then(parse_window);
+    let secondary_parsed = secondary_raw.and_then(parse_window);
+
+    // Free accounts (new API): only one window exists, placed in primary_window slot
+    // with limit_window_seconds == 604800 (7d). Remap it to secondary so scoring works.
+    let (primary, secondary) = if primary_window_secs >= SECS_7D && secondary_parsed.is_none() {
+        debug!("parse_usage: primary_window is 7d (free account) — remapping to secondary");
+        (None, primary_parsed)
+    } else {
+        if secondary_raw.is_some() && secondary_parsed.is_none() {
+            warn!(
+                "parse_usage: secondary_window present but failed to parse (missing used_percent?): {:?}",
+                secondary_raw
+            );
+        }
+        (primary_parsed, secondary_parsed)
+    };
+
+    debug!("parse_usage: primary={} secondary={}", primary.is_some(), secondary.is_some());
+
+    // has_credits=false means no pay-per-use credits (Plus/Pro included usage only).
+    // Default true for old API format which lacked this field.
+    let has_credits = body.pointer("/credits/has_credits")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // balance changed from number to string "0" in new API — handle both.
+    // Skip entirely when has_credits=false to avoid showing "$0.00" for accounts
+    // that simply don't use the pay-per-use credits system.
+    let credits_balance = if has_credits {
+        body.pointer("/credits/balance").and_then(|v| {
+            v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+    } else {
+        None
+    };
 
     let unlimited_credits = body.pointer("/credits/unlimited").and_then(|v| v.as_bool());
+
+    let plan_type = body.get("plan_type").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     UsageInfo {
         fetched_at: Some(auth::now_unix_secs()),
@@ -771,6 +817,7 @@ pub fn parse_usage(body: &Value) -> UsageInfo {
         secondary,
         credits_balance,
         unlimited_credits,
+        plan_type,
     }
 }
 
@@ -876,6 +923,7 @@ mod tests {
             secondary,
             credits_balance: None,
             unlimited_credits: None,
+            plan_type: None,
         }
     }
 
@@ -970,6 +1018,65 @@ mod tests {
 
         assert_eq!(usage.credits_balance, None);
         assert_eq!(usage.unlimited_credits, None);
+    }
+
+    #[test]
+    fn test_parse_usage_has_credits_false_hides_balance() {
+        // New API: plus accounts return has_credits=false with balance="0" (string).
+        // We must NOT show $0.00 for these accounts.
+        let usage = parse_usage(&json!({
+            "plan_type": "plus",
+            "credits": {
+                "has_credits": false,
+                "unlimited": false,
+                "balance": "0"
+            }
+        }));
+
+        assert_eq!(usage.credits_balance, None, "has_credits=false must suppress balance");
+        assert_eq!(usage.plan_type.as_deref(), Some("plus"));
+    }
+
+    #[test]
+    fn test_parse_usage_balance_string() {
+        // New API: balance is a string when has_credits=true
+        let usage = parse_usage(&json!({
+            "credits": {
+                "has_credits": true,
+                "unlimited": false,
+                "balance": "5.25"
+            }
+        }));
+
+        assert_eq!(usage.credits_balance, Some(5.25));
+    }
+
+    #[test]
+    fn test_parse_usage_free_account_single_window() {
+        // New API: free accounts have one 7d window in primary_window slot.
+        // Must be remapped to secondary so scoring treats it as 7d data.
+        let usage = parse_usage(&json!({
+            "plan_type": "free",
+            "rate_limit": {
+                "allowed": false,
+                "limit_reached": true,
+                "primary_window": {
+                    "used_percent": 100,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 437896,
+                    "reset_at": 1778468889i64
+                },
+                "secondary_window": null
+            }
+        }));
+
+        assert!(usage.primary.is_none(), "free account must have no 5h window");
+        assert!(usage.secondary.is_some(), "free account 7d data must be in secondary");
+        assert_eq!(
+            usage.secondary.as_ref().and_then(|w| w.used_percent),
+            Some(100.0)
+        );
+        assert_eq!(usage.plan_type.as_deref(), Some("free"));
     }
 
     #[test]
