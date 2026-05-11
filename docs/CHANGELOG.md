@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.0.17 — 2026-05-11
+
+### Fixed
+
+- **Warmup retry no longer depends on the `warmed_at` cache flag** — Removed the one-hour warmup success marker from `cache.json`; CLI and TUI now skip warmup only when cached or loaded usage data proves an active quota window. This prevents a 200 OK warmup ping that did not consume quota from blocking all later retries.
+- **Warmup "already active" detection requires real elapsed usage** — A quota window is considered active for warmup skipping only when it has non-zero usage and has been running for at least 5 minutes. Fresh windows near the full 5h/7d duration remain retryable, covering accounts stuck around 1% usage after a no-op ping.
+- **Warmup skip logic is shared** — Centralized active-window detection in `usage.rs` so CLI `codex-switch warmup` and TUI Enter > `w` use the same rules for 5h and 7d windows.
+- **Pace warnings are suppressed for negligible usage** — CLI and TUI no longer show the over-pace `!` warning or yellow/red emphasis below 10% used, avoiding noisy warnings immediately after a fresh window starts.
+
 ## v0.0.16 — 2026-05-06
 
 ### Fixed
