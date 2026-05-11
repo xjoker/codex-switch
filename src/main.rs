@@ -1331,31 +1331,15 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
 
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(aliases.len());
 
-    // Filter out accounts that have any active rate-limit window (reset in future, usage > 0,
-    // and the window has been running for at least MIN_ELAPSED_SECS).
+    // Filter out accounts whose usage data proves an active rate-limit window.
     // A window that appears "just started" (elapsed < 5 min) likely means the previous warmup
     // ping didn't consume real quota — allow the user to retry.
     let now = auth::now_unix_secs();
-    const MIN_WARMUP_ELAPSED_SECS: i64 = 5 * 60;
-    let window_active = |w: &usage::WindowUsage, window_secs: i64| -> bool {
-        let resets_at = match w.resets_at {
-            Some(t) if t > now => t,
-            _ => return false,
-        };
-        if w.used_percent.unwrap_or(0.0) <= 0.0 { return false; }
-        let elapsed = window_secs - (resets_at - now);
-        elapsed >= MIN_WARMUP_ELAPSED_SECS
-    };
     let mut to_warmup = Vec::new();
     for alias in &aliases {
-        let cached_usage = cache::get(alias);
-        let already_active = match cached_usage {
-            Some(u) => {
-                u.primary.as_ref().is_some_and(|w| window_active(w, usage::WINDOW_5H_SECS))
-                    || u.secondary.as_ref().is_some_and(|w| window_active(w, usage::WINDOW_7D_SECS))
-            }
-            None => cache::is_warmed(alias),
-        };
+        let already_active = cache::get(alias)
+            .as_ref()
+            .is_some_and(|u| usage::usage_has_active_warmup_window(u, now));
         if already_active {
             if json {
                 results.push(serde_json::json!({"alias": alias, "ok": true, "skipped": true}));
@@ -1411,7 +1395,6 @@ async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
         let (alias, result) = res.context("warmup task panicked")?;
         match &result {
             Ok(()) => {
-                cache::set_warmed(&alias);
                 if json {
                     results.push(serde_json::json!({"alias": alias, "ok": true}));
                 } else {

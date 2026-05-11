@@ -91,6 +91,31 @@ pub const WINDOW_7D_SECS: i64 = 7 * 86400;
 /// Free plan accounts become ineligible below this 5h remaining%.
 pub const FREE_FLOOR_PCT: f64 = 35.0;
 
+/// Minimum elapsed time before a quota window proves that warmup truly stuck.
+pub const MIN_WARMUP_ELAPSED_SECS: i64 = 5 * 60;
+
+/// Returns true only when usage data proves a warmup-opened window is active.
+pub fn warmup_window_active(w: &WindowUsage, window_secs: i64, now: i64) -> bool {
+    let resets_at = match w.resets_at {
+        Some(t) if t > now => t,
+        _ => return false,
+    };
+    if w.used_percent.unwrap_or(0.0) <= 0.0 {
+        return false;
+    }
+    let elapsed = window_secs - (resets_at - now);
+    elapsed >= MIN_WARMUP_ELAPSED_SECS
+}
+
+pub fn usage_has_active_warmup_window(u: &UsageInfo, now: i64) -> bool {
+    u.primary
+        .as_ref()
+        .is_some_and(|w| warmup_window_active(w, WINDOW_5H_SECS, now))
+        || u.secondary
+            .as_ref()
+            .is_some_and(|w| warmup_window_active(w, WINDOW_7D_SECS, now))
+}
+
 /// Calculate pace: the expected used_percent if consumption were even across the window.
 /// Returns None if resets_at is unavailable.
 pub fn pace_percent(w: &WindowUsage, window_secs: i64) -> Option<f64> {
@@ -1394,5 +1419,37 @@ mod tests {
             resets_at: Some(auth::now_unix_secs() + 3600),
         };
         assert!(visible_pace_percent(&w, WINDOW_5H_SECS).is_some());
+    }
+
+    #[test]
+    fn test_warmup_window_active_requires_elapsed_threshold() {
+        let now = 1_000_000i64;
+        let just_started = WindowUsage {
+            used_percent: Some(1.0),
+            resets_at: Some(now + WINDOW_5H_SECS - 60),
+        };
+        let past_threshold = WindowUsage {
+            used_percent: Some(1.0),
+            resets_at: Some(now + WINDOW_5H_SECS - MIN_WARMUP_ELAPSED_SECS),
+        };
+
+        assert!(!warmup_window_active(&just_started, WINDOW_5H_SECS, now));
+        assert!(warmup_window_active(&past_threshold, WINDOW_5H_SECS, now));
+    }
+
+    #[test]
+    fn test_warmup_window_active_requires_real_usage() {
+        let now = 1_000_000i64;
+        let no_usage = WindowUsage {
+            used_percent: Some(0.0),
+            resets_at: Some(now + WINDOW_5H_SECS - MIN_WARMUP_ELAPSED_SECS),
+        };
+        let no_reset = WindowUsage {
+            used_percent: Some(1.0),
+            resets_at: None,
+        };
+
+        assert!(!warmup_window_active(&no_usage, WINDOW_5H_SECS, now));
+        assert!(!warmup_window_active(&no_reset, WINDOW_5H_SECS, now));
     }
 }
