@@ -1296,10 +1296,17 @@ async fn perform_oauth(
 
     let result = run_oauth_inner(mode, device).await;
 
+    // Flush stdout so any buffered output (e.g. device code URL) appears
+    // before TUI repaints, particularly important on Windows.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
     // Wait briefly so user can read the result line before TUI repaints.
     if result.is_ok() {
         println!("\nReturning to TUI...");
     } else {
+        if let Err(ref e) = result {
+            eprintln!("\nError: {e}");
+        }
         println!("\nPress Enter to return to TUI...");
         let _ = tokio::task::spawn_blocking(|| {
             let mut buf = String::new();
@@ -1366,6 +1373,7 @@ async fn perform_batch_relogin(terminal: &mut DefaultTerminal, app: &mut App, de
         }
     }
 
+    let _ = std::io::Write::flush(&mut std::io::stdout());
     println!(
         "\n=== Batch complete: {ok} ok, {} failed ===",
         failed.len()

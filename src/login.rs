@@ -10,6 +10,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::{debug, info};
@@ -96,12 +97,10 @@ pub async fn run_device_auth() -> Result<LoginTokens> {
     let pkce = generate_pkce();
     let state = generate_state();
 
-    // PKCE redirect_uri must be exactly http://localhost:1455/auth/callback
-    // (registered with OpenAI). Random port fallback is NOT possible.
-    let listener = TcpListener::bind(format!("{CALLBACK_HOST}:{CALLBACK_PORT}"))
-        .await
-        .map_err(|e| anyhow::anyhow!("Cannot bind port {CALLBACK_PORT} (already in use?): {e}"))?;
-    let actual_redirect = redirect_uri(CALLBACK_PORT);
+    // Try port 1455 first (OpenAI's registered redirect URI), with fallbacks for
+    // Windows environments where that port may be blocked.
+    let (listener, actual_port) = bind_callback_listener().await?;
+    let actual_redirect = redirect_uri(actual_port);
     let authorize_url = build_authorize_url(&pkce.code_challenge, &state, &actual_redirect);
 
     user_println("");
@@ -333,6 +332,8 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
     let client = crate::auth::build_http_client()?;
 
     // Step 1: Request device code
+    user_println("  Requesting device code...");
+    let _ = std::io::stdout().flush();
     info!("Requesting device code from {DEVICE_USERCODE_URL}");
     let resp = client
         .post(DEVICE_USERCODE_URL)
@@ -380,6 +381,7 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
     user_println(&format!(
         "  Waiting for authorization (polling every {interval_secs}s)..."
     ));
+    let _ = std::io::stdout().flush();
 
     // Step 3: Poll for token (Ctrl+C safe)
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
@@ -531,6 +533,88 @@ pub fn build_auth_json(tokens: &LoginTokens, account_id: &str) -> serde_json::Va
         },
         "last_refresh": format_iso8601(ts)
     })
+}
+
+// ── Browser open ──────────────────────────────────────────
+
+// ── Callback listener ─────────────────────────────────────
+
+/// Bind the PKCE callback listener and return `(listener, actual_port)`.
+///
+/// Preference order:
+///   1. 127.0.0.1:1455  — the port OpenAI registers as the primary redirect URI.
+///   2. [::1]:1455       — Windows IPv4-only port exclusions don't block IPv6;
+///                         browsers use Happy Eyeballs and reach the IPv6 socket.
+///   3. 127.0.0.1:0      — OS-assigned random port; OpenAI's auth server follows
+///                         RFC 8252 and accepts any loopback port for native apps.
+async fn bind_callback_listener() -> Result<(TcpListener, u16)> {
+    // 1. Preferred: fixed port on IPv4.
+    match TcpListener::bind(format!("{CALLBACK_HOST}:{CALLBACK_PORT}")).await {
+        Ok(l) => return Ok((l, CALLBACK_PORT)),
+        Err(e) => {
+            debug!("IPv4 bind on {CALLBACK_PORT} failed: {e}");
+            bind_callback_listener_fallback(e).await
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn listener_port(l: &TcpListener) -> Result<u16> {
+    Ok(l.local_addr().context("getting listener port")?.port())
+}
+
+#[cfg(target_os = "windows")]
+async fn bind_callback_listener_fallback(ipv4_err: std::io::Error) -> Result<(TcpListener, u16)> {
+    // WSAEACCES (10013): port blocked by Windows (excluded range, SO_EXCLUSIVEADDRUSE, etc.)
+    if ipv4_err.raw_os_error() == Some(10013) {
+        // 2. Try IPv6 loopback on the same port — Windows exclusions are IPv4-only.
+        match TcpListener::bind(format!("[::1]:{CALLBACK_PORT}")).await {
+            Ok(l) => {
+                user_println(&format!(
+                    "Note: port {CALLBACK_PORT} blocked on IPv4 (Windows); \
+                    using IPv6 loopback."
+                ));
+                return Ok((l, CALLBACK_PORT));
+            }
+            Err(e6) => {
+                debug!("IPv6 bind on {CALLBACK_PORT} failed: {e6}");
+            }
+        }
+
+        // 3. Fall back to a random OS-assigned port (RFC 8252 loopback).
+        match TcpListener::bind(format!("{CALLBACK_HOST}:0")).await {
+            Ok(l) => {
+                let port = listener_port(&l)?;
+                user_println(&format!(
+                    "Note: port {CALLBACK_PORT} blocked on Windows; \
+                    using random port {port} (RFC 8252 loopback)."
+                ));
+                return Ok((l, port));
+            }
+            Err(e0) => {
+                return Err(anyhow::anyhow!(
+                    "Cannot bind callback port — all fallbacks failed.\n\
+                    \n  IPv4 {CALLBACK_PORT}: {ipv4_err}\
+                    \n  IPv6 {CALLBACK_PORT}: (see above)\
+                    \n  Random port:  {e0}\
+                    \n\nCheck if another process holds port {CALLBACK_PORT}:\
+                    \n  netstat -ano | findstr :{CALLBACK_PORT}\
+                    \n\nOr use device code flow:\n  codex-switch login --device"
+                ));
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Cannot bind port {CALLBACK_PORT} (already in use?): {ipv4_err}"
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn bind_callback_listener_fallback(ipv4_err: std::io::Error) -> Result<(TcpListener, u16)> {
+    Err(anyhow::anyhow!(
+        "Cannot bind port {CALLBACK_PORT} (already in use?): {ipv4_err}"
+    ))
 }
 
 // ── Browser open ──────────────────────────────────────────
