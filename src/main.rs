@@ -777,7 +777,13 @@ async fn launch_cmd(alias: Option<&str>, args: Vec<String>, json: bool) -> Resul
     }
 
     let codex_auth = auth::codex_auth_path()?;
-    let backup = codex_auth.with_extension("json.bak");
+    // Unique per-invocation backup name (PID + timestamp): prevents two
+    // concurrent `launch` commands from clobbering each other's backup.
+    let backup = codex_auth.with_extension(format!(
+        "json.bak.{}.{}",
+        std::process::id(),
+        auth::now_unix_secs()
+    ));
     let had_original = codex_auth.exists();
 
     // Swap auth.json → start codex → wait for it to read auth → restore.
@@ -789,6 +795,14 @@ async fn launch_cmd(alias: Option<&str>, args: Vec<String>, json: bool) -> Resul
         if had_original {
             std::fs::copy(&codex_auth, &backup)
                 .with_context(|| format!("backing up {}", codex_auth.display()))?;
+            // Backup holds full tokens — restrict to 0600 so other local users
+            // cannot read it during the (brief) window before restore.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600));
+            }
         }
 
         profile::stage_profile_auth(&target_alias)?;
@@ -808,9 +822,20 @@ async fn launch_cmd(alias: Option<&str>, args: Vec<String>, json: bool) -> Resul
         .context("Failed to start codex")?;
 
     // Give codex time to read auth.json, then restore immediately.
-    // Configurable via [launch] restore_delay_secs (default: 7).
+    // Configurable via [launch] restore_delay_secs (default: 3).
     let delay = config::get().launch.restore_delay_secs;
-    std::thread::sleep(std::time::Duration::from_secs(delay));
+    // If the user interrupts (Ctrl+C) during this window, still restore the
+    // original auth.json before exiting rather than leaving the staged profile
+    // in place. tokio's ctrl_c handler overrides the default-terminate, so the
+    // restore block below always runs.
+    tokio::select! {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {}
+        _ = tokio::signal::ctrl_c() => {
+            if !json {
+                user_println("Interrupted; restoring original auth.json...");
+            }
+        }
+    }
 
     {
         let _lock = profile::lock_live_auth().context("acquiring auth lock for restore")?;
