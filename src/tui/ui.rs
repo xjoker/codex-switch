@@ -110,6 +110,25 @@ fn display_width(s: &str) -> usize {
 }
 
 fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
+    if app.accounts.is_empty() {
+        let block = Block::default()
+            .title(" codex-switch ")
+            .borders(Borders::ALL)
+            .border_style(base().fg(C_BLUE))
+            .style(base());
+        let hint = Paragraph::new(Line::from(vec![
+            Span::styled("No accounts yet. Press ", Style::default().fg(DIM)),
+            Span::styled("a", Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" to add one, or ", Style::default().fg(DIM)),
+            Span::styled("q", Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" to quit.", Style::default().fg(DIM)),
+        ]))
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(hint, area);
+        return;
+    }
+
     let hdr = base()
         .fg(C_CYAN)
         .add_modifier(Modifier::BOLD);

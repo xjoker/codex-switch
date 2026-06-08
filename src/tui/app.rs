@@ -1060,13 +1060,9 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
     app.load_profiles();
     app.update_view();
 
-    if app.accounts.is_empty() {
-        ratatui::restore();
-        println!("No saved profiles. Run `codex-switch login` to add an account first.");
-        return Ok(());
+    if !app.accounts.is_empty() {
+        app.refresh(false);
     }
-
-    app.refresh(false);
     app.start_update_check();
 
     loop {
