@@ -41,7 +41,7 @@ crossterm = "0.29"
 urlencoding = "2"
 toml = "1"
 rand = "0.10"
-fs4 = "0.12"
+fs4 = "1.1"
 chrono = { version = "0.4", features = ["clock"] }
 supports-color = "3"
 owo-colors = "4"
