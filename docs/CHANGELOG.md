@@ -1,5 +1,9 @@
 # Changelog
 
+## v20260810.3.0 — 2026-08-10
+
+- **Reset-card expiry warnings are consistent inside account details** — The account detail popup now colors the Reset cards heading, available count, and expiry row with the same earliest-expiry thresholds as the account table: red below three days, yellow below seven days, and green otherwise. A failed detail fetch stays yellow, while a positive count without a trustworthy expiry stays neutral instead of being misreported as safely green.
+
 ## v20260810.2.0 — 2026-08-10
 
 - **Reset-card detail refresh avoids endpoint-wide rate limits** — Card details are requested only when the primary usage response reports missing Card records, and those secondary requests are serialized across accounts. HTTP 429 retries now honor numeric `Retry-After` values and otherwise use exponential backoff, preventing a six-account refresh from repeatedly stampeding the auxiliary endpoint.

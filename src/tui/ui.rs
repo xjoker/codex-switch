@@ -720,7 +720,7 @@ fn reset_cards_table_text(u: &UsageInfo) -> String {
         .unwrap_or_else(|| "--".to_string())
 }
 
-fn reset_cards_color(u: &UsageInfo) -> Color {
+pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
     match reset_credits_count(u) {
         Some(0) => DIM,
         Some(_) => crate::usage::earliest_reset_credit(&u.reset_credits)
@@ -736,7 +736,13 @@ fn reset_cards_color(u: &UsageInfo) -> Color {
                     C_GREEN
                 }
             })
-            .unwrap_or(C_GREEN),
+            .unwrap_or_else(|| {
+                if u.reset_credits_error.is_some() {
+                    C_YELLOW
+                } else {
+                    DIM
+                }
+            }),
         None if u.reset_credits_error.is_some() => C_YELLOW,
         None => DIM,
     }
@@ -1167,7 +1173,7 @@ fn status_bar_height(app: &App, width: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, plan_color,
+        C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, DIM, plan_color,
         render_usage_gauges, reset_cards_color, status_message_color, table_text_widths,
         usage_gauges_height,
     };
@@ -1230,6 +1236,22 @@ mod tests {
         assert_eq!(reset_cards_color(&red), C_RED);
         assert_eq!(reset_cards_color(&yellow), C_YELLOW);
         assert_eq!(reset_cards_color(&green), C_GREEN);
+    }
+
+    #[test]
+    fn reset_card_color_does_not_mark_unknown_expiry_as_green() {
+        let fetch_error = UsageInfo {
+            reset_credits_available_count: Some(1),
+            reset_credits_error: Some("HTTP 429".into()),
+            ..Default::default()
+        };
+        let unknown_expiry = UsageInfo {
+            reset_credits_available_count: Some(1),
+            ..Default::default()
+        };
+
+        assert_eq!(reset_cards_color(&fetch_error), C_YELLOW);
+        assert_eq!(reset_cards_color(&unknown_expiry), DIM);
     }
 
     #[test]
