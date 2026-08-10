@@ -1,4 +1,6 @@
 use std::path::Path;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::Result;
 use rand::Rng;
@@ -14,6 +16,7 @@ use super::{ConsumedResetCredit, MAX_RETRIES, RETRY_DELAY, ResetCredit, UsageInf
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const RESET_CREDITS_CONSUME_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
+static RESET_CREDITS_FETCH_LIMITER: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConsumeFailureKind {
@@ -97,6 +100,11 @@ pub(super) async fn enrich_reset_credits(
     account_id: Option<&str>,
     usage: &mut UsageInfo,
 ) {
+    if !should_fetch_reset_credit_details(usage) {
+        usage.reset_credits_error = None;
+        return;
+    }
+
     match fetch_reset_credits(client, access_token, account_id).await {
         Ok((available_count, credits)) => {
             if available_count.is_some() {
@@ -116,6 +124,37 @@ pub(super) async fn enrich_reset_credits(
             usage.reset_credits_error = Some(extract_error_summary(&msg));
         }
     }
+}
+
+fn should_fetch_reset_credit_details(usage: &UsageInfo) -> bool {
+    usage
+        .reset_credits_available_count
+        .is_some_and(|count| count > usage.reset_credits.len() as u64)
+}
+
+fn reset_credits_fetch_limiter() -> &'static tokio::sync::Semaphore {
+    RESET_CREDITS_FETCH_LIMITER.get_or_init(|| tokio::sync::Semaphore::new(1))
+}
+
+fn retry_delay_for_response(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    attempt: u32,
+) -> Duration {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        && let Some(seconds) = headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+    {
+        return Duration::from_secs(seconds.clamp(1, 30));
+    }
+
+    exponential_retry_delay(attempt)
+}
+
+fn exponential_retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(RETRY_DELAY.as_secs().saturating_mul(1 << attempt.min(4)))
 }
 
 fn retain_cached_reset_credits(usage: &mut UsageInfo, cached: &UsageInfo) {
@@ -144,6 +183,11 @@ async fn fetch_reset_credits_at_url(
     account_id: Option<&str>,
     url: &str,
 ) -> Result<(Option<u64>, Vec<ResetCredit>)> {
+    let _permit = reset_credits_fetch_limiter()
+        .acquire()
+        .await
+        .expect("reset credits fetch limiter is never closed");
+
     for attempt in 0..MAX_RETRIES {
         let mut req = client
             .get(url)
@@ -165,7 +209,7 @@ async fn fetch_reset_credits_at_url(
                     MAX_RETRIES,
                     format_reqwest_error("request failed", &error)
                 );
-                tokio::time::sleep(RETRY_DELAY).await;
+                tokio::time::sleep(exponential_retry_delay(attempt)).await;
                 continue;
             }
             Err(error) => {
@@ -175,12 +219,14 @@ async fn fetch_reset_credits_at_url(
         let status = resp.status();
         if !status.is_success() {
             if (status.is_server_error() || status.as_u16() == 429) && attempt + 1 < MAX_RETRIES {
+                let retry_delay = retry_delay_for_response(status, resp.headers(), attempt);
                 debug!(
-                    "reset credits fetch attempt {}/{} returned HTTP {status}",
+                    "reset credits fetch attempt {}/{} returned HTTP {status}; retrying in {:.1}s",
                     attempt + 1,
-                    MAX_RETRIES
+                    MAX_RETRIES,
+                    retry_delay.as_secs_f64()
                 );
-                tokio::time::sleep(RETRY_DELAY).await;
+                tokio::time::sleep(retry_delay).await;
                 continue;
             }
             anyhow::bail!("reset credits request failed (HTTP {status})");
@@ -194,7 +240,7 @@ async fn fetch_reset_credits_at_url(
                     attempt + 1,
                     MAX_RETRIES
                 );
-                tokio::time::sleep(RETRY_DELAY).await;
+                tokio::time::sleep(exponential_retry_delay(attempt)).await;
                 continue;
             }
             Err(error) => {
@@ -222,6 +268,21 @@ pub fn earliest_reset_credit(credits: &[ResetCredit]) -> Option<&ResetCredit> {
             .map(|dt| dt.timestamp())
             .unwrap_or(i64::MAX)
     })
+}
+
+pub async fn fetch_earliest_reset_credit(alias: &str, profile_path: &Path) -> Result<ResetCredit> {
+    let val = auth::read_auth(profile_path)?;
+    let (access_token, _) = auth::extract_tokens(&val);
+    let access_token = access_token
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{alias}: auth.json missing access_token"))?;
+    let account_id = crate::jwt::parse_account_info(&val).account_id;
+    let client = auth::build_http_client()?;
+    let (_, credits) = fetch_reset_credits(&client, &access_token, account_id.as_deref()).await?;
+
+    earliest_reset_credit(&credits)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("{alias}: no available reset cards"))
 }
 
 pub async fn consume_earliest_reset_credit(
@@ -477,6 +538,7 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     fn local_http_client() -> reqwest::Client {
         reqwest::Client::builder().no_proxy().build().unwrap()
@@ -588,6 +650,103 @@ mod tests {
         let (count, credits) = result.unwrap();
         assert_eq!(count, Some(1));
         assert_eq!(credits.len(), 1);
+    }
+
+    #[test]
+    fn reset_credit_details_are_only_fetched_for_a_positive_reported_count() {
+        let missing = UsageInfo::default();
+        let zero = UsageInfo {
+            reset_credits_available_count: Some(0),
+            ..Default::default()
+        };
+        let positive = UsageInfo {
+            reset_credits_available_count: Some(1),
+            ..Default::default()
+        };
+
+        assert!(!should_fetch_reset_credit_details(&missing));
+        assert!(!should_fetch_reset_credit_details(&zero));
+        assert!(should_fetch_reset_credit_details(&positive));
+    }
+
+    #[tokio::test]
+    async fn reset_credit_detail_fetches_are_serialized_across_accounts() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new().route(
+            "/credits",
+            get({
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                move || {
+                    let active = Arc::clone(&active);
+                    let maximum = Arc::clone(&maximum);
+                    async move {
+                        let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(now_active, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Json(json!({"available_count": 1, "credits": []}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url = format!("http://{address}/credits");
+        let client = local_http_client();
+
+        let (first, second) = tokio::join!(
+            fetch_reset_credits_at_url(&client, "token-1", None, &url),
+            fetch_reset_credits_at_url(&client, "token-2", None, &url),
+        );
+        server.abort();
+
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reset_credit_fetch_honors_retry_after_on_rate_limit() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::clone(&attempts);
+        let app = axum::Router::new().route(
+            "/credits",
+            get(move || {
+                let captured = Arc::clone(&captured);
+                async move {
+                    if captured.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [(reqwest::header::RETRY_AFTER.as_str(), "2")],
+                            "rate limited",
+                        )
+                            .into_response()
+                    } else {
+                        Json(json!({"available_count": 1, "credits": []})).into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let started = Instant::now();
+        let result = fetch_reset_credits_at_url(
+            &local_http_client(),
+            "access-token",
+            None,
+            &format!("http://{address}/credits"),
+        )
+        .await;
+        server.abort();
+
+        result.unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(started.elapsed() >= Duration::from_millis(1_900));
     }
 
     #[test]

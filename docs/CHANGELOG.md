@@ -1,5 +1,9 @@
 # Changelog
 
+## v20260810.2.0 — 2026-08-10
+
+- **Reset-card detail refresh avoids endpoint-wide rate limits** — Card details are requested only when the primary usage response reports missing Card records, and those secondary requests are serialized across accounts. HTTP 429 retries now honor numeric `Retry-After` values and otherwise use exponential backoff, preventing a six-account refresh from repeatedly stampeding the auxiliary endpoint.
+
 ## v20260810.1.0 — 2026-08-10
 
 - **Reset cards survive transient detail-fetch failures** — The reset-card endpoint now retries transport failures, HTTP 429/5xx responses, and malformed JSON up to three times. If all attempts fail, the TUI keeps a count-matched cached card list while still reporting that fresh details are unavailable, so one flaky secondary request no longer replaces useful Card data with `err`.
