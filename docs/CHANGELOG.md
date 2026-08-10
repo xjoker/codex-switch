@@ -1,5 +1,11 @@
 # Changelog
 
+## v20260810.1.0 — 2026-08-10
+
+- **Reset cards survive transient detail-fetch failures** — The reset-card endpoint now retries transport failures, HTTP 429/5xx responses, and malformed JSON up to three times. If all attempts fail, the TUI keeps a count-matched cached card list while still reporting that fresh details are unavailable, so one flaky secondary request no longer replaces useful Card data with `err`.
+- **Reset cards warn before they expire** — The TUI Card count turns yellow when the earliest valid card has less than seven days remaining and red below three days, making the warning visible without opening the account menu.
+- **Dependency and automation maintenance** — Updated `libc`, `thiserror`, `toml`, `serde_json`, and `serde`, and configured Dependabot to target the active `dev` branch instead of the repository default branch.
+
 ## v20260804.1.0 — 2026-08-04
 
 - **`self-update --version` rejects anything that is not a version number** — The argument becomes a path segment in a GitHub release lookup, and `..` inside a URL path is resolved rather than treated as text, so a malformed value could have pointed the lookup at another repository's release metadata. The value is now both percent-encoded and rejected outright before any request is made, and a typo is reported as a bad argument instead of surfacing as a confusing 404.

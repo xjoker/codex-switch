@@ -110,8 +110,23 @@ pub(super) async fn enrich_reset_credits(
         Err(err) => {
             let msg = err.to_string();
             debug!("[{alias}] reset credits fetch failed: {msg}");
+            if let Some(cached) = crate::cache::get_async(alias).await {
+                retain_cached_reset_credits(usage, &cached);
+            }
             usage.reset_credits_error = Some(extract_error_summary(&msg));
         }
+    }
+}
+
+fn retain_cached_reset_credits(usage: &mut UsageInfo, cached: &UsageInfo) {
+    if usage.reset_credits_available_count.is_none() {
+        usage.reset_credits_available_count = cached.reset_credits_available_count;
+    }
+    if usage.reset_credits.is_empty()
+        && usage.reset_credits_available_count != Some(0)
+        && usage.reset_credits_available_count == cached.reset_credits_available_count
+    {
+        usage.reset_credits.clone_from(&cached.reset_credits);
     }
 }
 
@@ -120,35 +135,82 @@ async fn fetch_reset_credits(
     access_token: &str,
     account_id: Option<&str>,
 ) -> Result<(Option<u64>, Vec<ResetCredit>)> {
-    let mut req = client
-        .get(reset_credits_url())
-        .bearer_auth(access_token)
-        .header("Accept", "application/json")
-        .header("OpenAI-Beta", "codex-1")
-        .header("Originator", "Codex Desktop");
+    fetch_reset_credits_at_url(client, access_token, account_id, &reset_credits_url()).await
+}
 
-    if let Some(account_id) = account_id.filter(|s| !s.trim().is_empty()) {
-        req = req.header("Chatgpt-Account-Id", account_id);
+async fn fetch_reset_credits_at_url(
+    client: &reqwest::Client,
+    access_token: &str,
+    account_id: Option<&str>,
+    url: &str,
+) -> Result<(Option<u64>, Vec<ResetCredit>)> {
+    for attempt in 0..MAX_RETRIES {
+        let mut req = client
+            .get(url)
+            .bearer_auth(access_token)
+            .header("Accept", "application/json")
+            .header("OpenAI-Beta", "codex-1")
+            .header("Originator", "Codex Desktop");
+
+        if let Some(account_id) = account_id.filter(|s| !s.trim().is_empty()) {
+            req = req.header("Chatgpt-Account-Id", account_id);
+        }
+
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(error) if attempt + 1 < MAX_RETRIES => {
+                debug!(
+                    "reset credits fetch attempt {}/{} failed before response: {}",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    format_reqwest_error("request failed", &error)
+                );
+                tokio::time::sleep(RETRY_DELAY).await;
+                continue;
+            }
+            Err(error) => {
+                return Err(format_reqwest_error("reset credits request failed", &error));
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            if (status.is_server_error() || status.as_u16() == 429) && attempt + 1 < MAX_RETRIES {
+                debug!(
+                    "reset credits fetch attempt {}/{} returned HTTP {status}",
+                    attempt + 1,
+                    MAX_RETRIES
+                );
+                tokio::time::sleep(RETRY_DELAY).await;
+                continue;
+            }
+            anyhow::bail!("reset credits request failed (HTTP {status})");
+        }
+
+        let body: Value = match resp.json().await {
+            Ok(body) => body,
+            Err(error) if attempt + 1 < MAX_RETRIES => {
+                debug!(
+                    "reset credits fetch attempt {}/{} returned invalid JSON: {error}",
+                    attempt + 1,
+                    MAX_RETRIES
+                );
+                tokio::time::sleep(RETRY_DELAY).await;
+                continue;
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to parse reset credits response: {error}"
+                ));
+            }
+        };
+        let (available_count, credits, valid_shape) = parse_reset_credits_summary(&body);
+        if !valid_shape {
+            anyhow::bail!("reset credits response missing expected fields");
+        }
+        return Ok((available_count, credits));
     }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format_reqwest_error("reset credits request failed", &e))?;
-    let status = resp.status();
-    if !status.is_success() {
-        anyhow::bail!("reset credits request failed (HTTP {status})");
-    }
-
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to parse reset credits response: {e}"))?;
-    let (available_count, credits, valid_shape) = parse_reset_credits_summary(&body);
-    if !valid_shape {
-        anyhow::bail!("reset credits response missing expected fields");
-    }
-    Ok((available_count, credits))
+    unreachable!("reset credits retry loop always returns on its final attempt")
 }
 
 pub fn earliest_reset_credit(credits: &[ResetCredit]) -> Option<&ResetCredit> {
@@ -411,10 +473,14 @@ mod tests {
     use axum::Json;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    fn local_http_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
 
     #[test]
     fn test_reset_credit_without_expiry_is_preserved_and_sorted_last() {
@@ -480,6 +546,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reset_credit_fetch_retries_a_transient_server_error() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::clone(&attempts);
+        let app = axum::Router::new().route(
+            "/credits",
+            get(move || {
+                let captured = Arc::clone(&captured);
+                async move {
+                    if captured.fetch_add(1, Ordering::SeqCst) == 0 {
+                        StatusCode::SERVICE_UNAVAILABLE.into_response()
+                    } else {
+                        Json(json!({
+                            "available_count": 1,
+                            "credits": [{
+                                "id": "credit-1",
+                                "status": "available",
+                                "expires_at": "2026-08-12T00:00:00Z"
+                            }]
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = local_http_client();
+        let result = fetch_reset_credits_at_url(
+            &client,
+            "access-token",
+            None,
+            &format!("http://{address}/credits"),
+        )
+        .await;
+        server.abort();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "result: {result:?}");
+        let (count, credits) = result.unwrap();
+        assert_eq!(count, Some(1));
+        assert_eq!(credits.len(), 1);
+    }
+
+    #[test]
+    fn failed_reset_credit_refresh_retains_the_last_known_cards() {
+        let cached = UsageInfo {
+            reset_credits_available_count: Some(1),
+            reset_credits: vec![ResetCredit {
+                id: "cached-credit".to_string(),
+                granted_at: None,
+                expires_at: Some("2026-08-12T00:00:00Z".to_string()),
+            }],
+            ..Default::default()
+        };
+        let mut refreshed = UsageInfo::default();
+
+        retain_cached_reset_credits(&mut refreshed, &cached);
+
+        assert_eq!(refreshed.reset_credits_available_count, Some(1));
+        assert_eq!(refreshed.reset_credits[0].id, "cached-credit");
+    }
+
+    #[tokio::test]
     async fn test_consume_retry_reuses_redeem_request_id() {
         let request_ids = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured = Arc::clone(&request_ids);
@@ -511,7 +641,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let result = consume_reset_credit_at_url(
-            &reqwest::Client::new(),
+            &local_http_client(),
             "access-token",
             Some("workspace-123"),
             ResetCredit {
@@ -541,7 +671,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let error = consume_reset_credit_at_url(
-            &reqwest::Client::new(),
+            &local_http_client(),
             "access-token",
             None,
             ResetCredit {
@@ -566,7 +696,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let error = consume_reset_credit_at_url(
-            &reqwest::Client::new(),
+            &local_http_client(),
             "access-token",
             None,
             ResetCredit {
@@ -594,7 +724,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let error = consume_reset_credit_at_url(
-            &reqwest::Client::new(),
+            &local_http_client(),
             "access-token",
             None,
             ResetCredit {
@@ -639,7 +769,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let error = consume_reset_credit_at_url(
-            &reqwest::Client::new(),
+            &local_http_client(),
             "access-token",
             None,
             ResetCredit {
@@ -678,7 +808,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let error = consume_reset_credit_at_url(
-            &reqwest::Client::new(),
+            &local_http_client(),
             "access-token",
             None,
             ResetCredit {

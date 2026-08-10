@@ -723,7 +723,20 @@ fn reset_cards_table_text(u: &UsageInfo) -> String {
 fn reset_cards_color(u: &UsageInfo) -> Color {
     match reset_credits_count(u) {
         Some(0) => DIM,
-        Some(_) => C_GREEN,
+        Some(_) => crate::usage::earliest_reset_credit(&u.reset_credits)
+            .and_then(|credit| credit.expires_at.as_deref())
+            .and_then(|expires_at| chrono::DateTime::parse_from_rfc3339(expires_at).ok())
+            .map(|expires_at| expires_at.timestamp() - crate::auth::now_unix_secs())
+            .map(|remaining| {
+                if remaining < 3 * 24 * 60 * 60 {
+                    C_RED
+                } else if remaining < 7 * 24 * 60 * 60 {
+                    C_YELLOW
+                } else {
+                    C_GREEN
+                }
+            })
+            .unwrap_or(C_GREEN),
         None if u.reset_credits_error.is_some() => C_YELLOW,
         None => DIM,
     }
@@ -1154,10 +1167,11 @@ fn status_bar_height(app: &App, width: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        C_BLUE, C_CYAN, C_GRAY, C_MAGENTA, C_RED, C_YELLOW, plan_color, render_usage_gauges,
-        status_message_color, table_text_widths, usage_gauges_height,
+        C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, plan_color,
+        render_usage_gauges, reset_cards_color, status_message_color, table_text_widths,
+        usage_gauges_height,
     };
-    use crate::usage::{AdditionalRateLimit, UsageInfo, WindowUsage};
+    use crate::usage::{AdditionalRateLimit, ResetCredit, UsageInfo, WindowUsage};
     use ratatui::style::Modifier;
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -1178,6 +1192,44 @@ mod tests {
     fn status_message_color_distinguishes_errors_from_information() {
         assert_eq!(status_message_color(false), C_CYAN);
         assert_eq!(status_message_color(true), C_RED);
+    }
+
+    fn reset_credit_expiring_in(seconds: i64) -> ResetCredit {
+        ResetCredit {
+            id: format!("credit-{seconds}"),
+            granted_at: None,
+            expires_at: Some(
+                chrono::DateTime::from_timestamp(crate::auth::now_unix_secs() + seconds, 0)
+                    .unwrap()
+                    .to_rfc3339(),
+            ),
+        }
+    }
+
+    #[test]
+    fn reset_card_color_warns_for_the_earliest_expiring_available_card() {
+        let red = UsageInfo {
+            reset_credits_available_count: Some(2),
+            reset_credits: vec![
+                reset_credit_expiring_in(10 * 24 * 60 * 60),
+                reset_credit_expiring_in(2 * 24 * 60 * 60),
+            ],
+            ..Default::default()
+        };
+        let yellow = UsageInfo {
+            reset_credits_available_count: Some(1),
+            reset_credits: vec![reset_credit_expiring_in(6 * 24 * 60 * 60)],
+            ..Default::default()
+        };
+        let green = UsageInfo {
+            reset_credits_available_count: Some(1),
+            reset_credits: vec![reset_credit_expiring_in(8 * 24 * 60 * 60)],
+            ..Default::default()
+        };
+
+        assert_eq!(reset_cards_color(&red), C_RED);
+        assert_eq!(reset_cards_color(&yellow), C_YELLOW);
+        assert_eq!(reset_cards_color(&green), C_GREEN);
     }
 
     #[test]

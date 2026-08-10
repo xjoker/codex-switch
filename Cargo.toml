@@ -1,6 +1,6 @@
 [package]
 name = "codex-switch"
-version = "20260804.1.0"
+version = "20260810.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Codex account switcher — multi-profile manager with usage dashboard"
