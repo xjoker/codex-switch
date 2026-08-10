@@ -1,7 +1,10 @@
 version: 2
 updates:
+  # master only ever receives fast-forwards from dev, so dependency updates
+  # have to target dev or every one of them needs its base rewritten by hand.
   - package-ecosystem: "cargo"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     commit-message:
@@ -9,6 +12,7 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     commit-message:
