@@ -6,6 +6,8 @@ use anyhow::{Context, Result, bail};
 use tokio::sync::{Mutex, OnceCell};
 use tracing::{debug, warn};
 
+use crate::http_retry::{self, ReplaySafety};
+
 const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 
@@ -217,17 +219,19 @@ pub(crate) async fn fetch_models(
 ) -> Result<Vec<ModelEntry>> {
     let version = detect_codex_version().await;
     for attempt in 1..=3 {
-        let response = build_models_request(client, access_token, account_id, is_fedramp, version)
-            .send()
-            .await;
+        let response = http_retry::send(
+            build_models_request(client, access_token, account_id, is_fedramp, version),
+            ReplaySafety::Idempotent,
+        )
+        .await;
         match response {
-            Ok(resp) if resp.status().is_success() => {
-                let body: serde_json::Value = resp.json().await?;
+            Ok(resp) if resp.status.is_success() => {
+                let body: serde_json::Value = serde_json::from_slice(&resp.body)?;
                 return parse_models_body(&body);
             }
             Ok(resp) => {
-                let status = resp.status();
-                let retryable = status.is_server_error() || status.as_u16() == 429;
+                let status = resp.status;
+                let retryable = status.is_server_error();
                 if !retryable || attempt == 3 {
                     bail!("models endpoint returned {status}");
                 }
@@ -235,10 +239,7 @@ pub(crate) async fn fetch_models(
             }
             Err(error) => {
                 if attempt == 3 {
-                    return Err(crate::auth::format_reqwest_error(
-                        "models fetch failed after 3 attempts",
-                        &error,
-                    ));
+                    return Err(error.context("models fetch failed after 3 attempts"));
                 }
                 warn!("models fetch attempt {attempt}/3 failed: {error}; retrying");
             }
@@ -514,6 +515,7 @@ async fn warmup_additional_models(
             .send()
             .await
             .map_err(|e| crate::auth::format_reqwest_error("additional warmup failed", &e))?;
+        http_retry::wait_after_429_headers(resp.status(), resp.headers(), 0).await;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -686,6 +688,8 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
     .await
     .map_err(|e| crate::auth::format_reqwest_error("warmup request failed", &e))?;
 
+    http_retry::wait_after_429_headers(resp.status(), resp.headers(), 0).await;
+
     let status = resp.status();
     debug!("[{alias}] warmup status: {status}");
 
@@ -738,6 +742,8 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                 .send()
                 .await
                 .map_err(|e| crate::auth::format_reqwest_error("warmup retry failed", &e))?;
+                http_retry::wait_after_429_headers(retry_resp.status(), retry_resp.headers(), 1)
+                    .await;
                 let retry_status = retry_resp.status();
                 if retry_status.is_success() {
                     let _ = retry_resp.chunk().await;
@@ -792,6 +798,12 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                         .map_err(|e| {
                             crate::auth::format_reqwest_error("warmup retry failed", &e)
                         })?;
+                        http_retry::wait_after_429_headers(
+                            retry_resp.status(),
+                            retry_resp.headers(),
+                            1,
+                        )
+                        .await;
                         let retry_status = retry_resp.status();
                         if retry_status.is_success() {
                             let _ = retry_resp.chunk().await;

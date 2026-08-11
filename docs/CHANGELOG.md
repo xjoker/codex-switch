@@ -1,5 +1,10 @@
 # Changelog
 
+## v20260811.1.0 — 2026-08-11
+
+- **HTTP 429 handling now slows down instead of amplifying rate limits** — The default TUI refresh interval is five minutes. Replay-safe GET requests honor `Retry-After` and response-body hints, otherwise use bounded exponential backoff with jitter; non-replayable authentication and warmup POST requests wait after a 429 without being replayed. Usage retries stop at one layer instead of multiplying across nested loops.
+- **Reset-card consumption is fail-closed against duplicate charges** — One confirmation sends at most one consume POST, and ambiguous transport, rate-limit, server, or response errors require verification instead of automatic replay. Confirmations bind the exact card ID the user saw, the TUI blocks another consume after success or an unknown outcome, and a zero-wait per-profile OS lock rejects concurrent processes rather than queueing a stale confirmation that could select the next card.
+
 ## v20260810.3.0 — 2026-08-10
 
 - **Reset-card expiry warnings are consistent inside account details** — The account detail popup now colors the Reset cards heading, available count, and expiry row with the same earliest-expiry thresholds as the account table: red below three days, yellow below seven days, and green otherwise. A failed detail fetch stays yellow, while a positive count without a trustworthy expiry stays neutral instead of being misreported as safely green.

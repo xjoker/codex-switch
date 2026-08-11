@@ -770,7 +770,9 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             super::app::ConfirmAction::BatchDelete(aliases) => {
                 format!("Delete {} marked profile(s)? (y/n)", aliases.len())
             }
-            super::app::ConfirmAction::ConsumeResetCard { alias, expires_at } => {
+            super::app::ConfirmAction::ConsumeResetCard {
+                alias, expires_at, ..
+            } => {
                 format!(
                     "Confirm reset card for '{alias}' expiring {expires_at}: y to use, any other key cancels"
                 )

@@ -117,6 +117,21 @@ pub fn lock_launch_session() -> Result<File> {
     acquire_file_lock(&path, LOCK_WAIT_TIMEOUT, "launch session")
 }
 
+/// Reject concurrent reset-card consumes for the same profile across processes.
+pub fn lock_reset_card_consume(profile_path: &Path) -> Result<File> {
+    let parent = profile_path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "profile auth path has no parent: {}",
+            profile_path.display()
+        )
+    })?;
+    acquire_file_lock(
+        &parent.join("reset-card-consume.lock"),
+        Duration::ZERO,
+        "reset card consume",
+    )
+}
+
 struct AuthTransaction {
     _launch: File,
     _auth: File,
@@ -1256,7 +1271,23 @@ mod tests {
     use anyhow::Result;
     use fs4::FileExt;
 
-    use super::{cmd_delete, cmd_save, cmd_use, rename_profile, switch_profile, validate_alias};
+    use super::{
+        cmd_delete, cmd_save, cmd_use, lock_reset_card_consume, rename_profile, switch_profile,
+        validate_alias,
+    };
+
+    #[test]
+    fn reset_card_lock_rejects_a_concurrent_process_instead_of_queueing() {
+        let home = tempfile::tempdir().unwrap();
+        let auth_path = home.path().join("account/auth.json");
+        let first = lock_reset_card_consume(&auth_path).unwrap();
+
+        let second = lock_reset_card_consume(&auth_path).unwrap_err();
+        assert!(second.to_string().contains("remained held"));
+
+        drop(first);
+        assert!(lock_reset_card_consume(&auth_path).is_ok());
+    }
 
     struct TestEnv {
         _lock: MutexGuard<'static, ()>,

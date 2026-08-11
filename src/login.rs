@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, info};
 
 use crate::auth::{CLIENT_ID, ISSUER};
+use crate::http_retry::{self, ReplaySafety};
 use crate::output::user_println;
 
 const ORIGINATOR: &str = "codex_cli_rs";
@@ -192,9 +193,11 @@ async fn obtain_api_key(client: &reqwest::Client, id_token: &str) -> Option<Stri
     }
 
     let token_url = format!("{ISSUER}/oauth/token");
-    let resp = match build_api_key_exchange_request(client, &token_url, id_token)
-        .send()
-        .await
+    let resp = match http_retry::send(
+        build_api_key_exchange_request(client, &token_url, id_token),
+        ReplaySafety::UnsafePost,
+    )
+    .await
     {
         Ok(resp) => resp,
         Err(e) => {
@@ -202,14 +205,14 @@ async fn obtain_api_key(client: &reqwest::Client, id_token: &str) -> Option<Stri
             return None;
         }
     };
-    if !resp.status().is_success() {
+    if !resp.status.is_success() {
         debug!(
             "API key exchange returned HTTP {} (continuing without)",
-            resp.status()
+            resp.status
         );
         return None;
     }
-    match resp.json::<ExchangeResp>().await {
+    match serde_json::from_slice::<ExchangeResp>(&resp.body) {
         Ok(body) => Some(body.access_token),
         Err(e) => {
             debug!("API key exchange parse failed (continuing without): {e}");
@@ -472,6 +475,8 @@ async fn exchange_code_with_redirect(
             .await
         {
             Ok(resp) => {
+                http_retry::wait_after_429_headers(resp.status(), resp.headers(), attempt - 1)
+                    .await;
                 if resp.status().is_server_error() && attempt < TOKEN_EXCHANGE_MAX_ATTEMPTS {
                     debug!(
                         "Token exchange got HTTP {} (attempt {attempt}/{TOKEN_EXCHANGE_MAX_ATTEMPTS}), retrying",
@@ -667,6 +672,7 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
         .map_err(|e| crate::auth::format_reqwest_error("Failed to request device code", &e))?;
 
     let status = resp.status();
+    http_retry::wait_after_429_headers(status, resp.headers(), 0).await;
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         bail!("Device code request failed (HTTP {status}): {body}");
@@ -706,6 +712,7 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
     // Step 3: Poll for token (Ctrl+C safe)
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
     let mut poll_count = 0u32;
+    let mut consecutive_429 = 0u32;
     let mut poll_failures = DevicePollFailureTracker::default();
 
     loop {
@@ -755,6 +762,7 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
         };
 
         let poll_status = poll_resp.status();
+        let poll_headers = poll_resp.headers().clone();
         let body_result = tokio::select! {
             result = tokio::time::timeout_at(deadline, poll_resp.json()) => result,
             _ = tokio::signal::ctrl_c() => {
@@ -786,6 +794,22 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
         };
         let log_body = redacted_device_poll_log_body(&body);
         debug!("Device poll response: {log_body}");
+
+        if poll_status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let encoded = serde_json::to_vec(&body).unwrap_or_default();
+            let decision =
+                http_retry::rate_limit_decision(&poll_headers, &encoded, consecutive_429);
+            consecutive_429 = consecutive_429.saturating_add(1);
+            let wake = (tokio::time::Instant::now() + decision.delay).min(deadline);
+            debug!(
+                "Device poll HTTP 429; waiting {:.3}s ({:?})",
+                decision.delay.as_secs_f64(),
+                decision.source
+            );
+            tokio::time::sleep_until(wake).await;
+            continue;
+        }
+        consecutive_429 = 0;
 
         if let Some(action) = device_poll_error_action(&body) {
             match action {

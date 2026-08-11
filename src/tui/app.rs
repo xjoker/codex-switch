@@ -65,12 +65,14 @@ fn refresh_priority(refresh: Refresh) -> u8 {
 pub struct ResetCardFailure {
     message: String,
     invalidate_cache: bool,
+    outcome_unknown: bool,
 }
 
 fn map_reset_card_failure(message: String, invalidate_cache: bool) -> ResetCardFailure {
     ResetCardFailure {
         message,
         invalidate_cache,
+        outcome_unknown: invalidate_cache,
     }
 }
 
@@ -150,7 +152,11 @@ impl SortMode {
 pub enum ConfirmAction {
     Delete(String),
     BatchDelete(Vec<String>),
-    ConsumeResetCard { alias: String, expires_at: String },
+    ConsumeResetCard {
+        alias: String,
+        credit_id: String,
+        expires_at: String,
+    },
 }
 
 pub struct RenameState {
@@ -189,6 +195,8 @@ pub struct App {
         tokio::sync::mpsc::Receiver<(String, Result<ConsumedResetCredit, ResetCardFailure>)>,
     pub reset_card_sender:
         tokio::sync::mpsc::Sender<(String, Result<ConsumedResetCredit, ResetCardFailure>)>,
+    /// Prevents duplicate confirmations from starting two irreversible consumes.
+    pub reset_card_tasks: BTreeSet<String>,
     /// Tracks in-flight warmup tasks: task_id → (alias, start_time).
     /// Each spawn gets a unique `warmup_next_id`; results are matched by ID
     /// so a late-arriving result from a timed-out task cannot clear a newer task.
@@ -243,6 +251,7 @@ impl App {
             warmup_sender: warmup_tx,
             pending_reset_cards: reset_card_rx,
             reset_card_sender: reset_card_tx,
+            reset_card_tasks: BTreeSet::new(),
             warmup_tasks: HashMap::new(),
             warmup_next_id: 0,
             confirm: None,
@@ -590,6 +599,13 @@ impl App {
     }
 
     pub fn request_consume_reset_card(&mut self, alias: &str) {
+        if self.reset_card_tasks.contains(alias) {
+            self.set_status_error(
+                format!("{alias}: reset card consumption already in progress"),
+                5,
+            );
+            return;
+        }
         let Some(entry) = self.accounts.iter().find(|a| a.alias == alias) else {
             return;
         };
@@ -603,6 +619,7 @@ impl App {
         };
         self.confirm = Some(ConfirmAction::ConsumeResetCard {
             alias: alias.to_string(),
+            credit_id: credit.id.clone(),
             expires_at: credit
                 .expires_at
                 .as_deref()
@@ -992,6 +1009,9 @@ impl App {
                     to_refresh.insert(alias);
                 }
                 Err(e) => {
+                    if !e.outcome_unknown {
+                        self.reset_card_tasks.remove(&alias);
+                    }
                     if e.invalidate_cache
                         && let Err(err) = cache::invalidate(&alias)
                     {
@@ -1254,25 +1274,36 @@ impl App {
                     self.set_status_error(msg, 6);
                 }
             }
-            ConfirmAction::ConsumeResetCard { alias, .. } => {
-                self.consume_reset_card(&alias);
+            ConfirmAction::ConsumeResetCard {
+                alias, credit_id, ..
+            } => {
+                self.consume_reset_card(&alias, &credit_id);
             }
         }
     }
 
-    fn consume_reset_card(&mut self, alias: &str) {
+    fn consume_reset_card(&mut self, alias: &str, credit_id: &str) {
+        if !self.reset_card_tasks.insert(alias.to_string()) {
+            self.set_status_error(
+                format!("{alias}: reset card consumption already in progress"),
+                5,
+            );
+            return;
+        }
         let path = match profile_auth_path(alias) {
             Ok(p) => p,
             Err(e) => {
+                self.reset_card_tasks.remove(alias);
                 self.set_status_error(format!("Path error for {alias}: {e}"), 5);
                 return;
             }
         };
         let alias_owned = alias.to_string();
+        let credit_id = credit_id.to_string();
         let tx = self.reset_card_sender.clone();
         self.set_status(format!("Using reset card for {alias}..."), 6);
         tokio::spawn(async move {
-            let result = crate::usage::consume_earliest_reset_credit(&alias_owned, &path)
+            let result = crate::usage::consume_reset_credit_by_id(&alias_owned, &path, &credit_id)
                 .await
                 .map_err(|error| {
                     let unknown = error.outcome_unknown_after_request();
@@ -2220,6 +2251,34 @@ mod tests {
                 || line.contains("visibility=")
                 || line.contains("context=")
         }));
+    }
+
+    #[test]
+    fn reset_card_confirmation_is_blocked_while_consume_is_in_flight() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Loaded(Box::new(UsageInfo {
+                reset_credits: vec![ResetCredit {
+                    id: "credit-1".into(),
+                    granted_at: None,
+                    expires_at: None,
+                }],
+                ..UsageInfo::default()
+            })),
+            is_current: false,
+        });
+        app.reset_card_tasks.insert("account".into());
+
+        app.request_consume_reset_card("account");
+
+        assert!(app.confirm.is_none());
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|message| message.contains("already in progress"))
+        );
     }
 
     #[test]

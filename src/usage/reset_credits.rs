@@ -7,11 +7,12 @@ use rand::Rng;
 use serde_json::Value;
 use tracing::debug;
 
-use crate::auth::{self, format_reqwest_error};
+use crate::auth;
 
 use super::api::extract_error_summary;
 use super::parse::parse_optional_u64;
 use super::{ConsumedResetCredit, MAX_RETRIES, RETRY_DELAY, ResetCredit, UsageInfo};
+use crate::http_retry::{self, ReplaySafety};
 
 const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const RESET_CREDITS_CONSUME_URL: &str =
@@ -153,6 +154,50 @@ fn retry_delay_for_response(
     exponential_retry_delay(attempt)
 }
 
+fn retry_after_hint(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    Some(match value.parse::<u64>() {
+        Ok(seconds) => format!("{seconds}s"),
+        Err(_) => value.to_string(),
+    })
+}
+
+fn retry_after_hint_from_body(body: &str) -> Option<String> {
+    let lowercase = body.to_ascii_lowercase();
+    let start = lowercase.find("try again in ")? + "try again in ".len();
+    let mut parts = body[start..].split_whitespace();
+    let value = parts
+        .next()?
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '.')
+        .trim_end_matches('.');
+    if retry_after_duration(value).is_some() {
+        return Some(value.to_string());
+    }
+    value.parse::<f64>().ok()?;
+    let unit = parts
+        .next()?
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric());
+    let hint = format!("{value} {unit}");
+    retry_after_duration(&hint)?;
+    Some(hint)
+}
+
+fn retry_after_duration(hint: &str) -> Option<Duration> {
+    if let Some((value, unit)) = hint.split_once(' ')
+        && matches!(unit, "second" | "seconds")
+    {
+        return Duration::try_from_secs_f64(value.parse::<f64>().ok()?).ok();
+    }
+    if let Some(milliseconds) = hint.strip_suffix("ms") {
+        return Duration::try_from_secs_f64(milliseconds.parse::<f64>().ok()? / 1_000.0).ok();
+    }
+    let seconds = hint
+        .strip_suffix("seconds")
+        .or_else(|| hint.strip_suffix("second"))
+        .or_else(|| hint.strip_suffix('s'))?;
+    Duration::try_from_secs_f64(seconds.parse::<f64>().ok()?).ok()
+}
+
 fn exponential_retry_delay(attempt: u32) -> Duration {
     Duration::from_secs(RETRY_DELAY.as_secs().saturating_mul(1 << attempt.min(4)))
 }
@@ -200,26 +245,34 @@ async fn fetch_reset_credits_at_url(
             req = req.header("Chatgpt-Account-Id", account_id);
         }
 
-        let resp = match req.send().await {
+        let resp = match http_retry::send(req, ReplaySafety::Idempotent).await {
             Ok(resp) => resp,
             Err(error) if attempt + 1 < MAX_RETRIES => {
                 debug!(
                     "reset credits fetch attempt {}/{} failed before response: {}",
                     attempt + 1,
                     MAX_RETRIES,
-                    format_reqwest_error("request failed", &error)
+                    error
                 );
                 tokio::time::sleep(exponential_retry_delay(attempt)).await;
                 continue;
             }
             Err(error) => {
-                return Err(format_reqwest_error("reset credits request failed", &error));
+                return Err(error.context("reset credits request failed"));
             }
         };
-        let status = resp.status();
+        let status = resp.status;
         if !status.is_success() {
-            if (status.is_server_error() || status.as_u16() == 429) && attempt + 1 < MAX_RETRIES {
-                let retry_delay = retry_delay_for_response(status, resp.headers(), attempt);
+            let header_retry_after = retry_after_hint(&resp.headers);
+            let header_retry_delay = retry_delay_for_response(status, &resp.headers, attempt);
+            let body = String::from_utf8_lossy(&resp.body);
+            let body_retry_after = retry_after_hint_from_body(&body);
+            if status.is_server_error() && attempt + 1 < MAX_RETRIES {
+                let retry_delay = body_retry_after
+                    .as_deref()
+                    .and_then(retry_after_duration)
+                    .map(|delay| delay.min(Duration::from_secs(30)))
+                    .unwrap_or(header_retry_delay);
                 debug!(
                     "reset credits fetch attempt {}/{} returned HTTP {status}; retrying in {:.1}s",
                     attempt + 1,
@@ -229,10 +282,17 @@ async fn fetch_reset_credits_at_url(
                 tokio::time::sleep(retry_delay).await;
                 continue;
             }
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                && let Some(retry_after) = header_retry_after.or(body_retry_after)
+            {
+                anyhow::bail!(
+                    "reset credits request failed (HTTP {status}; retry after {retry_after})"
+                );
+            }
             anyhow::bail!("reset credits request failed (HTTP {status})");
         }
 
-        let body: Value = match resp.json().await {
+        let body: Value = match serde_json::from_slice(&resp.body) {
             Ok(body) => body,
             Err(error) if attempt + 1 < MAX_RETRIES => {
                 debug!(
@@ -285,10 +345,21 @@ pub async fn fetch_earliest_reset_credit(alias: &str, profile_path: &Path) -> Re
         .ok_or_else(|| anyhow::anyhow!("{alias}: no available reset cards"))
 }
 
-pub async fn consume_earliest_reset_credit(
+pub async fn consume_reset_credit_by_id(
     alias: &str,
     profile_path: &Path,
+    credit_id: &str,
 ) -> std::result::Result<ConsumedResetCredit, ConsumeResetCreditError> {
+    consume_reset_credit_selected(alias, profile_path, credit_id).await
+}
+
+async fn consume_reset_credit_selected(
+    alias: &str,
+    profile_path: &Path,
+    expected_credit_id: &str,
+) -> std::result::Result<ConsumedResetCredit, ConsumeResetCreditError> {
+    let _consume_lock = crate::profile::lock_reset_card_consume(profile_path)
+        .map_err(ConsumeResetCreditError::not_consumed)?;
     let val = auth::read_auth(profile_path).map_err(ConsumeResetCreditError::not_consumed)?;
     let (access_token, _) = auth::extract_tokens(&val);
     let access_token = access_token
@@ -301,12 +372,23 @@ pub async fn consume_earliest_reset_credit(
     let (_, credits) = fetch_reset_credits(&client, &access_token, account_id.as_deref())
         .await
         .map_err(ConsumeResetCreditError::not_consumed)?;
-    let credit = earliest_reset_credit(&credits)
+    let credit = select_reset_credit(&credits, expected_credit_id)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("{alias}: no available reset cards"))
+        .ok_or_else(|| anyhow::anyhow!(
+            "{alias}: confirmed reset card {expected_credit_id} is no longer available; refusing to select another"
+        ))
         .map_err(ConsumeResetCreditError::not_consumed)?;
 
     consume_reset_credit(&client, &access_token, account_id.as_deref(), credit).await
+}
+
+fn select_reset_credit<'a>(
+    credits: &'a [ResetCredit],
+    expected_credit_id: &str,
+) -> Option<&'a ResetCredit> {
+    credits
+        .iter()
+        .find(|credit| credit.id == expected_credit_id)
 }
 
 async fn consume_reset_credit(
@@ -332,87 +414,46 @@ async fn consume_reset_credit_at_url(
     credit: ResetCredit,
     url: &str,
 ) -> std::result::Result<ConsumedResetCredit, ConsumeResetCreditError> {
-    // Generate once per user action. Any retry after an ambiguous transport/server
-    // failure must identify the same logical redemption to the backend.
+    // Consuming a card is irreversible. Even with a stable request id, never
+    // trust a remote idempotency implementation enough to replay automatically.
     let request_id = redeem_request_id();
-    let mut outcome_may_have_changed = false;
-    for attempt in 0..MAX_RETRIES {
-        let mut req = client
-            .post(url)
-            .bearer_auth(access_token)
-            .header("Accept", "application/json")
-            .header("OpenAI-Beta", "codex-1")
-            .header("Originator", "Codex Desktop")
-            .json(&serde_json::json!({
-                "credit_id": &credit.id,
-                "redeem_request_id": &request_id,
-            }));
+    let mut req = client
+        .post(url)
+        .bearer_auth(access_token)
+        .header("Accept", "application/json")
+        .header("OpenAI-Beta", "codex-1")
+        .header("Originator", "Codex Desktop")
+        .json(&serde_json::json!({
+            "credit_id": &credit.id,
+            "redeem_request_id": &request_id,
+        }));
 
-        if let Some(account_id) = account_id.filter(|s| !s.trim().is_empty()) {
-            req = req.header("Chatgpt-Account-Id", account_id);
-        }
-
-        let resp = match req.send().await {
-            Ok(resp) => resp,
-            Err(error) if attempt + 1 < MAX_RETRIES => {
-                outcome_may_have_changed = true;
-                debug!(
-                    "reset credit consume attempt {}/{} failed before response: {}",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    format_reqwest_error("request failed", &error)
-                );
-                tokio::time::sleep(RETRY_DELAY).await;
-                continue;
-            }
-            Err(error) => {
-                return Err(ConsumeResetCreditError::outcome_unknown(
-                    format_reqwest_error("reset credit consume request failed", &error),
-                ));
-            }
-        };
-        let status = resp.status();
-        if !status.is_success() {
-            if (status.is_server_error() || status.as_u16() == 429) && attempt + 1 < MAX_RETRIES {
-                outcome_may_have_changed = true;
-                debug!(
-                    "reset credit consume attempt {}/{} returned HTTP {status}",
-                    attempt + 1,
-                    MAX_RETRIES
-                );
-                tokio::time::sleep(RETRY_DELAY).await;
-                continue;
-            }
-            let error = anyhow::anyhow!("reset credit consume request failed (HTTP {status})");
-            if status.is_client_error() && status.as_u16() != 429 && !outcome_may_have_changed {
-                return Err(ConsumeResetCreditError::not_consumed(error));
-            }
-            return Err(ConsumeResetCreditError::outcome_unknown(error));
-        }
-
-        match resp.json::<Value>().await {
-            Ok(body) => {
-                return parse_consumed_reset_credit(&body, credit)
-                    .map_err(ConsumeResetCreditError::outcome_unknown);
-            }
-            Err(error) if attempt + 1 < MAX_RETRIES => {
-                outcome_may_have_changed = true;
-                debug!(
-                    "reset credit consume attempt {}/{} returned invalid JSON: {error}",
-                    attempt + 1,
-                    MAX_RETRIES
-                );
-                tokio::time::sleep(RETRY_DELAY).await;
-            }
-            Err(error) => {
-                return Err(ConsumeResetCreditError::outcome_unknown(anyhow::anyhow!(
-                    "failed to parse reset credit consume response: {error}"
-                )));
-            }
-        }
+    if let Some(account_id) = account_id.filter(|s| !s.trim().is_empty()) {
+        req = req.header("Chatgpt-Account-Id", account_id);
     }
 
-    unreachable!("reset credit retry loop always returns on its final attempt")
+    let resp = http_retry::send(req, ReplaySafety::UnsafePost)
+        .await
+        .map_err(|error| {
+            ConsumeResetCreditError::outcome_unknown(
+                error.context("reset credit consume request failed"),
+            )
+        })?;
+    let status = resp.status;
+    if !status.is_success() {
+        let error = anyhow::anyhow!("reset credit consume request failed (HTTP {status})");
+        if status.is_client_error() && status.as_u16() != 429 {
+            return Err(ConsumeResetCreditError::not_consumed(error));
+        }
+        return Err(ConsumeResetCreditError::outcome_unknown(error));
+    }
+
+    let body = serde_json::from_slice::<Value>(&resp.body).map_err(|error| {
+        ConsumeResetCreditError::outcome_unknown(anyhow::anyhow!(
+            "failed to parse reset credit consume response: {error}"
+        ))
+    })?;
+    parse_consumed_reset_credit(&body, credit).map_err(ConsumeResetCreditError::outcome_unknown)
 }
 
 fn parse_consumed_reset_credit(body: &Value, credit: ResetCredit) -> Result<ConsumedResetCredit> {
@@ -607,6 +648,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn confirmed_credit_id_never_falls_through_to_another_card() {
+        let credits = vec![ResetCredit {
+            id: "credit-b".into(),
+            granted_at: None,
+            expires_at: None,
+        }];
+
+        assert!(select_reset_credit(&credits, "credit-a").is_none());
+        assert_eq!(
+            select_reset_credit(&credits, "credit-b").map(|credit| credit.id.as_str()),
+            Some("credit-b")
+        );
+    }
+
     #[tokio::test]
     async fn reset_credit_fetch_retries_a_transient_server_error() {
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -749,6 +805,52 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(1_900));
     }
 
+    #[tokio::test]
+    async fn final_rate_limit_error_reports_server_retry_after() {
+        let app = axum::Router::new().route(
+            "/credits",
+            get(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(reqwest::header::RETRY_AFTER.as_str(), "1")],
+                    "rate limited",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let error = fetch_reset_credits_at_url(
+            &local_http_client(),
+            "access-token",
+            None,
+            &format!("http://{address}/credits"),
+        )
+        .await
+        .unwrap_err();
+        server.abort();
+
+        assert_eq!(
+            error.to_string(),
+            "reset credits request failed (HTTP 429 Too Many Requests; retry after 1s)"
+        );
+    }
+
+    #[test]
+    fn retry_after_hint_reads_codex_rate_limit_message() {
+        let body =
+            r#"{"error":{"code":"rate_limit_exceeded","message":"Please try again in 1.898s."}}"#;
+        let azure_body =
+            r#"{"error":{"code":"rate_limit_exceeded","message":"Try again in 35 seconds."}}"#;
+
+        assert_eq!(retry_after_hint_from_body(body).as_deref(), Some("1.898s"));
+        assert_eq!(
+            retry_after_hint_from_body(azure_body).as_deref(),
+            Some("35 seconds")
+        );
+    }
+
     #[test]
     fn failed_reset_credit_refresh_retains_the_last_known_cards() {
         let cached = UsageInfo {
@@ -769,7 +871,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_consume_retry_reuses_redeem_request_id() {
+    async fn consume_does_not_replay_after_an_ambiguous_server_error() {
         let request_ids = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured = Arc::clone(&request_ids);
         let app = axum::Router::new().route(
@@ -799,7 +901,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let result = consume_reset_credit_at_url(
+        let error = consume_reset_credit_at_url(
             &local_http_client(),
             "access-token",
             Some("workspace-123"),
@@ -811,14 +913,13 @@ mod tests {
             &format!("http://{address}/consume"),
         )
         .await
-        .unwrap();
+        .unwrap_err();
         server.abort();
 
-        assert_eq!(result.code.as_deref(), Some("reset"));
+        assert!(error.outcome_unknown_after_request());
         let ids = request_ids.lock().unwrap();
-        assert_eq!(ids.len(), 2);
+        assert_eq!(ids.len(), 1, "an irreversible consume must never replay");
         assert!(!ids[0].is_empty());
-        assert_eq!(ids[0], ids[1]);
     }
 
     #[tokio::test]

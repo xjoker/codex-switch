@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod daemon;
 mod error;
+mod http_retry;
 mod jwt;
 mod logging;
 mod login;

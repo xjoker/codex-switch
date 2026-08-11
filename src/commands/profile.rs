@@ -564,13 +564,16 @@ pub(crate) async fn select_best_profile(
         .context("revival target disappeared from scored candidates")?;
     let (target_candidate, target_usage) = target_candidate;
     let card_count = target_usage.reset_credits.len() as u64;
+    let selected_credit = usage::earliest_reset_credit(&target_usage.reset_credits)
+        .context("revival target no longer has an available reset card")?;
 
     let approved = match card_policy {
         CardPolicy::Deny => false,
         CardPolicy::PreApproved => true,
         CardPolicy::Prompt => {
-            let expires = usage::earliest_reset_credit(&target_usage.reset_credits)
-                .and_then(|c| c.expires_at.as_deref())
+            let expires = selected_credit
+                .expires_at
+                .as_deref()
                 .map(output::format_local_datetime)
                 .unwrap_or_else(|| "no expiry".to_string());
             confirm_default_no(&revival_prompt_message(&target_alias, card_count, &expires))
@@ -595,7 +598,8 @@ pub(crate) async fn select_best_profile(
 
     let target_path = profile::profile_auth_path(&target_alias)?;
     let current = profile::read_current();
-    match usage::consume_earliest_reset_credit(&target_alias, &target_path).await {
+    match usage::consume_reset_credit_by_id(&target_alias, &target_path, &selected_credit.id).await
+    {
         Ok(_consumed) => {
             if let Err(err) = cache::invalidate(&target_alias) {
                 tracing::warn!("Failed to invalidate usage cache for {target_alias}: {err}");

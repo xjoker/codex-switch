@@ -531,7 +531,10 @@ async fn http_reset_card_consume_uses_earliest_expiry() {
     let _reset_url_guard = EnvVarGuard::set("CS_RESET_CREDITS_URL", server.reset_credits_url());
     let _consume_url_guard = EnvVarGuard::remove("CS_RESET_CREDITS_CONSUME_URL");
 
-    let result = usage::consume_earliest_reset_credit("healthy_a", auth_path)
+    let credit = usage::fetch_earliest_reset_credit("healthy_a", auth_path)
+        .await
+        .unwrap();
+    let result = usage::consume_reset_credit_by_id("healthy_a", auth_path, &credit.id)
         .await
         .unwrap();
 

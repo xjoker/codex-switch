@@ -7,6 +7,8 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::http_retry::{self, ReplaySafety};
+
 const REPO_OWNER: &str = "xjoker";
 const REPO_NAME: &str = "codex-switch";
 const BIN_NAME: &str = "codex-switch";
@@ -617,22 +619,23 @@ async fn fetch_release_inner(version: Option<&str>) -> Result<Option<GithubRelea
     let client =
         crate::auth::build_http_client().context("building HTTP client for update check")?;
     let url = release_api_url(version);
-    let resp = client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .send()
-        .await
-        .context("requesting GitHub release metadata")?;
+    let resp = http_retry::send(
+        client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json"),
+        ReplaySafety::Idempotent,
+    )
+    .await
+    .context("requesting GitHub release metadata")?;
 
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+    if resp.status == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
 
-    let release = resp
-        .error_for_status()
-        .context("GitHub release request failed")?
-        .json::<GithubRelease>()
-        .await
+    if !resp.status.is_success() {
+        anyhow::bail!("GitHub release request failed (HTTP {})", resp.status);
+    }
+    let release = serde_json::from_slice::<GithubRelease>(&resp.body)
         .context("parsing GitHub release metadata")?;
     Ok(Some(release))
 }
@@ -672,16 +675,18 @@ async fn fetch_github_json<T>(client: &reqwest::Client, url: &str, context: &str
 where
     T: serde::de::DeserializeOwned,
 {
-    client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .send()
-        .await
-        .with_context(|| context.to_string())?
-        .error_for_status()
-        .with_context(|| format!("{context}: {url}"))?
-        .json::<T>()
-        .await
+    let response = http_retry::send(
+        client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json"),
+        ReplaySafety::Idempotent,
+    )
+    .await
+    .with_context(|| context.to_string())?;
+    if !response.status.is_success() {
+        anyhow::bail!("{context}: {url}: HTTP {}", response.status);
+    }
+    serde_json::from_slice::<T>(&response.body)
         .with_context(|| format!("parsing GitHub response from {url}"))
 }
 
@@ -693,30 +698,27 @@ fn validate_commit_sha(sha: &str) -> Result<()> {
 }
 
 async fn download_file(client: &reqwest::Client, url: &str, path: &Path) -> Result<()> {
-    let bytes = client
-        .get(url)
-        .send()
+    let response = http_retry::send(client.get(url), ReplaySafety::Idempotent)
         .await
-        .with_context(|| format!("requesting {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download failed for {url}"))?
-        .bytes()
-        .await
-        .with_context(|| format!("reading response body from {url}"))?;
-    fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
+        .with_context(|| format!("requesting {url}"))?;
+    if !response.status.is_success() {
+        anyhow::bail!("download failed for {url}: HTTP {}", response.status);
+    }
+    fs::write(path, response.body).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
 async fn verify_checksum(client: &reqwest::Client, url: &str, archive_path: &Path) -> Result<()> {
-    let checksum_text = client
-        .get(url)
-        .send()
+    let response = http_retry::send(client.get(url), ReplaySafety::Idempotent)
         .await
-        .with_context(|| format!("requesting {url}"))?
-        .error_for_status()
-        .with_context(|| format!("checksum download failed for {url}"))?
-        .text()
-        .await
+        .with_context(|| format!("requesting {url}"))?;
+    if !response.status.is_success() {
+        anyhow::bail!(
+            "checksum download failed for {url}: HTTP {}",
+            response.status
+        );
+    }
+    let checksum_text = String::from_utf8(response.body)
         .with_context(|| format!("reading checksum response from {url}"))?;
 
     let expected = extract_checksum_digest(&checksum_text)

@@ -6,6 +6,7 @@ use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::auth::{self, CLIENT_ID, format_reqwest_error};
+use crate::http_retry::{self, ReplaySafety};
 
 use super::parse::parse_usage_checked;
 use super::reset_credits::enrich_reset_credits;
@@ -13,6 +14,17 @@ use super::{
     ImportValidation, MAX_RETRIES, RETRY_DELAY, Refresh, RefreshedTokens, TerminalAuthError,
     TokenPersistFailure, UsageError, UsageFetchOutcome, UsageInfo,
 };
+
+#[derive(Debug)]
+struct UsageRateLimited;
+
+impl std::fmt::Display for UsageRateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Usage API rate limited after exponential backoff (HTTP 429)")
+    }
+}
+
+impl std::error::Error for UsageRateLimited {}
 
 pub(crate) fn apply_account_routing_headers(
     mut builder: reqwest::RequestBuilder,
@@ -470,6 +482,12 @@ async fn fetch_usage_retried_inner(
                     attempt += 1;
                     continue;
                 }
+                if e.downcast_ref::<UsageRateLimited>().is_some() {
+                    return Err(UsageError {
+                        summary: "HTTP 429 rate limited".into(),
+                        detail: msg,
+                    });
+                }
                 last_summary = extract_error_summary(&msg);
                 last_err = msg;
             }
@@ -544,15 +562,15 @@ async fn fetch_usage_capturing_refresh(
                         .header("Authorization", format!("Bearer {bearer}")),
                     account_id,
                     is_fedramp,
-                )
-                .send()
-                .await
-                .map_err(|e| format_reqwest_error("Usage API request failed", &e))?;
+                );
+                let resp = http_retry::send(resp, ReplaySafety::Idempotent)
+                    .await
+                    .context("Usage API request failed")?;
 
-                let status = resp.status();
+                let status = resp.status;
                 debug!("[{alias}] Usage API (after proactive refresh): HTTP {status}");
                 if status.is_success() {
-                    let body: Value = resp.json().await.map_err(|e| {
+                    let body: Value = serde_json::from_slice(&resp.body).map_err(|e| {
                         anyhow::anyhow!("failed to parse usage response (HTTP {status}): {e}")
                     })?;
                     debug!(
@@ -562,6 +580,9 @@ async fn fetch_usage_capturing_refresh(
                     let mut usage = parse_usage_checked(&body)?;
                     enrich_reset_credits(alias, &client, &bearer, account_id, &mut usage).await;
                     return Ok(usage);
+                }
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    return Err(UsageRateLimited.into());
                 }
                 anyhow::bail!("Usage API failed (HTTP {status}) after proactive token refresh");
             }
@@ -584,17 +605,15 @@ async fn fetch_usage_capturing_refresh(
             .header("Authorization", format!("Bearer {access_token}")),
         account_id,
         is_fedramp,
-    )
-    .send()
-    .await
-    .map_err(|e| format_reqwest_error("Usage API request failed", &e))?;
+    );
+    let resp = http_retry::send(resp, ReplaySafety::Idempotent)
+        .await
+        .context("Usage API request failed")?;
 
-    let status = resp.status();
+    let status = resp.status;
     debug!("[{alias}] Usage API: HTTP {status}");
     if status.is_success() {
-        let body: Value = resp
-            .json()
-            .await
+        let body: Value = serde_json::from_slice(&resp.body)
             .map_err(|e| anyhow::anyhow!("failed to parse usage response (HTTP {status}): {e}"))?;
         debug!(
             "[{alias}] Usage API raw body: {}",
@@ -603,6 +622,9 @@ async fn fetch_usage_capturing_refresh(
         let mut usage = parse_usage_checked(&body)?;
         enrich_reset_credits(alias, &client, access_token, account_id, &mut usage).await;
         return Ok(usage);
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(UsageRateLimited.into());
     }
 
     // The auth server already rejected this refresh token moments ago; asking
@@ -628,15 +650,15 @@ async fn fetch_usage_capturing_refresh(
                         .header("Authorization", format!("Bearer {bearer}")),
                     account_id,
                     is_fedramp,
-                )
-                .send()
-                .await
-                .map_err(|e| format_reqwest_error("Usage API retry request failed", &e))?;
+                );
+                let resp2 = http_retry::send(resp2, ReplaySafety::Idempotent)
+                    .await
+                    .context("Usage API retry request failed")?;
 
-                let status2 = resp2.status();
+                let status2 = resp2.status;
                 debug!("[{alias}] Usage API (after token refresh): HTTP {status2}");
                 if status2.is_success() {
-                    let body: Value = resp2.json().await.map_err(|e| {
+                    let body: Value = serde_json::from_slice(&resp2.body).map_err(|e| {
                         anyhow::anyhow!(
                             "failed to parse usage response after refresh (HTTP {status2}): {e}"
                         )
@@ -644,6 +666,9 @@ async fn fetch_usage_capturing_refresh(
                     let mut usage = parse_usage_checked(&body)?;
                     enrich_reset_credits(alias, &client, &bearer, account_id, &mut usage).await;
                     return Ok(usage);
+                }
+                if status2 == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    return Err(UsageRateLimited.into());
                 }
                 anyhow::bail!("Usage API still failed (HTTP {status2}) after token refresh");
             }
@@ -804,6 +829,7 @@ pub(crate) async fn do_refresh_token(
         .map_err(|e| format_reqwest_error("token refresh request failed", &e))?;
 
     let status = resp.status();
+    http_retry::wait_after_429_headers(status, resp.headers(), 0).await;
     debug!("[{alias}] token refresh response: HTTP {status}");
 
     // Read raw body first so we can log it on parse failure

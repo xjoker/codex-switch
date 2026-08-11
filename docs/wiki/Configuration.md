@@ -56,7 +56,7 @@ ttl = 300                          # usage cache TTL in seconds
 max_concurrent = 20                # concurrent usage requests; 0 is normalized to 1
 
 [tui]
-auto_refresh_interval_secs = 120   # minimum 30; lower values are raised to 30
+auto_refresh_interval_secs = 300   # minimum 30; lower values are raised to 30
 
 [use]
 safety_margin_7d = 20              # 7d headroom % below which scoring penalizes

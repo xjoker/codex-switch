@@ -22,7 +22,7 @@ pub use api::refresh_expiring_tokens_within;
 #[allow(unused_imports)]
 pub use parse::parse_usage;
 pub use reset_credits::{
-    consume_earliest_reset_credit, earliest_reset_credit, fetch_earliest_reset_credit,
+    consume_reset_credit_by_id, earliest_reset_credit, fetch_earliest_reset_credit,
 };
 pub use scoring::{
     is_available, is_candidate_eligible, pace_percent, pick_switch_target, score_candidates,
