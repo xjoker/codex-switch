@@ -1,5 +1,10 @@
 # Changelog
 
+## v20260811.3.0 — 2026-08-11
+
+- **Reset Card details refresh without blocking the account table** — Main Usage results render immediately while card details refresh in a serialized background queue. The Cards column shows a cyan refresh marker during work and a yellow waiting marker during HTTP 429 cooldown, while preserving the last known unexpired cards.
+- **One rate limit stops every later Reset Card GET** — All card-detail readers share one paced request gate. The first HTTP 429 records the server's wait hint, opens a global cooldown, and returns without replaying; HTTP 401 also stops immediately. Only an explicit zero clears cards, and request generations prevent a stale account response from restoring cards after newer Usage data.
+
 ## v20260811.2.0 — 2026-08-11
 
 - **Reset Card discovery** — Treat a missing main Usage reset-card summary as unknown instead of zero, then query card details through the existing serialized path so unexpired cards remain visible.

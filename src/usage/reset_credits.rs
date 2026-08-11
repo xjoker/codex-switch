@@ -9,7 +9,6 @@ use tracing::debug;
 
 use crate::auth::{self, format_reqwest_error};
 
-use super::api::extract_error_summary;
 use super::parse::parse_optional_u64;
 use super::{ConsumedResetCredit, MAX_RETRIES, RETRY_DELAY, ResetCredit, UsageInfo};
 use crate::http_retry::{self, ReplaySafety};
@@ -18,6 +17,35 @@ const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit
 const RESET_CREDITS_CONSUME_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 static RESET_CREDITS_FETCH_LIMITER: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+static RESET_CREDITS_FETCH_GATE: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, ResetFetchGate>>,
+> = OnceLock::new();
+const RESET_CREDITS_REQUEST_SPACING: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+struct ResetFetchGate {
+    cooldown_until: Option<std::time::Instant>,
+    next_slot: Option<std::time::Instant>,
+}
+
+impl ResetFetchGate {
+    fn may_request(&self, now: std::time::Instant) -> bool {
+        self.cooldown_until.is_none_or(|until| now >= until)
+    }
+
+    fn record_rate_limit(&mut self, now: std::time::Instant, delay: Duration) {
+        self.cooldown_until = Some(now + delay);
+    }
+
+    fn reserve(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        if !self.may_request(now) {
+            return None;
+        }
+        let slot = self.next_slot.map_or(now, |next| next.max(now));
+        self.next_slot = Some(slot + RESET_CREDITS_REQUEST_SPACING);
+        Some(slot)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConsumeFailureKind {
@@ -94,48 +122,81 @@ fn reset_credits_consume_url() -> String {
     RESET_CREDITS_CONSUME_URL.to_string()
 }
 
-pub(super) async fn enrich_reset_credits(
-    alias: &str,
-    client: &reqwest::Client,
-    access_token: &str,
-    account_id: Option<&str>,
-    usage: &mut UsageInfo,
-) {
-    if !should_fetch_reset_credit_details(usage) {
-        usage.reset_credits_error = None;
-        return;
-    }
-
-    match fetch_reset_credits(client, access_token, account_id).await {
-        Ok((available_count, credits)) => {
-            if available_count.is_some() {
-                usage.reset_credits_available_count = available_count;
-            }
-            if !credits.is_empty() {
-                usage.reset_credits = credits;
-            }
-            usage.reset_credits_error = None;
-        }
-        Err(err) => {
-            let msg = err.to_string();
-            debug!("[{alias}] reset credits fetch failed: {msg}");
-            if let Some(cached) = crate::cache::get_async(alias).await {
-                retain_cached_reset_credits(usage, &cached);
-            }
-            usage.reset_credits_error = Some(extract_error_summary(&msg));
-        }
-    }
-}
-
-fn should_fetch_reset_credit_details(usage: &UsageInfo) -> bool {
+pub(crate) fn should_fetch_reset_credit_details(usage: &UsageInfo) -> bool {
     match usage.reset_credits_available_count {
         Some(count) => count > usage.reset_credits.len() as u64,
         None => true,
     }
 }
 
+pub(super) fn merge_cached_reset_credits(
+    usage: &mut UsageInfo,
+    cached: Option<&UsageInfo>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    if usage.reset_credits_available_count == Some(0) {
+        usage.reset_credits.clear();
+        usage.reset_credits_error = None;
+        return;
+    }
+    if !usage.reset_credits.is_empty() {
+        return;
+    }
+    let Some(cached) = cached else { return };
+    usage.reset_credits = cached
+        .reset_credits
+        .iter()
+        .filter(|credit| {
+            credit
+                .expires_at
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_none_or(|expires| expires > now)
+        })
+        .cloned()
+        .collect();
+    usage.reset_credits_error = cached.reset_credits_error.clone();
+}
+
+pub async fn refresh_reset_credits_for_profile(
+    alias: &str,
+    profile_path: &Path,
+) -> Result<(Option<u64>, Vec<ResetCredit>)> {
+    let val = auth::read_auth(profile_path)?;
+    let (access_token, _) = auth::extract_tokens(&val);
+    let access_token = access_token.ok_or_else(|| anyhow::anyhow!("{alias}: no access_token"))?;
+    let account_id = crate::jwt::parse_account_info(&val).account_id;
+    let client = auth::build_http_client()?;
+    fetch_reset_credits(&client, &access_token, account_id.as_deref()).await
+}
+
 fn reset_credits_fetch_limiter() -> &'static tokio::sync::Semaphore {
     RESET_CREDITS_FETCH_LIMITER.get_or_init(|| tokio::sync::Semaphore::new(1))
+}
+
+async fn wait_for_reset_credit_request_slot(url: &str) -> Result<()> {
+    let now = std::time::Instant::now();
+    let slot = {
+        let mut gates = RESET_CREDITS_FETCH_GATE
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("reset-card fetch gate poisoned"))?;
+        let gate = gates.entry(url.to_string()).or_default();
+        gate.reserve(now)
+            .ok_or_else(|| anyhow::anyhow!("reset-card details cooling down after HTTP 429"))?
+    };
+    tokio::time::sleep(slot.saturating_duration_since(std::time::Instant::now())).await;
+    let gates = RESET_CREDITS_FETCH_GATE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("reset-card fetch gate poisoned"))?;
+    if gates
+        .get(url)
+        .is_some_and(|gate| !gate.may_request(std::time::Instant::now()))
+    {
+        anyhow::bail!("reset-card details cooling down after HTTP 429");
+    }
+    Ok(())
 }
 
 fn retry_delay_for_response(
@@ -203,18 +264,6 @@ fn exponential_retry_delay(attempt: u32) -> Duration {
     Duration::from_secs(RETRY_DELAY.as_secs().saturating_mul(1 << attempt.min(4)))
 }
 
-fn retain_cached_reset_credits(usage: &mut UsageInfo, cached: &UsageInfo) {
-    if usage.reset_credits_available_count.is_none() {
-        usage.reset_credits_available_count = cached.reset_credits_available_count;
-    }
-    if usage.reset_credits.is_empty()
-        && usage.reset_credits_available_count != Some(0)
-        && usage.reset_credits_available_count == cached.reset_credits_available_count
-    {
-        usage.reset_credits.clone_from(&cached.reset_credits);
-    }
-}
-
 async fn fetch_reset_credits(
     client: &reqwest::Client,
     access_token: &str,
@@ -229,12 +278,12 @@ async fn fetch_reset_credits_at_url(
     account_id: Option<&str>,
     url: &str,
 ) -> Result<(Option<u64>, Vec<ResetCredit>)> {
-    let _permit = reset_credits_fetch_limiter()
-        .acquire()
-        .await
-        .expect("reset credits fetch limiter is never closed");
-
     for attempt in 0..MAX_RETRIES {
+        wait_for_reset_credit_request_slot(url).await?;
+        let permit = reset_credits_fetch_limiter()
+            .acquire()
+            .await
+            .expect("reset credits fetch limiter is never closed");
         let mut req = client
             .get(url)
             .bearer_auth(access_token)
@@ -262,6 +311,7 @@ async fn fetch_reset_credits_at_url(
                 return Err(format_reqwest_error("reset credits request failed", &error));
             }
         };
+        drop(permit);
         let status = resp.status();
         if !status.is_success() {
             let headers = resp.headers().clone();
@@ -269,9 +319,22 @@ async fn fetch_reset_credits_at_url(
             let header_retry_delay = retry_delay_for_response(status, &headers, attempt);
             let body = resp.text().await.unwrap_or_default();
             let body_retry_after = retry_after_hint_from_body(&body);
-            if (status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS)
-                && attempt + 1 < MAX_RETRIES
-            {
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let decision = http_retry::rate_limit_decision(&headers, body.as_bytes(), attempt);
+                let mut gates = RESET_CREDITS_FETCH_GATE
+                    .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("reset-card fetch gate poisoned"))?;
+                let gate = gates.entry(url.to_string()).or_default();
+                gate.record_rate_limit(std::time::Instant::now(), decision.delay);
+                if let Some(retry_after) = header_retry_after.or(body_retry_after) {
+                    anyhow::bail!(
+                        "reset credits request failed (HTTP {status}; retry after {retry_after})"
+                    );
+                }
+                anyhow::bail!("reset credits request failed (HTTP {status})");
+            }
+            if status.is_server_error() && attempt + 1 < MAX_RETRIES {
                 let retry_delay = body_retry_after
                     .as_deref()
                     .and_then(retry_after_duration)
@@ -285,13 +348,6 @@ async fn fetch_reset_credits_at_url(
                 );
                 tokio::time::sleep(retry_delay).await;
                 continue;
-            }
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                && let Some(retry_after) = header_retry_after.or(body_retry_after)
-            {
-                anyhow::bail!(
-                    "reset credits request failed (HTTP {status}; retry after {retry_after})"
-                );
             }
             anyhow::bail!("reset credits request failed (HTTP {status})");
         }
@@ -576,6 +632,70 @@ pub(super) fn parse_reset_credits_summary(body: &Value) -> (Option<u64>, Vec<Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_main_summary_preserves_only_unexpired_cached_cards() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-11T08:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let cached = UsageInfo {
+            reset_credits_available_count: Some(2),
+            reset_credits: vec![
+                ResetCredit {
+                    id: "expired".into(),
+                    granted_at: None,
+                    expires_at: Some("2026-08-10T08:00:00Z".into()),
+                },
+                ResetCredit {
+                    id: "live".into(),
+                    granted_at: None,
+                    expires_at: Some("2026-08-12T08:00:00Z".into()),
+                },
+            ],
+            ..UsageInfo::default()
+        };
+        let mut fresh = UsageInfo::default();
+
+        merge_cached_reset_credits(&mut fresh, Some(&cached), now);
+
+        assert_eq!(fresh.reset_credits_available_count, None);
+        assert_eq!(fresh.reset_credits.len(), 1);
+        assert_eq!(fresh.reset_credits[0].id, "live");
+    }
+
+    #[test]
+    fn explicit_zero_from_main_usage_clears_cached_cards() {
+        let now = chrono::Utc::now();
+        let cached = UsageInfo {
+            reset_credits_available_count: Some(1),
+            reset_credits: vec![ResetCredit {
+                id: "live".into(),
+                granted_at: None,
+                expires_at: Some("2099-01-01T00:00:00Z".into()),
+            }],
+            ..UsageInfo::default()
+        };
+        let mut fresh = UsageInfo {
+            reset_credits_available_count: Some(0),
+            ..UsageInfo::default()
+        };
+
+        merge_cached_reset_credits(&mut fresh, Some(&cached), now);
+
+        assert!(fresh.reset_credits.is_empty());
+        assert_eq!(fresh.reset_credits_available_count, Some(0));
+    }
+
+    #[test]
+    fn first_rate_limit_opens_a_shared_cooldown() {
+        let start = std::time::Instant::now();
+        let mut gate = ResetFetchGate::default();
+
+        assert!(gate.may_request(start));
+        gate.record_rate_limit(start, Duration::from_secs(30));
+        assert!(!gate.may_request(start + Duration::from_secs(29)));
+        assert!(gate.may_request(start + Duration::from_secs(30)));
+    }
     use axum::Json;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -730,7 +850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connector_rate_limit_without_hint_does_not_block_the_serial_queue_for_30_seconds() {
+    async fn connector_rate_limit_without_hint_stops_after_the_first_response() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let captured = Arc::clone(&attempts);
         let app = axum::Router::new().route(
@@ -771,12 +891,9 @@ mod tests {
         .await;
         server.abort();
 
-        assert!(
-            result.is_ok(),
-            "a single 429 must not hold the global queue for 30 seconds"
-        );
-        result.unwrap().unwrap();
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(result.is_ok(), "the first 429 must return without sleeping");
+        assert!(result.unwrap().is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -819,7 +936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_credit_fetch_honors_retry_after_on_rate_limit() {
+    async fn reset_credit_fetch_opens_cooldown_without_replaying_rate_limit() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let captured = Arc::clone(&attempts);
         let app = axum::Router::new().route(
@@ -854,9 +971,9 @@ mod tests {
         .await;
         server.abort();
 
-        result.unwrap();
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert!(started.elapsed() >= Duration::from_millis(1_900));
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(started.elapsed() < Duration::from_millis(1_900));
     }
 
     #[tokio::test]
@@ -918,9 +1035,15 @@ mod tests {
         };
         let mut refreshed = UsageInfo::default();
 
-        retain_cached_reset_credits(&mut refreshed, &cached);
+        merge_cached_reset_credits(
+            &mut refreshed,
+            Some(&cached),
+            chrono::DateTime::parse_from_rfc3339("2026-08-11T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
 
-        assert_eq!(refreshed.reset_credits_available_count, Some(1));
+        assert_eq!(refreshed.reset_credits_available_count, None);
         assert_eq!(refreshed.reset_credits[0].id, "cached-credit");
     }
 

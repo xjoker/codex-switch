@@ -9,7 +9,7 @@ use crate::auth::{self, CLIENT_ID, format_reqwest_error};
 use crate::http_retry::{self, ReplaySafety};
 
 use super::parse::parse_usage_checked;
-use super::reset_credits::enrich_reset_credits;
+use super::reset_credits::merge_cached_reset_credits;
 use super::{
     ImportValidation, MAX_RETRIES, RETRY_DELAY, Refresh, RefreshedTokens, TerminalAuthError,
     TokenPersistFailure, UsageError, UsageFetchOutcome, UsageInfo,
@@ -452,7 +452,9 @@ async fn fetch_usage_retried_inner(
         }
 
         match outcome.result {
-            Ok(usage) => {
+            Ok(mut usage) => {
+                let cached = crate::cache::get_async(alias).await;
+                merge_cached_reset_credits(&mut usage, cached.as_ref(), chrono::Utc::now());
                 crate::cache::put_async(alias, &usage).await;
                 return Ok(usage);
             }
@@ -577,9 +579,7 @@ async fn fetch_usage_capturing_refresh(
                         "[{alias}] Usage API raw body (proactive): {}",
                         crate::auth::redact_sensitive_log_body(&body)
                     );
-                    let mut usage = parse_usage_checked(&body)?;
-                    enrich_reset_credits(alias, &client, &bearer, account_id, &mut usage).await;
-                    return Ok(usage);
+                    return parse_usage_checked(&body);
                 }
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                     return Err(UsageRateLimited.into());
@@ -619,9 +619,7 @@ async fn fetch_usage_capturing_refresh(
             "[{alias}] Usage API raw body: {}",
             crate::auth::redact_sensitive_log_body(&body)
         );
-        let mut usage = parse_usage_checked(&body)?;
-        enrich_reset_credits(alias, &client, access_token, account_id, &mut usage).await;
-        return Ok(usage);
+        return parse_usage_checked(&body);
     }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         return Err(UsageRateLimited.into());
@@ -663,9 +661,7 @@ async fn fetch_usage_capturing_refresh(
                             "failed to parse usage response after refresh (HTTP {status2}): {e}"
                         )
                     })?;
-                    let mut usage = parse_usage_checked(&body)?;
-                    enrich_reset_credits(alias, &client, &bearer, account_id, &mut usage).await;
-                    return Ok(usage);
+                    return parse_usage_checked(&body);
                 }
                 if status2 == reqwest::StatusCode::TOO_MANY_REQUESTS {
                     return Err(UsageRateLimited.into());

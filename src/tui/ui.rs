@@ -355,8 +355,12 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                     let r7_ts = u.secondary.as_ref().and_then(|w| w.resets_at);
                     let r7 = r7_ts.map(format_reset_short).unwrap_or_else(|| "--".into());
                     let r7c = r7_ts.map(|ts| reset_color(ts - now)).unwrap_or(DIM);
-                    let cards = reset_cards_table_text(u);
-                    let cards_color = reset_cards_color(u);
+                    let card_refreshing = app.reset_card_refresh_tasks.contains_key(&entry.alias);
+                    let card_cooling = app
+                        .reset_card_cooldown_until
+                        .is_some_and(|until| std::time::Instant::now() < until);
+                    let (cards, cards_color) =
+                        reset_cards_table_state(u, card_refreshing, card_cooling);
                     if refreshing {
                         (
                             "Refresh".into(),
@@ -718,6 +722,26 @@ fn reset_cards_table_text(u: &UsageInfo) -> String {
         .map(|count| count.to_string())
         .or_else(|| u.reset_credits_error.as_ref().map(|_| "err".to_string()))
         .unwrap_or_else(|| "--".to_string())
+}
+
+fn reset_cards_table_state(u: &UsageInfo, refreshing: bool, cooling: bool) -> (String, Color) {
+    if refreshing {
+        return (
+            reset_credits_count(u)
+                .map(|count| format!("{count}↻"))
+                .unwrap_or_else(|| "...".into()),
+            C_CYAN,
+        );
+    }
+    if cooling && crate::usage::should_fetch_reset_credit_details(u) {
+        return (
+            reset_credits_count(u)
+                .map(|count| format!("{count}⏳"))
+                .unwrap_or_else(|| "wait".into()),
+            C_YELLOW,
+        );
+    }
+    (reset_cards_table_text(u), reset_cards_color(u))
 }
 
 pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
@@ -1176,8 +1200,8 @@ fn status_bar_height(app: &App, width: u16) -> usize {
 mod tests {
     use super::{
         C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, DIM, plan_color,
-        render_usage_gauges, reset_cards_color, status_message_color, table_text_widths,
-        usage_gauges_height,
+        render_usage_gauges, reset_cards_color, reset_cards_table_state, status_message_color,
+        table_text_widths, usage_gauges_height,
     };
     use crate::usage::{AdditionalRateLimit, ResetCredit, UsageInfo, WindowUsage};
     use ratatui::style::Modifier;
@@ -1200,6 +1224,20 @@ mod tests {
     fn status_message_color_distinguishes_errors_from_information() {
         assert_eq!(status_message_color(false), C_CYAN);
         assert_eq!(status_message_color(true), C_RED);
+    }
+
+    #[test]
+    fn reset_card_column_distinguishes_refreshing_and_cooling_down() {
+        let usage = UsageInfo::default();
+        assert_eq!(reset_cards_table_state(&usage, true, false).0, "...");
+        assert_eq!(reset_cards_table_state(&usage, false, true).0, "wait");
+
+        let known = UsageInfo {
+            reset_credits_available_count: Some(2),
+            ..UsageInfo::default()
+        };
+        assert_eq!(reset_cards_table_state(&known, true, false).0, "2↻");
+        assert_eq!(reset_cards_table_state(&known, false, true).0, "2⏳");
     }
 
     fn reset_credit_expiring_in(seconds: i64) -> ResetCredit {

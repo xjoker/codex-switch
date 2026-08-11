@@ -12,6 +12,7 @@ pub use api::{
     fetch_usage_retried, fetch_usage_retried_force, fetch_usage_retried_unattended,
     refresh_expiring_tokens, validate_import_auth,
 };
+pub(crate) use reset_credits::should_fetch_reset_credit_details;
 // Re-exported for the lib target's public API (used by integration tests via
 // `codex_switch::usage::X`); the binary target doesn't call these through this
 // path itself, so they'd otherwise look unused there.
@@ -23,6 +24,7 @@ pub use api::refresh_expiring_tokens_within;
 pub use parse::parse_usage;
 pub use reset_credits::{
     consume_reset_credit_by_id, earliest_reset_credit, fetch_earliest_reset_credit,
+    refresh_reset_credits_for_profile,
 };
 pub use scoring::{
     is_available, is_candidate_eligible, pace_percent, pick_switch_target, score_candidates,
