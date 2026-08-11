@@ -35,7 +35,6 @@ impl ReplaySafety {
 
 pub(crate) struct BufferedResponse {
     pub status: reqwest::StatusCode,
-    pub headers: HeaderMap,
     pub body: Vec<u8>,
 }
 
@@ -55,11 +54,7 @@ pub(crate) async fn send(
         let body = response.bytes().await?.to_vec();
 
         if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Ok(BufferedResponse {
-                status,
-                headers,
-                body,
-            });
+            return Ok(BufferedResponse { status, body });
         }
 
         let decision = rate_limit_decision(&headers, &body, attempt);
@@ -70,18 +65,10 @@ pub(crate) async fn send(
                 decision.source
             );
             tokio::time::sleep(with_jitter(decision.delay)).await;
-            return Ok(BufferedResponse {
-                status,
-                headers,
-                body,
-            });
+            return Ok(BufferedResponse { status, body });
         }
         if attempt + 1 >= MAX_ATTEMPTS {
-            return Ok(BufferedResponse {
-                status,
-                headers,
-                body,
-            });
+            return Ok(BufferedResponse { status, body });
         }
 
         debug!(

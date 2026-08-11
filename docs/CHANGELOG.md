@@ -1,5 +1,10 @@
 # Changelog
 
+## v20260811.2.0 — 2026-08-11
+
+- **Reset Card discovery** — Treat a missing main Usage reset-card summary as unknown instead of zero, then query card details through the existing serialized path so unexpired cards remain visible.
+- **Reset Card 429 isolation** — Keep the detail endpoint on its bounded 1→2 second exponential retry so one limited account cannot hold the global detail queue for 30→60 seconds.
+
 ## v20260811.1.0 — 2026-08-11
 
 - **HTTP 429 handling now slows down instead of amplifying rate limits** — The default TUI refresh interval is five minutes. Replay-safe GET requests honor `Retry-After` and response-body hints, otherwise use bounded exponential backoff with jitter; non-replayable authentication and warmup POST requests wait after a 429 without being replayed. Usage retries stop at one layer instead of multiplying across nested loops.
