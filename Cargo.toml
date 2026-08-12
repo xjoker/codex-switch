@@ -26,7 +26,7 @@ serde_json = "1"
 dirs = "6"
 sha2 = "0.11"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 flate2 = "1"
 semver = "1"
 reqwest = { version = "0.12", features = [
