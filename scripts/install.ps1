@@ -7,9 +7,67 @@
 
 $ErrorActionPreference = "Stop"
 $Repo = "xjoker/codex-switch"
+$ProvenanceAsset = "codex-switch-build-provenance.json"
+$ReleaseWorkflow = "xjoker/codex-switch/.github/workflows/release.yml"
 $BinaryName = "codex-switch.exe"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\codex-switch"
 $DataDir = Join-Path $env:USERPROFILE ".codex-switch"
+
+# Verify the downloaded archive's Sigstore build provenance, the same guarantee
+# `self-update` enforces. The SHA-256 check only proves the archive matches the
+# checksum published in the *same* release, so an attacker who can replace both
+# files is trusted; attestation instead proves the artifact was built by this
+# repository's release workflow on a GitHub-hosted runner and cannot be forged.
+# Offline `--bundle` mode needs neither `gh auth login` nor any GitHub API call.
+# Without a GitHub CLI that supports attestation the archive is still checksum
+# verified; set CS_REQUIRE_PROVENANCE=1 to make a missing verifier a hard error.
+function Test-BuildProvenance {
+    param(
+        [string]$ArchivePath,
+        [string]$DownloadUrl,
+        [string]$TmpDir,
+        [string]$AssetName
+    )
+    $require = $env:CS_REQUIRE_PROVENANCE -eq "1"
+
+    $hasAttestation = $false
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        & gh attestation --help *> $null
+        $hasAttestation = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $hasAttestation) {
+        if ($require) {
+            Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
+            Write-Error "CS_REQUIRE_PROVENANCE=1 but a GitHub CLI with attestation support was not found. Install https://cli.github.com/ and retry."
+            exit 1
+        }
+        Write-Warning "GitHub CLI with attestation support not found; skipping build-provenance verification (the SHA-256 checksum was still verified). Install https://cli.github.com/ and re-run, or set CS_REQUIRE_PROVENANCE=1 to require it."
+        return
+    }
+
+    $BundleUrl = ($DownloadUrl -replace '/[^/]+$', "/$ProvenanceAsset")
+    $BundlePath = Join-Path $TmpDir $ProvenanceAsset
+    try {
+        Invoke-WebRequest -Uri $BundleUrl -OutFile $BundlePath -UseBasicParsing
+    } catch {
+        if ($require) {
+            Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
+            Write-Error "CS_REQUIRE_PROVENANCE=1 but the build-provenance bundle could not be downloaded from $BundleUrl."
+            exit 1
+        }
+        Write-Warning "Could not download the build-provenance bundle ($BundleUrl); skipping provenance verification (the SHA-256 checksum was still verified)."
+        return
+    }
+
+    & gh attestation verify $ArchivePath --bundle $BundlePath --repo $Repo --signer-workflow $ReleaseWorkflow --deny-self-hosted-runners *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[info]  Build provenance verified: $AssetName" -ForegroundColor Blue
+    } else {
+        Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
+        Write-Error "Build-provenance verification failed for $AssetName; refusing to install. The artifact is not attested as built by $ReleaseWorkflow."
+        exit 1
+    }
+}
 
 # ── Uninstall ────────────────────────────────────────────
 if ($env:CS_UNINSTALL -eq "1") {
@@ -139,6 +197,9 @@ if ($ActualSha256 -ne $ExpectedSha256) {
     exit 1
 }
 Write-Host "[info]  Checksum verified: $AssetName" -ForegroundColor Blue
+
+# Verify build provenance (Sigstore attestation) before extracting.
+Test-BuildProvenance -ArchivePath $ZipPath -DownloadUrl $DownloadUrl -TmpDir $TmpDir -AssetName $AssetName
 
 # Extract
 Expand-Archive -Path $ZipPath -DestinationPath $TmpDir -Force

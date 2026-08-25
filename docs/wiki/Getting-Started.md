@@ -23,6 +23,8 @@ curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/insta
 
 This installs to the user-owned `$HOME/.local/bin` and configures PATH for zsh, bash, and fish; other shells receive a manual PATH instruction. An older direct install under `/usr/local/bin` is migrated once: the new user binary is installed first, then the installer removes the old copy with one elevated operation when required. Administrators can explicitly keep a system-wide install with `--system`; system installs may require `sudo` for later updates.
 
+The installer verifies the download's SHA-256 checksum and, when a [GitHub CLI](https://cli.github.com/) with attestation support is present, its Sigstore build provenance — the same attestation `self-update` enforces, proving the archive was built by this repository's release workflow on a GitHub-hosted runner rather than merely matching a checksum published beside it. Provenance uses offline bundle verification, so it needs no `gh auth login`. If the GitHub CLI is unavailable the checksum is still enforced and provenance is skipped with a warning; set `CS_REQUIRE_PROVENANCE=1` to make missing verification a hard failure.
+
 > If the installer says `Installing to /usr/local/bin (requires sudo)` without an explicit `--system`, stop it: that is the retired script from the repository's old `master` branch. Use the Release URL above.
 
 **Windows PowerShell:**
