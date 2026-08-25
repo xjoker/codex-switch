@@ -797,8 +797,9 @@ fn credits_table_text(u: &UsageInfo) -> String {
 }
 
 /// Same low-balance thresholds as `color::credits` (the CLI renderer), mapped to
-/// the TUI palette so a nearly-empty balance reads red at a glance.
-fn credits_table_color(u: &UsageInfo) -> Color {
+/// the TUI palette so a nearly-empty balance reads red at a glance. Shared with
+/// the account-details popup so the column and the detail line agree on color.
+pub(super) fn credits_table_color(u: &UsageInfo) -> Color {
     if u.unlimited_credits == Some(true) {
         C_GREEN
     } else if let Some(balance) = u.credits_balance {
