@@ -60,6 +60,21 @@ fn effective_codex_home() -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("Codex auth path has no parent directory"))
 }
 
+/// The `CODEX_SWITCH_HOME` override active in the installing process, if any.
+///
+/// The service definition otherwise forwards only `HOME` and `CODEX_HOME`, so a
+/// relocated store (`CODEX_SWITCH_HOME`) would be lost and the daemon would read
+/// the default `~/.codex-switch` — polling a stale profile set and potentially
+/// rewriting the wrong account's live `~/.codex/auth.json`. Baking the override
+/// into the unit keeps the daemon pointed at the same store the user installed
+/// from. Returns `None` when unset or empty so the default path is untouched.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn configured_codex_switch_home() -> Option<String> {
+    std::env::var_os("CODEX_SWITCH_HOME")
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn xml_escape(value: &str) -> String {
     value
@@ -136,10 +151,23 @@ fn plist_path() -> Result<PathBuf> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn launchd_plist(exe: &str, home: &str, codex_home: &str) -> String {
+fn launchd_plist(
+    exe: &str,
+    home: &str,
+    codex_home: &str,
+    codex_switch_home: Option<&str>,
+) -> String {
     let exe = xml_escape(exe);
     let home = xml_escape(home);
     let codex_home = xml_escape(codex_home);
+    let codex_switch_home = codex_switch_home
+        .map(|value| {
+            format!(
+                "\n        <key>CODEX_SWITCH_HOME</key>\n        <string>{}</string>",
+                xml_escape(value)
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -164,13 +192,14 @@ fn launchd_plist(exe: &str, home: &str, codex_home: &str) -> String {
         <key>HOME</key>
         <string>{home}</string>
         <key>CODEX_HOME</key>
-        <string>{codex_home}</string>
+        <string>{codex_home}</string>{codex_switch_home}
     </dict>
 </dict>
 </plist>"#,
         exe = exe,
         home = home,
         codex_home = codex_home,
+        codex_switch_home = codex_switch_home,
         label = LAUNCHD_LABEL,
     )
 }
@@ -183,7 +212,8 @@ fn install_launchd() -> Result<()> {
         .display()
         .to_string();
     let codex_home = effective_codex_home()?.display().to_string();
-    let plist = launchd_plist(&exe, &home, &codex_home);
+    let codex_switch_home = configured_codex_switch_home();
+    let plist = launchd_plist(&exe, &home, &codex_home, codex_switch_home.as_deref());
 
     let path = plist_path()?;
     if path.exists() {
@@ -283,10 +313,23 @@ fn unit_path() -> Result<PathBuf> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn systemd_unit(exe: &str, home: &str, codex_home: &str) -> String {
+fn systemd_unit(
+    exe: &str,
+    home: &str,
+    codex_home: &str,
+    codex_switch_home: Option<&str>,
+) -> String {
     let exe = systemd_quote(exe);
     let home = systemd_quote(&format!("HOME={home}"));
     let codex_home = systemd_quote(&format!("CODEX_HOME={codex_home}"));
+    let codex_switch_home = codex_switch_home
+        .map(|value| {
+            format!(
+                "\nEnvironment={}",
+                systemd_quote(&format!("CODEX_SWITCH_HOME={value}"))
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"[Unit]
 Description=codex-switch auto-switching daemon
@@ -298,7 +341,7 @@ ExecStart={exe} daemon start --foreground
 Restart=on-failure
 RestartSec=10
 Environment={home}
-Environment={codex_home}
+Environment={codex_home}{codex_switch_home}
 
 [Install]
 WantedBy=default.target
@@ -306,6 +349,7 @@ WantedBy=default.target
         exe = exe,
         home = home,
         codex_home = codex_home,
+        codex_switch_home = codex_switch_home,
     )
 }
 
@@ -317,8 +361,9 @@ fn install_systemd() -> Result<()> {
         .display()
         .to_string();
     let codex_home = effective_codex_home()?.display().to_string();
+    let codex_switch_home = configured_codex_switch_home();
 
-    let unit = systemd_unit(&exe, &home, &codex_home);
+    let unit = systemd_unit(&exe, &home, &codex_home, codex_switch_home.as_deref());
 
     let path = unit_path()?;
     if path.exists() {
@@ -403,10 +448,23 @@ fn uninstall_systemd() -> Result<()> {
 // -- Windows Task Scheduler --
 
 #[cfg(any(target_os = "windows", test))]
-fn task_scheduler_command(exe: &Path, codex_home: &Path) -> String {
+fn task_scheduler_command(
+    exe: &Path,
+    codex_home: &Path,
+    codex_switch_home: Option<&Path>,
+) -> String {
+    let codex_switch_home = codex_switch_home
+        .map(|path| {
+            format!(
+                "set \"CODEX_SWITCH_HOME={}\" && ",
+                path.display().to_string().replace('"', "")
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "cmd.exe /D /S /C \"\"set \"CODEX_HOME={}\" && \"{}\" daemon start --foreground\"\"",
+        "cmd.exe /D /S /C \"\"set \"CODEX_HOME={}\" && {}\"{}\" daemon start --foreground\"\"",
         codex_home.display().to_string().replace('"', ""),
+        codex_switch_home,
         exe.display().to_string().replace('"', "")
     )
 }
@@ -449,7 +507,8 @@ fn task_scheduler_failure_message(action: &str, detail: &str) -> String {
 fn install_task_scheduler() -> Result<()> {
     let exe = std::env::current_exe()?;
     let codex_home = effective_codex_home()?;
-    let task_run = task_scheduler_command(&exe, &codex_home);
+    let codex_switch_home = configured_codex_switch_home().map(PathBuf::from);
+    let task_run = task_scheduler_command(&exe, &codex_home, codex_switch_home.as_deref());
 
     schtasks(
         &[
@@ -507,6 +566,7 @@ mod tests {
             "/usr/local/bin/codex-switch",
             "/Users/alice",
             "/Users/alice/.codex",
+            None,
         );
         assert!(plist.contains("<string>/usr/local/bin/codex-switch</string>"));
         assert!(plist.contains("<string>daemon</string>"));
@@ -515,6 +575,8 @@ mod tests {
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("<key>CODEX_HOME</key>"));
         assert!(plist.contains("<string>/Users/alice/.codex</string>"));
+        // No override set: the key must be absent so the default path applies.
+        assert!(!plist.contains("CODEX_SWITCH_HOME"));
     }
 
     #[test]
@@ -523,10 +585,23 @@ mod tests {
             "/Applications/A & B/codex-switch",
             "/Users/a<b",
             "/Users/a&b/.codex",
+            None,
         );
         assert!(plist.contains("/Applications/A &amp; B/codex-switch"));
         assert!(plist.contains("/Users/a&lt;b"));
         assert!(plist.contains("/Users/a&amp;b/.codex"));
+    }
+
+    #[test]
+    fn launchd_plist_forwards_codex_switch_home_when_set() {
+        let plist = launchd_plist(
+            "/usr/local/bin/codex-switch",
+            "/Users/alice",
+            "/Users/alice/.codex",
+            Some("/Users/alice/relocated & store"),
+        );
+        assert!(plist.contains("<key>CODEX_SWITCH_HOME</key>"));
+        assert!(plist.contains("<string>/Users/alice/relocated &amp; store</string>"));
     }
 
     #[test]
@@ -535,6 +610,7 @@ mod tests {
             "/usr/local/bin/codex-switch",
             "/home/alice",
             "/home/alice/.codex",
+            None,
         );
         assert!(
             unit.contains("ExecStart=\"/usr/local/bin/codex-switch\" daemon start --foreground")
@@ -542,6 +618,7 @@ mod tests {
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("Environment=\"HOME=/home/alice\""));
         assert!(unit.contains("Environment=\"CODEX_HOME=/home/alice/.codex\""));
+        assert!(!unit.contains("CODEX_SWITCH_HOME"));
     }
 
     #[test]
@@ -550,6 +627,7 @@ mod tests {
             r#"/opt/Codex & Tools\\codex-switch"#,
             "/home/a & b",
             r#"/home/a & b/.codex\\custom"#,
+            None,
         );
         assert!(unit.contains(
             r#"ExecStart="/opt/Codex & Tools\\\\codex-switch" daemon start --foreground"#
@@ -559,14 +637,39 @@ mod tests {
     }
 
     #[test]
+    fn systemd_unit_forwards_codex_switch_home_when_set() {
+        let unit = systemd_unit(
+            "/usr/local/bin/codex-switch",
+            "/home/alice",
+            "/home/alice/.codex",
+            Some("/home/alice/relocated"),
+        );
+        assert!(unit.contains(r#"Environment="CODEX_SWITCH_HOME=/home/alice/relocated""#));
+    }
+
+    #[test]
     fn windows_task_scheduler_command_quotes_exe_path() {
         let cmd = task_scheduler_command(
             Path::new(r"C:\Program Files\codex-switch.exe"),
             Path::new(r"C:\Users\A & B\.codex"),
+            None,
         );
         assert_eq!(
             cmd,
             r#"cmd.exe /D /S /C ""set "CODEX_HOME=C:\Users\A & B\.codex" && "C:\Program Files\codex-switch.exe" daemon start --foreground"""#
+        );
+    }
+
+    #[test]
+    fn windows_task_scheduler_command_forwards_codex_switch_home_when_set() {
+        let cmd = task_scheduler_command(
+            Path::new(r"C:\Program Files\codex-switch.exe"),
+            Path::new(r"C:\Users\A & B\.codex"),
+            Some(Path::new(r"C:\Users\A & B\relocated")),
+        );
+        assert_eq!(
+            cmd,
+            r#"cmd.exe /D /S /C ""set "CODEX_HOME=C:\Users\A & B\.codex" && set "CODEX_SWITCH_HOME=C:\Users\A & B\relocated" && "C:\Program Files\codex-switch.exe" daemon start --foreground"""#
         );
     }
 
