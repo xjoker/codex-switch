@@ -159,8 +159,8 @@ fn table_text_widths(
         plan: desired("Plan", plans).max(4),
     };
 
-    // Borders, column spacing, marker and fixed quota columns consume 64 cells.
-    let budget = total_width.saturating_sub(64).max(14);
+    // Borders, column spacing, marker and fixed quota columns consume 75 cells.
+    let budget = total_width.saturating_sub(75).max(14);
     let total = u32::from(widths.alias) + u32::from(widths.email) + u32::from(widths.plan);
     let mut excess = total.saturating_sub(u32::from(budget));
     for (width, minimum) in [
@@ -213,6 +213,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         Cell::from("5h Reset").style(hdr),
         Cell::from("7d Reset").style(hdr),
         Cell::from("Cards").style(hdr),
+        Cell::from("Credits").style(hdr),
     ])
     .height(1);
 
@@ -404,6 +405,13 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 }
             };
 
+            let (credits_text, credits_color) = match &entry.usage {
+                UsageStatus::Idle => ("--".to_string(), DIM),
+                UsageStatus::Loading => ("...".to_string(), C_YELLOW),
+                UsageStatus::Error(_) => ("--".to_string(), DIM),
+                UsageStatus::Loaded(u) => (credits_table_text(u), credits_table_color(u)),
+            };
+
             Row::new(vec![
                 Cell::from(Span::styled(marker, marker_style)),
                 Cell::from(entry.alias.clone()).style(row_style),
@@ -421,6 +429,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(reset_5h).style(base().fg(reset_5h_color)),
                 Cell::from(reset_7d).style(base().fg(reset_7d_color)),
                 Cell::from(reset_cards).style(base().fg(reset_cards_color)),
+                Cell::from(credits_text).style(base().fg(credits_color)),
             ])
             .height(1)
         };
@@ -498,6 +507,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(12),                // 5h reset
             Constraint::Length(12),                // 7d reset
             Constraint::Length(7),                 // reset cards
+            Constraint::Length(10),                // credits
         ],
     )
     .header(header)
@@ -769,6 +779,38 @@ pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
             }),
         None if u.reset_credits_error.is_some() => C_YELLOW,
         None => DIM,
+    }
+}
+
+/// Compact pay-per-use credits balance for the table column. Mirrors the CLI
+/// `print_usage_line` wording: "unlimited" for unmetered accounts, a dollar
+/// amount when a balance is reported, and "--" when the account does not use
+/// the credits system (`credits_balance` absent).
+fn credits_table_text(u: &UsageInfo) -> String {
+    if u.unlimited_credits == Some(true) {
+        "unlimited".to_string()
+    } else if let Some(balance) = u.credits_balance {
+        format!("${balance:.2}")
+    } else {
+        "--".to_string()
+    }
+}
+
+/// Same low-balance thresholds as `color::credits` (the CLI renderer), mapped to
+/// the TUI palette so a nearly-empty balance reads red at a glance.
+fn credits_table_color(u: &UsageInfo) -> Color {
+    if u.unlimited_credits == Some(true) {
+        C_GREEN
+    } else if let Some(balance) = u.credits_balance {
+        if balance >= 10.0 {
+            C_GREEN
+        } else if balance >= 2.0 {
+            C_YELLOW
+        } else {
+            C_RED
+        }
+    } else {
+        DIM
     }
 }
 
@@ -1199,10 +1241,13 @@ fn status_bar_height(app: &App, width: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, DIM, plan_color,
-        render_usage_gauges, reset_cards_color, reset_cards_table_state, status_message_color,
-        table_text_widths, usage_gauges_height,
+        C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, DIM, credits_table_color,
+        credits_table_text, plan_color, render_account_table, render_usage_gauges,
+        reset_cards_color, reset_cards_table_state, status_message_color, table_text_widths,
+        usage_gauges_height,
     };
+    use crate::jwt::AccountInfo;
+    use crate::tui::app::{AccountEntry, App, UsageStatus};
     use crate::usage::{AdditionalRateLimit, ResetCredit, UsageInfo, WindowUsage};
     use ratatui::style::Modifier;
     use ratatui::{Terminal, backend::TestBackend};
@@ -1400,5 +1445,76 @@ mod tests {
         assert_eq!(widths.alias, alias.len() as u16);
         assert_eq!(widths.email, email.len() as u16);
         assert_eq!(widths.plan, plan.len() as u16);
+    }
+
+    #[test]
+    fn credits_column_text_and_color_track_the_balance_state() {
+        let unlimited = UsageInfo {
+            unlimited_credits: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(credits_table_text(&unlimited), "unlimited");
+        assert_eq!(credits_table_color(&unlimited), C_GREEN);
+
+        let healthy = UsageInfo {
+            credits_balance: Some(15.5),
+            ..Default::default()
+        };
+        assert_eq!(credits_table_text(&healthy), "$15.50");
+        assert_eq!(credits_table_color(&healthy), C_GREEN);
+
+        let mid = UsageInfo {
+            credits_balance: Some(5.0),
+            ..Default::default()
+        };
+        assert_eq!(credits_table_color(&mid), C_YELLOW);
+
+        let low = UsageInfo {
+            credits_balance: Some(1.0),
+            ..Default::default()
+        };
+        assert_eq!(credits_table_text(&low), "$1.00");
+        assert_eq!(credits_table_color(&low), C_RED);
+
+        // Accounts that don't use the pay-per-use credits system read as "--".
+        let none = UsageInfo::default();
+        assert_eq!(credits_table_text(&none), "--");
+        assert_eq!(credits_table_color(&none), DIM);
+    }
+
+    #[test]
+    fn account_table_renders_the_credits_column() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "payg".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Loaded(Box::new(UsageInfo {
+                credits_balance: Some(15.5),
+                ..UsageInfo::default()
+            })),
+            is_current: true,
+        });
+        app.view_indices.push(0);
+
+        let backend = TestBackend::new(120, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_account_table(frame, &app, frame.area()))
+            .unwrap();
+
+        let rows: Vec<String> = (0..6).map(|y| row_text(terminal.backend(), y)).collect();
+        let header = rows
+            .iter()
+            .find(|line| line.contains("Alias"))
+            .expect("header row must render");
+        assert!(
+            header.contains("Credits"),
+            "header must include the Credits column: {header}"
+        );
+        let joined = rows.join("\n");
+        assert!(
+            joined.contains("$15.50"),
+            "the account's credits balance must render in the table:\n{joined}"
+        );
     }
 }
