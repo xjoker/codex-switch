@@ -36,7 +36,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | `--json` | — | Compact structured output (supported by `list`, `use`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `daemon status`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`). |
 | `--json-pretty` | — | Indented structured output. |
 | `--proxy <URL>` | `CS_PROXY` | Override proxy configuration for this process; supports `http(s)://`, `socks4://`, `socks5://`, and `socks5h://` (remote DNS). |
-| `--color <auto\|always\|never>` | `CS_COLOR` | Control terminal color. `NO_COLOR` disables color regardless of this option. |
+| `--color <auto\|always\|never>` | `CS_COLOR` | Control CLI terminal color. `NO_COLOR` disables CLI color regardless of this option. The TUI still paints its designed palette. |
 | `--debug` | — | Emit diagnostic information (HTTP requests, API responses, cache status) to stderr; redact it before sharing. |
 | `-V`, `--version` | — | Print the binary version. |
 

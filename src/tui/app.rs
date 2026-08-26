@@ -2024,6 +2024,11 @@ impl App {
 pub async fn run() -> Result<()> {
     // auth-change detection runs before dispatch(), so auto_track is already handled.
 
+    // The TUI is a designed full-screen UI. CLI still honors NO_COLOR;
+    // leaving crossterm's default would strip every style and look like
+    // the palette had been deleted.
+    crossterm::style::force_color_output(true);
+
     // Ensure terminal is restored even on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
