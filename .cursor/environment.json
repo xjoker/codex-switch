@@ -1,0 +1,4 @@
+{
+  "name": "codex-switch",
+  "install": "rustup toolchain install stable --profile minimal -c clippy -c rustfmt && rustup default stable && cargo fetch --locked && cargo build --all-targets --locked && cargo install cargo-audit --locked"
+}
