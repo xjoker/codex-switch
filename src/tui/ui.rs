@@ -888,20 +888,52 @@ fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // Add-provider wizard prompt takes top priority.
     if let Some(state) = &app.provider_add {
-        let shown = if state.step.is_secret() {
-            "*".repeat(state.input.chars().count())
-        } else {
-            state.input.clone()
+        use super::app::{ProviderAddStep, REASONING_CHOICES};
+        let label = Span::styled(
+            format!(" Add provider [{}]: ", state.step.prompt()),
+            base().fg(C_CYAN).add_modifier(Modifier::BOLD),
+        );
+        let line = match state.step {
+            ProviderAddStep::Reasoning => {
+                let choice = REASONING_CHOICES[state.reasoning_idx];
+                Line::from(vec![
+                    label,
+                    Span::styled(
+                        format!("< {choice} >"),
+                        base().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  (←/→ choose, Enter next / Esc cancel)", base().fg(DIM)),
+                ])
+            }
+            ProviderAddStep::WebSearch => {
+                let value = if state.no_web_search {
+                    "disabled"
+                } else {
+                    "enabled (default)"
+                };
+                Line::from(vec![
+                    label,
+                    Span::styled(
+                        format!("[{value}]"),
+                        base().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  (Space toggle, Enter next / Esc cancel)", base().fg(DIM)),
+                ])
+            }
+            _ => {
+                let shown = if state.step.is_secret() {
+                    "*".repeat(state.input.chars().count())
+                } else {
+                    state.input.clone()
+                };
+                Line::from(vec![
+                    label,
+                    Span::styled(shown, base().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+                    Span::styled("#", base().fg(C_GRAY)),
+                    Span::styled("  (Enter next / Esc cancel)", base().fg(DIM)),
+                ])
+            }
         };
-        let line = Line::from(vec![
-            Span::styled(
-                format!(" Add provider [{}]: ", state.step.prompt()),
-                base().fg(C_CYAN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(shown, base().fg(C_WHITE).add_modifier(Modifier::BOLD)),
-            Span::styled("#", base().fg(C_GRAY)),
-            Span::styled("  (Enter next / Esc cancel)", base().fg(DIM)),
-        ]);
         f.render_widget(Paragraph::new(line).style(base()), area);
         return;
     }
