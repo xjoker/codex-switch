@@ -136,7 +136,7 @@ On the Providers tab:
 | `h` | Help |
 | `q` | Quit |
 
-Add and edit use the same form. Add starts typing the alias immediately; Enter commits a field and continues to the next. After the model id is committed, the form stays on Models so `+` / `-` add or remove a model, `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, and `s` saves. Edit starts on Base URL in navigation mode (Enter edits the focused cell). Tab always moves between fields. The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field.
+Add and edit use the same form. Add starts typing the alias immediately; Enter commits a field and continues to the next. Tab moves between alias, base URL, API key, and Models; `j`/`k` move inside the model list. The last row is `+ add model` — Enter (or `+` / `a`) adds a model and starts typing its id; `d` / `-` / Delete remove the selected model. `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, `s` saves, Esc cancels. Edit starts on Base URL in navigation mode (Enter edits the focused cell). The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field.
 
 The stored key is never rendered in the table. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, then Enter (or `o` again) starts Codex. On the Providers list, Enter also opens that picker; `e` edits. `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
 

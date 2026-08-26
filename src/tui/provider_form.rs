@@ -1,9 +1,10 @@
 //! Single-dialog add/edit form for custom API providers.
 //!
 //! Add starts typing the alias immediately. Enter commits the field and
-//! continues into the next one. After a model id is committed, the form stays
-//! on Models in navigation mode so `+/-`, `←/→`, `w`, `*`, and `s` work.
-//! Edit starts on Base URL in navigation mode so `s` is save, not a character.
+//! continues into the next one. Tab always moves between fields; `j`/`k`
+//! move inside Models, which includes a visible `+ add model` row.
+//! `+` adds and `d`/`-` remove from navigation mode. Edit starts on Base URL
+//! so `s` is save, not a character.
 
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -149,79 +150,64 @@ impl ProviderFormState {
             KeyCode::Esc => FormOutcome::Cancel,
             KeyCode::Char('s') => self.try_save(),
             KeyCode::Enter => {
-                self.begin_edit();
+                if self.is_add_row() {
+                    self.add_model_and_edit();
+                } else {
+                    self.begin_edit();
+                }
                 FormOutcome::Continue
             }
-            KeyCode::Tab | KeyCode::Down => {
+            KeyCode::Tab => {
+                self.focus_next();
+                if self.mode == FormMode::Add {
+                    self.auto_edit_if_typing_field();
+                }
+                FormOutcome::Continue
+            }
+            KeyCode::BackTab => {
+                self.focus_prev();
+                FormOutcome::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
                 if self.focus == Focus::Models {
-                    self.model_select(1);
+                    self.model_move(1);
                 } else {
                     self.focus_next();
                 }
                 FormOutcome::Continue
             }
-            KeyCode::BackTab | KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 if self.focus == Focus::Models {
-                    self.model_select(-1);
+                    self.model_move(-1);
                 } else {
                     self.focus_prev();
                 }
                 FormOutcome::Continue
             }
-            KeyCode::Char('j') if self.focus == Focus::Models => {
-                self.model_select(1);
+            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('a') => {
+                self.add_model_and_edit();
                 FormOutcome::Continue
             }
-            KeyCode::Char('k') if self.focus == Focus::Models => {
-                self.model_select(-1);
-                FormOutcome::Continue
-            }
-            KeyCode::Char('+') | KeyCode::Char('=') if self.focus == Focus::Models => {
-                self.models.push(ModelDraft {
-                    id: String::new(),
-                    reasoning_idx: 0,
-                    no_web_search: false,
-                });
-                self.model_idx = self.models.len() - 1;
-                self.begin_edit();
-                FormOutcome::Continue
-            }
-            KeyCode::Char('-') | KeyCode::Char('_') if self.focus == Focus::Models => {
-                if self.models.len() <= 1 {
-                    self.error = Some("A provider needs at least one model".into());
-                } else {
-                    let removed = self.model_idx;
-                    self.models.remove(removed);
-                    if self.default_idx == removed {
-                        self.default_idx = 0;
-                    } else if self.default_idx > removed {
-                        self.default_idx -= 1;
-                    }
-                    self.model_idx = self.model_idx.min(self.models.len() - 1);
+            KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('d') | KeyCode::Delete => {
+                if self.focus == Focus::Models {
+                    self.remove_selected_model();
                 }
                 FormOutcome::Continue
             }
-            KeyCode::Char('*') if self.focus == Focus::Models => {
-                self.default_idx = self.model_idx;
+            KeyCode::Char('*') => {
+                self.set_default_model();
                 FormOutcome::Continue
             }
-            KeyCode::Left if self.focus == Focus::Models => {
-                let idx = &mut self.models[self.model_idx].reasoning_idx;
-                if *idx > 0 {
-                    *idx -= 1;
-                }
+            KeyCode::Left => {
+                self.nudge_reasoning(-1);
                 FormOutcome::Continue
             }
-            KeyCode::Right if self.focus == Focus::Models => {
-                let idx = &mut self.models[self.model_idx].reasoning_idx;
-                if *idx + 1 < REASONING_CHOICES.len() {
-                    *idx += 1;
-                }
+            KeyCode::Right => {
+                self.nudge_reasoning(1);
                 FormOutcome::Continue
             }
-            KeyCode::Char('w') if self.focus == Focus::Models => {
-                let model = &mut self.models[self.model_idx];
-                model.no_web_search = !model.no_web_search;
+            KeyCode::Char('w') => {
+                self.toggle_web_search();
                 FormOutcome::Continue
             }
             _ => FormOutcome::Continue,
@@ -298,6 +284,10 @@ impl ProviderFormState {
         if self.focus == Focus::Alias && self.mode == FormMode::Edit {
             return;
         }
+        if self.is_add_row() {
+            self.add_model_and_edit();
+            return;
+        }
         let value = match self.focus {
             Focus::Alias => self.alias.clone(),
             Focus::BaseUrl => self.base_url.clone(),
@@ -309,11 +299,73 @@ impl ProviderFormState {
         self.editing = true;
     }
 
+    fn add_model_and_edit(&mut self) {
+        self.focus = Focus::Models;
+        self.models.push(ModelDraft {
+            id: String::new(),
+            reasoning_idx: 0,
+            no_web_search: false,
+        });
+        self.model_idx = self.models.len() - 1;
+        self.input.clear();
+        self.cursor = 0;
+        self.editing = true;
+    }
+
+    fn is_add_row(&self) -> bool {
+        self.focus == Focus::Models && self.model_idx >= self.models.len()
+    }
+
+    fn remove_selected_model(&mut self) {
+        self.focus = Focus::Models;
+        if self.is_add_row() {
+            return;
+        }
+        if self.models.len() <= 1 {
+            self.error = Some("A provider needs at least one model".into());
+            return;
+        }
+        let removed = self.model_idx;
+        self.models.remove(removed);
+        if self.default_idx == removed {
+            self.default_idx = 0;
+        } else if self.default_idx > removed {
+            self.default_idx -= 1;
+        }
+        self.model_idx = self.model_idx.min(self.models.len() - 1);
+    }
+
+    fn set_default_model(&mut self) {
+        if self.focus != Focus::Models || self.is_add_row() {
+            return;
+        }
+        self.default_idx = self.model_idx;
+    }
+
+    fn nudge_reasoning(&mut self, delta: i32) {
+        if self.focus != Focus::Models || self.is_add_row() {
+            return;
+        }
+        let idx = &mut self.models[self.model_idx].reasoning_idx;
+        let next = *idx as i32 + delta;
+        if next >= 0 && (next as usize) < REASONING_CHOICES.len() {
+            *idx = next as usize;
+        }
+    }
+
+    fn toggle_web_search(&mut self) {
+        if self.focus != Focus::Models || self.is_add_row() {
+            return;
+        }
+        let model = &mut self.models[self.model_idx];
+        model.no_web_search = !model.no_web_search;
+    }
+
     fn auto_edit_if_typing_field(&mut self) {
         match self.focus {
             Focus::Alias | Focus::BaseUrl | Focus::ApiKey => self.begin_edit(),
             Focus::Models => {
-                if self.models[self.model_idx].id.is_empty() {
+                if self.model_idx < self.models.len() && self.models[self.model_idx].id.is_empty() {
                     self.begin_edit();
                 }
             }
@@ -326,7 +378,10 @@ impl ProviderFormState {
             Focus::Alias => self.alias = value,
             Focus::BaseUrl => self.base_url = value,
             Focus::ApiKey => self.api_key = value,
-            Focus::Models => self.models[self.model_idx].id = value,
+            Focus::Models if self.model_idx < self.models.len() => {
+                self.models[self.model_idx].id = value;
+            }
+            Focus::Models => {}
         }
         self.editing = false;
         self.input.clear();
@@ -355,13 +410,16 @@ impl ProviderFormState {
         };
     }
 
-    fn model_select(&mut self, delta: i32) {
-        if self.models.is_empty() {
+    fn model_move(&mut self, delta: i32) {
+        self.focus = Focus::Models;
+        let max = self.models.len() as i32; // inclusive: last slot is "+ add model"
+        let next = self.model_idx as i32 + delta;
+        if next < 0 {
+            self.focus_prev();
+            self.model_idx = 0;
             return;
         }
-        let len = self.models.len() as i32;
-        let next = (self.model_idx as i32 + delta).rem_euclid(len);
-        self.model_idx = next as usize;
+        self.model_idx = next.min(max) as usize;
     }
 
     fn try_save(&mut self) -> FormOutcome {
@@ -578,6 +636,22 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             Span::styled(format!("  {reasoning}  {search}"), dim()),
         ]));
     }
+    let add_selected = form.is_add_row();
+    lines.push(Line::from(vec![
+        Span::styled(
+            if add_selected { "▶ " } else { "  " },
+            base().fg(C_GREEN),
+        ),
+        Span::styled(
+            "+ add model",
+            if add_selected {
+                header()
+            } else {
+                dim()
+            },
+        ),
+        Span::styled("   d/- remove", dim()),
+    ]));
     if let Some(error) = &form.error {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -599,10 +673,21 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
         lines.push(Line::from(vec![
             Span::styled("tab", key()),
             Span::styled(" field  ", dim()),
-            Span::styled("enter", key()),
-            Span::styled(" edit  ", dim()),
-            Span::styled("+/-", key()),
+            Span::styled("j/k", key()),
             Span::styled(" model  ", dim()),
+            Span::styled("enter", key()),
+            Span::styled(
+                if form.is_add_row() {
+                    " add  "
+                } else {
+                    " edit  "
+                },
+                dim(),
+            ),
+            Span::styled("+", key()),
+            Span::styled(" add  ", dim()),
+            Span::styled("d/-", key()),
+            Span::styled(" del  ", dim()),
             Span::styled("←/→", key()),
             Span::styled(" reasoning  ", dim()),
             Span::styled("w", key()),
@@ -747,5 +832,114 @@ mod tests {
         assert_eq!(profile.api_key, "sk-original");
         assert_eq!(profile.base_url, "https://example.com/v1");
         assert_eq!(profile.alias, "keep");
+    }
+
+    #[test]
+    fn plus_adds_a_model_from_any_field() {
+        let _home = EnvHome::new();
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            vec![
+                ProviderModel::from_id("minimax/minimax-m3:free"),
+                ProviderModel::from_id("liquid/lfm-2.5-2.6b:free"),
+            ],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        assert_eq!(form.focus, Focus::BaseUrl);
+        assert!(!form.editing);
+        form.handle_key(KeyCode::Char('+'));
+        assert_eq!(form.models.len(), 3);
+        assert_eq!(form.focus, Focus::Models);
+        assert!(form.editing, "adding a model must start typing the id");
+        type_into(&mut form, "third/model");
+        form.handle_key(KeyCode::Enter);
+        assert!(!form.editing);
+        assert_eq!(form.models[2].id, "third/model");
+    }
+
+    #[test]
+    fn tab_leaves_models_instead_of_trapping_the_cursor() {
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            vec![
+                ProviderModel::from_id("a"),
+                ProviderModel::from_id("b"),
+            ],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.handle_key(KeyCode::Tab); // ApiKey
+        form.handle_key(KeyCode::Tab); // Models
+        assert_eq!(form.focus, Focus::Models);
+        let idx = form.model_idx;
+        form.handle_key(KeyCode::Tab);
+        assert_eq!(form.focus, Focus::BaseUrl);
+        assert_eq!(form.model_idx, idx);
+        assert!(!form.editing);
+    }
+
+    #[test]
+    fn enter_on_the_add_row_appends_a_model() {
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("a"), ProviderModel::from_id("b")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Models;
+        form.model_idx = form.models.len();
+        assert!(form.is_add_row());
+        form.handle_key(KeyCode::Enter);
+        assert_eq!(form.models.len(), 3);
+        assert!(form.editing);
+        type_into(&mut form, "c");
+        form.handle_key(KeyCode::Enter);
+        form.model_idx = 1;
+        form.handle_key(KeyCode::Char('d'));
+        assert_eq!(form.models.len(), 2);
+        assert_eq!(form.models[0].id, "a");
+        assert_eq!(form.models[1].id, "c");
+    }
+
+    #[test]
+    fn form_renders_the_add_model_row() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("a")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Models;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_provider_form(frame, &mut form, frame.area()))
+            .unwrap();
+        let area = terminal.backend().buffer().area;
+        let joined = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        terminal
+                            .backend()
+                            .buffer()
+                            .cell((x, y))
+                            .expect("cell")
+                            .symbol()
+                            .to_string()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("+ add model"), "{joined}");
+        assert!(joined.contains("d/-"), "{joined}");
     }
 }
