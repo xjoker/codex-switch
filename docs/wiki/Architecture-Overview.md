@@ -47,11 +47,11 @@ Profile identity prefers `account_id` and falls back to email when required for 
 
 ## Custom API providers
 
-[`src/provider.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/provider.rs) owns third-party API provider profiles (OpenRouter and other Responses-compatible endpoints). Each profile is a TOML file under `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` (directory `0700`, file `0600`). It carries a Codex `model_providers.<id>` definition plus a bearer key; it has no `auth.json`.
+[`src/provider.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/provider.rs) owns third-party API provider profiles (OpenRouter and other Responses-compatible endpoints). Each profile is a TOML file under `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` (directory `0700`, file `0600`). It carries a Codex `model_providers.<id>` definition, a bearer key, and a list of models with per-model reasoning / `web_search`; it has no `auth.json`. The alias is the only user-facing name.
 
-[`src/commands/launch.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/commands/launch.rs) takes a separate path when the named alias is a provider: it does not stage `$CODEX_HOME/auth.json`. The profile is translated into `codex -c …` overrides that define and select the provider, and the key is injected into the child process environment under `env_key` — never onto the command line. Because `-c` layers on the user's base `$CODEX_HOME/config.toml`, MCP servers and other Codex settings survive. Auto-select (`launch` with no alias) and `use` stay ChatGPT-only.
+[`src/commands/launch.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/commands/launch.rs) takes a separate path when the named alias is a provider: it does not stage `$CODEX_HOME/auth.json`. The profile is translated into `codex -c …` overrides that define and select the provider and a saved model (`--model` or `default_model`), and the key is injected into the child process environment under `env_key` — never onto the command line. Because `-c` layers on the user's base `$CODEX_HOME/config.toml`, MCP servers and other Codex settings survive. Auto-select (`launch` with no alias) and `use` stay ChatGPT-only.
 
-The TUI isolates the two kinds of profile on separate tabs so quota/scoring bindings never mix with provider add/remove. See [Custom API providers](Providers).
+The TUI isolates the two kinds of profile on separate tabs so quota/scoring bindings never mix with provider add/edit/rename/remove. See [Custom API providers](Providers).
 
 ## Usage, refresh, and selection
 
@@ -71,7 +71,7 @@ Selection has two phases. Eligibility excludes candidates with missing authorita
 
 ## TUI and output contracts
 
-[`src/tui/`](https://github.com/xjoker/codex-switch/tree/dev/src/tui) separates application state, key bindings, menus, popups, and rendering. Network or filesystem actions suspend or update the terminal deliberately rather than running inside rendering functions. Accounts and custom providers occupy separate tabs so quota/scoring keys never mix with provider add/remove.
+[`src/tui/`](https://github.com/xjoker/codex-switch/blob/dev/src/tui) separates application state, key bindings, menus, popups, the provider form, and rendering. Network or filesystem actions suspend or update the terminal deliberately rather than running inside rendering functions. Accounts and custom providers occupy separate tabs so quota/scoring keys never mix with provider add/edit/rename/remove.
 
 [`src/output.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/output.rs) owns JSON response types and human formatting. In JSON mode stdout must contain only structured output; human diagnostics and progress are routed to stderr. This separation is part of the automation contract and is covered by integration tests.
 

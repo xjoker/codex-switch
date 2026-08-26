@@ -32,34 +32,28 @@ pub enum DaemonCommand {
 pub enum ProviderCommand {
     /// Add a custom API provider (e.g. OpenRouter) for launching Codex with a third-party model
     #[command(
-        after_help = "The API key is read from a hidden prompt (or stdin with --api-key-stdin), never from the command line.\n\nExample:\n  codex-switch provider add openrouter \\\n    --base-url https://openrouter.ai/api/v1 \\\n    --model openai/gpt-5.3-codex"
+        after_help = "The API key is read from a hidden prompt (or stdin with --api-key-stdin), never from the command line.\n--model is repeatable; the first is the default. --reasoning / --no-web-search attach to the most recent --model.\n\nExample:\n  codex-switch provider add openrouter \\\n    --base-url https://openrouter.ai/api/v1 \\\n    --model openai/gpt-5.3-codex \\\n    --model deepseek/deepseek-r1-0528 --reasoning high"
     )]
     Add {
-        /// Provider alias (codex-switch name)
+        /// Provider alias (the only user-facing name)
         alias: String,
         /// API base URL, e.g. https://openrouter.ai/api/v1
         #[arg(long)]
         base_url: String,
-        /// Default model id (for OpenRouter, the full slug incl. provider prefix)
-        #[arg(long)]
-        model: String,
-        /// Human-readable provider name (defaults to the alias)
-        #[arg(long)]
-        name: Option<String>,
+        /// Model id (repeatable; first is the default). For OpenRouter, the full slug
+        #[arg(long, required = true, action = clap::ArgAction::Append)]
+        model: Vec<String>,
         /// Environment variable Codex reads the key from (defaults to a codex-switch-owned name)
         #[arg(long)]
         env_key: Option<String>,
         /// Codex wire protocol (current Codex only supports "responses")
         #[arg(long, default_value = "responses")]
         wire_api: String,
-        /// Reasoning effort for thinking models, saved as
-        /// `model_reasoning_effort=<VALUE>` (common: none, minimal, low, medium,
-        /// high, xhigh, max; Codex also accepts ultra). Passed to Codex verbatim
-        #[arg(long, value_name = "EFFORT")]
-        reasoning: Option<String>,
-        /// Disable Codex's built-in web_search server tool for models that reject
-        /// it (saved as `web_search=disabled`)
-        #[arg(long)]
+        /// Reasoning effort attached to the most recent --model (repeatable)
+        #[arg(long, value_name = "EFFORT", action = clap::ArgAction::Append)]
+        reasoning: Vec<String>,
+        /// Disable web_search on the most recent --model (repeatable)
+        #[arg(long, action = clap::ArgAction::SetTrue)]
         no_web_search: bool,
         /// Extra `codex -c KEY=VALUE` override to apply at launch (repeatable);
         /// passed through verbatim, so any value Codex accepts works
@@ -75,6 +69,13 @@ pub enum ProviderCommand {
     Show {
         /// Provider alias
         alias: String,
+    },
+    /// Rename a custom provider
+    Rename {
+        /// Current provider alias
+        old: String,
+        /// New provider alias
+        new: String,
     },
     /// Remove a custom provider and its stored key
     Remove {
@@ -95,7 +96,7 @@ pub enum ProviderCommand {
     after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, reset-card, rename, delete, login, import, self-update, daemon status)
+    /// Output as compact JSON (supported by list, use, reset-card, rename, delete, login, import, self-update, daemon status, provider add/list/show/rename/remove)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -221,7 +222,11 @@ pub enum Commands {
         /// ignored when an alias is given)
         #[arg(long)]
         consume_card: bool,
-        /// All remaining arguments passed through to codex
+        /// For a custom provider, select a saved model (default_model otherwise).
+        /// For a ChatGPT profile, forwarded to Codex as `--model`.
+        #[arg(long)]
+        model: Option<String>,
+        /// All remaining arguments passed through to Codex
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

@@ -87,6 +87,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Help popup takes top priority since the user invoked it explicitly.
     if let Some(state) = app.help_popup.as_mut() {
         render_help_popup(f, state, area);
+    } else if let Some(form) = app.provider_form.as_mut() {
+        super::provider_form::render_provider_form(f, form, area);
     } else if let Some(menu) = app.menu.as_mut() {
         menu.render(f, area);
     }
@@ -830,12 +832,9 @@ fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
 
     if app.providers.is_empty() {
         let hint = Paragraph::new(Line::from(vec![
-            Span::styled("No custom providers. Add one with ", base().fg(DIM)),
-            Span::styled(
-                "codex-switch provider add",
-                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(".", base().fg(DIM)),
+            Span::styled("No custom providers. Press ", base().fg(DIM)),
+            Span::styled("a", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" to add one.", base().fg(DIM)),
         ]))
         .style(base());
         f.render_widget(hint, inner);
@@ -845,8 +844,7 @@ fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from(" "),
         Cell::from("Alias"),
-        Cell::from("Name"),
-        Cell::from("Model"),
+        Cell::from("Models"),
         Cell::from("Base URL"),
     ])
     .style(base().fg(C_CYAN).add_modifier(Modifier::BOLD));
@@ -865,8 +863,7 @@ fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
             Row::new(vec![
                 Cell::from(if selected { "\u{25b6}" } else { " " }).style(base().fg(C_GREEN)),
                 Cell::from(p.alias.clone()).style(text_style),
-                Cell::from(p.name.clone()).style(text_style),
-                Cell::from(p.model.clone()).style(base().fg(C_CYAN)),
+                Cell::from(p.models_label()).style(base().fg(C_CYAN)),
                 Cell::from(p.base_url.clone()).style(base().fg(DIM)),
             ])
             .height(1)
@@ -878,8 +875,7 @@ fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
         [
             Constraint::Length(2),
             Constraint::Length(20),
-            Constraint::Length(24),
-            Constraint::Length(28),
+            Constraint::Length(36),
             Constraint::Min(20),
         ],
     )
@@ -929,58 +925,6 @@ pub(super) fn credits_table_color(u: &UsageInfo) -> Color {
 }
 
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    // Add-provider wizard prompt takes top priority.
-    if let Some(state) = &app.provider_add {
-        use super::app::{ProviderAddStep, REASONING_CHOICES};
-        let label = Span::styled(
-            format!(" Add provider [{}]: ", state.step.prompt()),
-            base().fg(C_CYAN).add_modifier(Modifier::BOLD),
-        );
-        let line = match state.step {
-            ProviderAddStep::Reasoning => {
-                let choice = REASONING_CHOICES[state.reasoning_idx];
-                Line::from(vec![
-                    label,
-                    Span::styled(
-                        format!("< {choice} >"),
-                        base().fg(C_WHITE).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("  (←/→ choose, Enter next / Esc cancel)", base().fg(DIM)),
-                ])
-            }
-            ProviderAddStep::WebSearch => {
-                let value = if state.no_web_search {
-                    "disabled"
-                } else {
-                    "enabled (default)"
-                };
-                Line::from(vec![
-                    label,
-                    Span::styled(
-                        format!("[{value}]"),
-                        base().fg(C_WHITE).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("  (Space toggle, Enter next / Esc cancel)", base().fg(DIM)),
-                ])
-            }
-            _ => {
-                let shown = if state.step.is_secret() {
-                    "*".repeat(state.input.chars().count())
-                } else {
-                    state.input.clone()
-                };
-                Line::from(vec![
-                    label,
-                    Span::styled(shown, base().fg(C_WHITE).add_modifier(Modifier::BOLD)),
-                    Span::styled("#", base().fg(C_GRAY)),
-                    Span::styled("  (Enter next / Esc cancel)", base().fg(DIM)),
-                ])
-            }
-        };
-        f.render_widget(Paragraph::new(line).style(base()), area);
-        return;
-    }
-
     // Rename input takes top priority
     if let Some(rs) = &app.rename {
         let line = Line::from(vec![
@@ -1067,6 +1011,10 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             dim(" nav \u{2502} "),
             key("a"),
             dim(" add \u{2502} "),
+            key("e"),
+            dim(" edit \u{2502} "),
+            key("n"),
+            dim(" rename \u{2502} "),
             key("d"),
             dim(" remove \u{2502} "),
             key("Tab"),
@@ -1420,7 +1368,7 @@ fn format_auto_refresh_remaining(secs: u64) -> String {
 fn status_bar_height(app: &App, width: u16) -> usize {
     if app.status_msg.is_some()
         || app.rename.is_some()
-        || app.provider_add.is_some()
+        || app.provider_form.is_some()
         || app.confirm.is_some()
         || app.search_active
         || !app.marked.is_empty()
@@ -1470,17 +1418,14 @@ mod tests {
     fn providers_tab_lists_custom_providers_without_the_key() {
         let mut app = App::new();
         app.active_tab = crate::tui::app::Tab::Providers;
-        app.providers.push(crate::provider::ProviderProfile {
-            alias: "openrouter".into(),
-            provider_id: "openrouter".into(),
-            name: "OpenRouter".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            env_key: "CODEX_SWITCH_OPENROUTER_KEY".into(),
-            model: "openai/gpt-5.3-codex".into(),
-            wire_api: "responses".into(),
-            codex_config: Vec::new(),
-            api_key: "sk-secret-1234".into(),
-        });
+        app.providers.push(crate::provider::ProviderProfile::build(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            vec![crate::provider::ProviderModel::from_id(
+                "openai/gpt-5.3-codex",
+            )],
+            "sk-secret-1234",
+        ));
 
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();

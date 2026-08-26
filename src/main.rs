@@ -278,8 +278,12 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         Commands::Launch {
             alias,
             consume_card,
+            model,
             args,
-        } => commands::launch_cmd(alias.as_deref(), args, json, consume_card).await?,
+        } => {
+            commands::launch_cmd(alias.as_deref(), args, json, consume_card, model.as_deref())
+                .await?
+        }
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => commands::open_cmd()?,
         Commands::Provider(sub) => commands::provider_cmd(sub, json)?,

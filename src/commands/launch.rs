@@ -35,6 +35,7 @@ pub(crate) async fn launch_cmd(
     args: Vec<String>,
     json: bool,
     consume_card: bool,
+    model: Option<&str>,
 ) -> Result<()> {
     use std::io::IsTerminal;
 
@@ -46,7 +47,12 @@ pub(crate) async fn launch_cmd(
         && provider::exists(alias)
     {
         let profile = provider::load(alias)?;
-        return launch_provider(profile, args, json);
+        return launch_provider(profile, model, args, json);
+    }
+
+    let mut forwarded = args;
+    if let Some(model) = model {
+        forwarded.splice(0..0, ["--model".to_string(), model.to_string()]);
     }
 
     let mut revival_hint = None;
@@ -147,7 +153,7 @@ pub(crate) async fn launch_cmd(
     }
 
     let child_result = std::process::Command::new("codex")
-        .args(&args)
+        .args(&forwarded)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -255,17 +261,23 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// MCP servers and everything else) and the API key is injected into the child
 /// process environment under the profile's `env_key`. Nothing is written to
 /// `~/.codex`, so there is no backup/restore window to guard.
-fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<()> {
+fn launch_provider(
+    profile: ProviderProfile,
+    model: Option<&str>,
+    args: Vec<String>,
+    json: bool,
+) -> Result<()> {
     ensure_codex_available()?;
 
+    let selected = profile.resolve_model(model)?;
     let (env_name, env_value) = profile.launch_env();
-    let mut codex_args = profile.codex_config_args();
+    let mut codex_args = profile.codex_config_args(model)?;
     codex_args.extend(args);
 
     if !json {
         user_println(&format!(
-            "Launching codex with provider '{}' ({} / {})...",
-            profile.alias, profile.name, profile.model
+            "Launching Codex with provider '{}' ({})...",
+            profile.alias, selected.id
         ));
     }
 
@@ -276,9 +288,9 @@ fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> R
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .spawn()
-        .context("Failed to start codex")?;
+        .context("Failed to start Codex")?;
 
-    let status = child.wait().context("waiting for codex")?;
+    let status = child.wait().context("waiting for Codex")?;
     let exit_code = child_exit_code(&status);
 
     if json {
@@ -287,7 +299,7 @@ fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> R
             "alias": profile.alias,
             "action": "launched",
             "provider": profile.provider_id,
-            "model": profile.model,
+            "model": selected.id,
             "exit_code": exit_code,
         }));
     } else {

@@ -10,10 +10,11 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | `import <path> [alias]` | Validate and import one `auth.json`, or recursively scan a directory for JSON files. The alias applies to single-file imports only; directories auto-assign aliases. An account that is already saved (same file, or same `account_id` and email) is skipped instead of duplicated, so its single-use refresh token is not spent. |
 | `list [-f]` | Show profiles, usage, and availability; `-f` / `--force` bypasses the cache. |
 | `use [alias] [--consume-card]` | Switch explicitly, or omit the alias to auto-select with the unified scoring algorithm. When the pool is exhausted, `--consume-card` consumes the earliest-expiring reset card to revive an account (auto-select only; ignored when an alias is given). |
-| `launch [alias] [--consume-card] -- [args]` | Start Codex with the best (or specified) ChatGPT profile's auth, or with a custom API provider when `alias` names one. Everything after `--` is passed through to Codex. Auto-select (no alias) is ChatGPT-only. |
-| `provider add <alias> --base-url <URL> --model <id>` | Save a custom API provider. The API key is read from a hidden prompt, or from stdin with `--api-key-stdin` — never from argv. |
+| `launch [alias] [--consume-card] [--model <id>] -- [args]` | Start Codex with the best (or specified) ChatGPT profile's auth, or with a custom API provider when `alias` names one. For a provider, `--model` selects a saved model; otherwise it is forwarded to Codex. Everything after `--` is passed through to Codex. Auto-select (no alias) is ChatGPT-only. |
+| `provider add <alias> --base-url <URL> --model <id>` | Save a custom API provider. `--model` is repeatable; the first is the default. `--reasoning` / `--no-web-search` attach to the most recent `--model`. The API key is read from a hidden prompt, or from stdin with `--api-key-stdin` — never from argv. |
 | `provider list` | List saved providers (no keys). |
 | `provider show <alias>` | Show one provider; the key is redacted. |
+| `provider rename <old> <new>` | Rename a provider (directory + derived ids). |
 | `provider remove <alias> [-y]` | Delete a provider and its stored key; `-y` / `--yes` skips the prompt. Non-interactive and `--json` runs require `--yes`. |
 | `reset-card <alias> [-y]` | Consume the earliest-expiring reset card for a profile after confirmation; `-y` / `--yes` skips the prompt. |
 | `warmup [alias]` | Send a minimal request to activate the quota-window countdown for one or all profiles. |
@@ -32,7 +33,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 | Option | Environment variable | Behavior |
 |---|---|---|
-| `--json` | — | Compact structured output (supported by `list`, `use`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `daemon status`, `provider add`, `provider list`, `provider show`, `provider remove`). |
+| `--json` | — | Compact structured output (supported by `list`, `use`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `daemon status`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`). |
 | `--json-pretty` | — | Indented structured output. |
 | `--proxy <URL>` | `CS_PROXY` | Override proxy configuration for this process; supports `http(s)://`, `socks4://`, `socks5://`, and `socks5h://` (remote DNS). |
 | `--color <auto\|always\|never>` | `CS_COLOR` | Control terminal color. `NO_COLOR` disables color regardless of this option. |
@@ -60,7 +61,7 @@ codex-switch self-update --check
 
 ## Provider
 
-`provider add` required flags are `--base-url` and `--model`. Optional `--name` defaults to the alias; `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). `--reasoning EFFORT` saves `model_reasoning_effort=EFFORT` (for thinking models) and `--no-web-search` saves `web_search=disabled`; `--set KEY=VALUE` (repeatable) saves any other `codex -c` override. All are applied on every launch and passed to Codex verbatim (only the `KEY=VALUE` shape is checked); an explicit `--set` wins over a convenience flag for the same key. `--api-key-stdin` is required when there is no interactive terminal.
+`provider add` required flags are `--base-url` and at least one `--model`. `--model` is repeatable; the first is `default_model`. `--reasoning EFFORT` and `--no-web-search` attach to the most recent `--model`. Optional `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). `--set KEY=VALUE` (repeatable) saves a provider-level `codex -c` override. All per-model and `--set` values are passed to Codex verbatim (only the `KEY=VALUE` shape is checked for `--set`). `--api-key-stdin` is required when there is no interactive terminal. `provider rename <old> <new>` moves the directory and re-derives `provider_id` / `env_key`. `launch <alias> --model <id>` selects a saved model on a provider.
 
 The alias must not collide with a ChatGPT profile, another provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`. Removal is immediate and is not archived under `deleted-profiles/`.
 
@@ -102,7 +103,9 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 | Key | Action |
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
-| `a` | Add a provider (alias → base URL → model → API key; the key is masked) |
+| `a` | Add a provider (form dialog) |
+| `e` / Enter | Edit the selected provider |
+| `n` | Rename the selected provider |
 | `d` | Remove the selected provider (confirmation required) |
 | `Tab` | Switch to Accounts |
 | `h` | Show help |
