@@ -886,6 +886,26 @@ fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    // Add-provider wizard prompt takes top priority.
+    if let Some(state) = &app.provider_add {
+        let shown = if state.step.is_secret() {
+            "*".repeat(state.input.chars().count())
+        } else {
+            state.input.clone()
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                format!(" Add provider [{}]: ", state.step.prompt()),
+                base().fg(C_CYAN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(shown, base().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled("#", base().fg(C_GRAY)),
+            Span::styled("  (Enter next / Esc cancel)", base().fg(DIM)),
+        ]);
+        f.render_widget(Paragraph::new(line).style(base()), area);
+        return;
+    }
+
     // Rename input takes top priority
     if let Some(rs) = &app.rename {
         let line = Line::from(vec![
@@ -913,6 +933,9 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 format!(
                     "Confirm reset card for '{alias}' expiring {expires_at}: y to use, any other key cancels"
                 )
+            }
+            super::app::ConfirmAction::RemoveProvider(alias) => {
+                format!("Remove provider '{alias}'? (y/n)")
             }
         };
         let line = Line::from(Span::styled(
@@ -955,6 +978,28 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" for batch \u{2502} ", base().fg(DIM)),
             Span::styled("esc", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
             Span::styled(" to clear", base().fg(DIM)),
+        ]);
+        f.render_widget(Paragraph::new(line).style(base()), area);
+    } else if app.active_tab == Tab::Providers {
+        let key =
+            |k: &'static str| Span::styled(k, base().fg(C_YELLOW).add_modifier(Modifier::BOLD));
+        let dim = |t: &'static str| Span::styled(t, base().fg(DIM));
+        let line = Line::from(vec![
+            dim(" "),
+            key("j"),
+            dim("/"),
+            key("k"),
+            dim(" nav \u{2502} "),
+            key("a"),
+            dim(" add \u{2502} "),
+            key("d"),
+            dim(" remove \u{2502} "),
+            key("Tab"),
+            dim(" accounts \u{2502} "),
+            key("h"),
+            dim(" help \u{2502} "),
+            key("q"),
+            dim(" quit"),
         ]);
         f.render_widget(Paragraph::new(line).style(base()), area);
     } else {
@@ -1300,10 +1345,14 @@ fn format_auto_refresh_remaining(secs: u64) -> String {
 fn status_bar_height(app: &App, width: u16) -> usize {
     if app.status_msg.is_some()
         || app.rename.is_some()
+        || app.provider_add.is_some()
         || app.confirm.is_some()
         || app.search_active
         || !app.marked.is_empty()
     {
+        return 1;
+    }
+    if app.active_tab == Tab::Providers {
         return 1;
     }
     build_help_lines(width as usize).len()

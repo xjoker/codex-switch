@@ -157,6 +157,43 @@ pub enum ConfirmAction {
         credit_id: String,
         expires_at: String,
     },
+    RemoveProvider(String),
+}
+
+/// Steps of the Providers-tab "add provider" wizard, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderAddStep {
+    Alias,
+    BaseUrl,
+    Model,
+    ApiKey,
+}
+
+impl ProviderAddStep {
+    /// Short prompt shown in the status bar for the current step.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            ProviderAddStep::Alias => "alias",
+            ProviderAddStep::BaseUrl => "base URL",
+            ProviderAddStep::Model => "model",
+            ProviderAddStep::ApiKey => "API key",
+        }
+    }
+
+    /// The API-key step is masked in the UI so the secret is never shown.
+    pub fn is_secret(self) -> bool {
+        matches!(self, ProviderAddStep::ApiKey)
+    }
+}
+
+/// In-progress state of the multi-step add-provider wizard.
+pub struct ProviderAddState {
+    pub step: ProviderAddStep,
+    pub input: String,
+    pub cursor: usize,
+    pub alias: String,
+    pub base_url: String,
+    pub model: String,
 }
 
 pub struct RenameState {
@@ -194,6 +231,8 @@ pub struct App {
     pub providers: Vec<crate::provider::ProviderProfile>,
     /// Selected row within the Providers tab.
     pub provider_selected: usize,
+    /// Active add-provider wizard, if the user is entering one.
+    pub provider_add: Option<ProviderAddState>,
     /// Active top-level tab.
     pub active_tab: Tab,
     pub selected: usize,
@@ -262,6 +301,7 @@ impl App {
             accounts: vec![],
             providers: vec![],
             provider_selected: 0,
+            provider_add: None,
             active_tab: Tab::default(),
             selected: 0,
             search: None,
@@ -623,6 +663,168 @@ impl App {
     pub fn provider_select_prev(&mut self) {
         if self.provider_selected > 0 {
             self.provider_selected -= 1;
+        }
+    }
+
+    /// Open the multi-step add-provider wizard (Providers tab, `a`).
+    pub fn open_provider_add(&mut self) {
+        self.provider_add = Some(ProviderAddState {
+            step: ProviderAddStep::Alias,
+            input: String::new(),
+            cursor: 0,
+            alias: String::new(),
+            base_url: String::new(),
+            model: String::new(),
+        });
+    }
+
+    /// Ask to remove the selected provider (Providers tab, `d`).
+    pub fn request_remove_provider(&mut self) {
+        match self.providers.get(self.provider_selected) {
+            Some(p) => self.confirm = Some(ConfirmAction::RemoveProvider(p.alias.clone())),
+            None => self.set_status_error("No provider selected".to_string(), 3),
+        }
+    }
+
+    /// Editing keys for the add-provider wizard (raw, case-sensitive input).
+    pub fn handle_provider_add_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                self.provider_add = None;
+                return;
+            }
+            KeyCode::Enter => {
+                self.provider_add_commit_step();
+                return;
+            }
+            _ => {}
+        }
+        let Some(state) = self.provider_add.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Backspace if state.cursor > 0 => {
+                state.cursor -= 1;
+                let byte_pos = char_to_byte(&state.input, state.cursor);
+                state.input.remove(byte_pos);
+            }
+            KeyCode::Delete => {
+                let char_count = state.input.chars().count();
+                if state.cursor < char_count {
+                    let byte_pos = char_to_byte(&state.input, state.cursor);
+                    state.input.remove(byte_pos);
+                }
+            }
+            KeyCode::Left if state.cursor > 0 => state.cursor -= 1,
+            KeyCode::Right => {
+                let char_count = state.input.chars().count();
+                if state.cursor < char_count {
+                    state.cursor += 1;
+                }
+            }
+            KeyCode::Home => state.cursor = 0,
+            KeyCode::End => state.cursor = state.input.chars().count(),
+            KeyCode::Char(c) => {
+                let byte_pos = char_to_byte(&state.input, state.cursor);
+                state.input.insert(byte_pos, c);
+                state.cursor += 1;
+            }
+            _ => {}
+        }
+    }
+
+    /// Validate and advance the current wizard step; finalize on the last one.
+    fn provider_add_commit_step(&mut self) {
+        let (step, value) = {
+            let Some(state) = self.provider_add.as_ref() else {
+                return;
+            };
+            (state.step, state.input.trim().to_string())
+        };
+        match step {
+            ProviderAddStep::Alias => {
+                if value.is_empty() {
+                    self.set_status_error("Alias cannot be empty".to_string(), 3);
+                    return;
+                }
+                if let Err(err) = validate_alias(&value) {
+                    self.set_status_error(format!("Invalid alias: {err}"), 3);
+                    return;
+                }
+                if crate::provider::exists(&value) || self.accounts.iter().any(|a| a.alias == value)
+                {
+                    self.set_status_error(format!("'{value}' already exists"), 3);
+                    return;
+                }
+                if let Some(state) = self.provider_add.as_mut() {
+                    state.alias = value;
+                    state.step = ProviderAddStep::BaseUrl;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::BaseUrl => {
+                if !(value.starts_with("http://") || value.starts_with("https://")) {
+                    self.set_status_error(
+                        "base URL must start with http:// or https://".to_string(),
+                        3,
+                    );
+                    return;
+                }
+                if let Some(state) = self.provider_add.as_mut() {
+                    state.base_url = value;
+                    state.step = ProviderAddStep::Model;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::Model => {
+                if value.is_empty() {
+                    self.set_status_error("Model cannot be empty".to_string(), 3);
+                    return;
+                }
+                if let Some(state) = self.provider_add.as_mut() {
+                    state.model = value;
+                    state.step = ProviderAddStep::ApiKey;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::ApiKey => {
+                if value.is_empty() {
+                    self.set_status_error("API key cannot be empty".to_string(), 3);
+                    return;
+                }
+                let Some(state) = self.provider_add.take() else {
+                    return;
+                };
+                let profile = crate::provider::ProviderProfile {
+                    provider_id: crate::provider::sanitize_provider_id(&state.alias),
+                    name: state.alias.clone(),
+                    base_url: state.base_url,
+                    env_key: crate::provider::derive_env_key(&state.alias),
+                    model: state.model,
+                    wire_api: "responses".to_string(),
+                    api_key: value,
+                    alias: state.alias.clone(),
+                };
+                match profile
+                    .validate()
+                    .and_then(|()| crate::provider::save(&profile))
+                {
+                    Ok(()) => {
+                        self.set_status(format!("Added provider '{}'", profile.alias), 4);
+                        self.active_tab = Tab::Providers;
+                        self.load_profiles();
+                        if let Some(idx) =
+                            self.providers.iter().position(|p| p.alias == profile.alias)
+                        {
+                            self.provider_selected = idx;
+                        }
+                    }
+                    Err(e) => self.set_status_error(format!("Add provider failed: {e}"), 6),
+                }
+            }
         }
     }
 
@@ -1471,6 +1673,13 @@ impl App {
                 }
                 Err(e) => self.set_status_error(format!("Delete failed: {e}"), 5),
             },
+            ConfirmAction::RemoveProvider(alias) => match crate::provider::remove(&alias) {
+                Ok(()) => {
+                    self.set_status(format!("Removed provider {alias}"), 3);
+                    self.load_profiles();
+                }
+                Err(e) => self.set_status_error(format!("Remove provider failed: {e}"), 5),
+            },
             ConfirmAction::BatchDelete(aliases) => {
                 let mut ok = 0usize;
                 let mut errors: Vec<String> = Vec::new();
@@ -1937,6 +2146,12 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 app.handle_search_key(key.code);
                 continue;
             }
+            // The add-provider wizard needs raw, case-sensitive keystrokes
+            // (aliases, URLs, and keys are all case-sensitive).
+            if app.provider_add.is_some() {
+                app.handle_provider_add_key(key.code);
+                continue;
+            }
 
             // Capital 'W' is a distinct global binding (toggle auto-warmup),
             // separate from menu 'w' (per-account warmup). Detect it before
@@ -2031,6 +2246,8 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                     Tab::Providers => match code {
                         KeyCode::Down | KeyCode::Char('j') => app.provider_select_next(),
                         KeyCode::Up | KeyCode::Char('k') => app.provider_select_prev(),
+                        KeyCode::Char('a') => app.open_provider_add(),
+                        KeyCode::Char('d') => app.request_remove_provider(),
                         _ => {}
                     },
                 },
@@ -2406,11 +2623,139 @@ mod tests {
         finish_login_or_cancel, finish_refresh_then_commit, refresh_fetches_loaded_usage,
         refresh_forces_negative_caches, reset_card_failure_from_outcome, retained_usage_by_alias,
     };
+    use super::{ConfirmAction, ProviderAddStep, Tab};
     use crate::{
         jwt::{AccountInfo, OrgInfo},
         usage::{Refresh, ResetCredit, UsageInfo},
         warmup::ModelEntry,
     };
+    use crossterm::event::KeyCode;
+
+    /// Isolate `CODEX_SWITCH_HOME`/`CODEX_HOME` for tests that touch provider
+    /// storage. Serialized via the shared env lock so it can't race sibling
+    /// tests that also relocate these variables.
+    struct EnvHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        prev_cs: Option<std::ffi::OsString>,
+        prev_ch: Option<std::ffi::OsString>,
+    }
+
+    impl EnvHome {
+        fn new() -> Self {
+            let lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let prev_cs = std::env::var_os("CODEX_SWITCH_HOME");
+            let prev_ch = std::env::var_os("CODEX_HOME");
+            unsafe {
+                std::env::set_var("CODEX_SWITCH_HOME", dir.path());
+                std::env::set_var("CODEX_HOME", dir.path().join("codex"));
+            }
+            Self {
+                _lock: lock,
+                _dir: dir,
+                prev_cs,
+                prev_ch,
+            }
+        }
+    }
+
+    impl Drop for EnvHome {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev_cs {
+                    Some(v) => std::env::set_var("CODEX_SWITCH_HOME", v),
+                    None => std::env::remove_var("CODEX_SWITCH_HOME"),
+                }
+                match &self.prev_ch {
+                    Some(v) => std::env::set_var("CODEX_HOME", v),
+                    None => std::env::remove_var("CODEX_HOME"),
+                }
+            }
+        }
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_provider_add_key(KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn provider_add_wizard_collects_fields_and_saves() {
+        let _home = EnvHome::new();
+        let mut app = App::new();
+        app.open_provider_add();
+
+        type_str(&mut app, "myrouter");
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "https://openrouter.ai/api/v1");
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "openai/gpt-5.3-codex");
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "sk-secret-xyz");
+        app.handle_provider_add_key(KeyCode::Enter);
+
+        assert!(
+            app.provider_add.is_none(),
+            "wizard should close after the final step"
+        );
+        let p = crate::provider::load("myrouter").expect("provider must be saved");
+        assert_eq!(p.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(p.model, "openai/gpt-5.3-codex");
+        assert_eq!(p.env_key, "CODEX_SWITCH_MYROUTER_KEY");
+        assert_eq!(p.api_key, "sk-secret-xyz");
+        assert_eq!(p.wire_api, "responses");
+        assert_eq!(app.active_tab, Tab::Providers);
+        assert!(app.providers.iter().any(|x| x.alias == "myrouter"));
+    }
+
+    #[test]
+    fn provider_add_wizard_stays_on_step_for_a_bad_base_url() {
+        let _home = EnvHome::new();
+        let mut app = App::new();
+        app.open_provider_add();
+        type_str(&mut app, "r");
+        app.handle_provider_add_key(KeyCode::Enter); // alias accepted -> base URL step
+        type_str(&mut app, "ftp://nope");
+        app.handle_provider_add_key(KeyCode::Enter); // rejected
+
+        let state = app.provider_add.as_ref().expect("wizard stays open");
+        assert_eq!(state.step, ProviderAddStep::BaseUrl);
+    }
+
+    #[test]
+    fn request_and_confirm_remove_provider_deletes_it() {
+        let _home = EnvHome::new();
+        let profile = crate::provider::ProviderProfile {
+            alias: "gone".into(),
+            provider_id: "gone".into(),
+            name: "Gone".into(),
+            base_url: "https://example.com/v1".into(),
+            env_key: "CODEX_SWITCH_GONE_KEY".into(),
+            model: "m".into(),
+            wire_api: "responses".into(),
+            api_key: "k".into(),
+        };
+        crate::provider::save(&profile).unwrap();
+
+        let mut app = App::new();
+        app.load_profiles();
+        app.active_tab = Tab::Providers;
+        app.provider_selected = 0;
+        assert!(app.providers.iter().any(|x| x.alias == "gone"));
+
+        app.request_remove_provider();
+        assert!(
+            matches!(&app.confirm, Some(ConfirmAction::RemoveProvider(a)) if a == "gone"),
+            "remove must ask for confirmation first"
+        );
+        app.confirm_action();
+        assert!(!crate::provider::exists("gone"));
+        assert!(app.providers.iter().all(|x| x.alias != "gone"));
+    }
 
     #[test]
     fn cancelled_batch_counts_the_current_account_as_attempted() {
