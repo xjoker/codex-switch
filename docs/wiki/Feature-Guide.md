@@ -96,7 +96,7 @@ codex-switch launch openrouter
 
 `launch <provider>` does not swap `$CODEX_HOME/auth.json`. It starts Codex with `-c` overrides that define and select the provider, and injects the key into the child environment only. MCP servers and other settings in `$CODEX_HOME/config.toml` stay in effect. Auto-select (`launch` with no alias) and `use` remain ChatGPT-only.
 
-Most third-party models need Codex's built-in `web_search` server tool disabled (`web_search = "disabled"` in `$CODEX_HOME/config.toml`, or `-c web_search=disabled` per launch), otherwise the request fails with `Server tool request failed`. The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, the web_search caveat, TUI add/remove, and the security contract are in [Custom API providers](Providers).
+Some models need extra Codex request settings: models that reject the built-in `web_search` server tool need `-c web_search=disabled`, and thinking models need `-c model_reasoning_effort=medium`. The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, model-specific settings, TUI add/remove, and the security contract are in [Custom API providers](Providers).
 
 ## Recover exhausted accounts
 

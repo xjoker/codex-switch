@@ -57,7 +57,7 @@ codex-switch launch openrouter -- --full-auto
 
 `launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider, and injects the API key into the child process environment under `env_key`. Extra arguments after `--` are appended as Codex CLI flags.
 
-Most third-party models need Codex's built-in `web_search` server tool disabled first — see [Disable Codex's built-in web_search](#disable-codexs-built-in-web_search-for-third-party-models).
+Some models need extra Codex request settings (disabling `web_search`, or setting a reasoning effort for thinking models) — see [Model-specific request settings](#model-specific-request-settings).
 
 Because `-c` layers on top of `$CODEX_HOME/config.toml`, MCP servers, skills, and other Codex settings in that file stay in effect for the session.
 
@@ -78,15 +78,13 @@ codex-switch provider add deepseek \
 
 Pick the slug from the gateway's catalog. If Codex rejects the model, the usual cause is a Chat Completions-only endpoint rather than a missing key.
 
-## Disable Codex's built-in web_search for third-party models
+## Model-specific request settings
 
-Codex enables its built-in `web_search` server tool by default. OpenAI's own endpoint runs that tool server-side, but most third-party models (through OpenRouter or any gateway) do not, so the request is rejected:
+Codex always sends the same Responses request shape (including its built-in `web_search` server tool). Whether a given model accepts it depends on the model, not on luck — the behavior is consistent per model, not intermittent.
 
-```
-ERROR: Server tool request failed (HTTP 400)
-```
+### web_search server tool
 
-Turn it off at the top level of `$CODEX_HOME/config.toml`:
+Codex enables its built-in `web_search` server tool by default. Some models accept or ignore it (verified: `deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `minimax/minimax-m3:free` all return HTTP 200), while others reject it (verified: `openai/gpt-oss-20b` returns HTTP 400 `Server tool request failed`). If a model rejects it, turn it off at the top level of `$CODEX_HOME/config.toml`:
 
 ```toml
 web_search = "disabled"
@@ -98,7 +96,15 @@ or per launch, since `launch` passes everything after `--` to Codex:
 codex-switch launch openrouter -- -c web_search=disabled
 ```
 
-Individual models may impose their own request requirements. For example, some reasoning models reject a request that disables reasoning (`Reasoning is mandatory for this endpoint`). Choose a model that accepts standard Responses requests; a plain chat model such as `openai/gpt-4o-mini` works without extra flags once `web_search` is disabled.
+### Reasoning ("thinking") models
+
+Codex defaults an unknown model to `reasoning effort: none`, which reads as reasoning disabled. Thinking models reject that with HTTP 400 `Reasoning is mandatory for this endpoint`. Give Codex a reasoning effort (verified with `deepseek/deepseek-r1-0528` and `moonshotai/kimi-k2-thinking`):
+
+```bash
+codex-switch launch openrouter -- -c model_reasoning_effort=medium
+```
+
+Plain chat models (`deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `openai/gpt-4o-mini`) need no reasoning flag. Combine both overrides when a model needs them.
 
 ## TUI
 
