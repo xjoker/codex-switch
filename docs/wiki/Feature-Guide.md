@@ -19,7 +19,7 @@ Existing `auth.json` files can be imported individually or from a directory. Imp
 codex-switch import ~/auth-backups
 ```
 
-Interactive login deduplicates local profiles by `account_id` first and falls back to email when safe. Import is deliberately create-only and never updates an existing profile: Usage API validation proves that the bearer can access a workspace, but a Team workspace ID can be shared by several users and cannot authorize overwriting another saved credential.
+Interactive login deduplicates local profiles by `account_id` first and falls back to email when safe. Import is deliberately create-only and never updates an existing profile: Usage API validation proves that the bearer can access a workspace, but a Team workspace ID can be shared by several users and cannot authorize overwriting another saved credential. For the same reason, import will not write a *second* profile for an account you already have: when the incoming file is byte-identical to a saved profile, or carries the same `account_id` **and** email, the import is skipped before validation so its single-use refresh token is never spent. Use `login <alias>` to refresh an existing profile.
 
 Profile deletion is recoverable. An inactive profile is moved under `deleted-profiles/` after confirmation; the active profile cannot be deleted. See [recovery instructions](Troubleshooting#recover-a-deleted-profile).
 
