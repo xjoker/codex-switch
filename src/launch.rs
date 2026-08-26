@@ -1,5 +1,5 @@
 use crate::output::{print_json, user_println};
-use crate::provider::{self, ProviderProfile};
+use crate::provider::{self, ProviderProfile, ReasoningLaunch};
 use crate::signals::ShutdownListener;
 use crate::{auth, config, profile};
 use anyhow::{Context, Result};
@@ -32,8 +32,12 @@ async fn wait_for_codex_to_read_auth(
 
 /// Launch Codex for one alias from the TUI. Returns Codex's exit code instead of
 /// terminating the codex-switch process on failure.
-pub(crate) async fn launch_for_tui(alias: &str) -> Result<i32> {
-    launch_interactive(Some(alias), vec![], false, false).await
+pub(crate) async fn launch_for_tui(
+    alias: &str,
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
+) -> Result<i32> {
+    launch_interactive(Some(alias), vec![], false, false, model, reasoning).await
 }
 
 pub(crate) async fn launch_cmd(
@@ -41,8 +45,19 @@ pub(crate) async fn launch_cmd(
     args: Vec<String>,
     json: bool,
     consume_card: bool,
+    model: Option<&str>,
 ) -> Result<()> {
-    finish_launch_cli(launch_interactive(alias, args, json, consume_card).await?)
+    finish_launch_cli(
+        launch_interactive(
+            alias,
+            args,
+            json,
+            consume_card,
+            model,
+            ReasoningLaunch::Saved,
+        )
+        .await?,
+    )
 }
 
 fn finish_launch_cli(exit_code: i32) -> Result<()> {
@@ -57,6 +72,8 @@ async fn launch_interactive(
     args: Vec<String>,
     json: bool,
     consume_card: bool,
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
 ) -> Result<i32> {
     use std::io::IsTerminal;
 
@@ -68,7 +85,12 @@ async fn launch_interactive(
         && provider::exists(alias)
     {
         let profile = provider::load(alias)?;
-        return launch_provider(profile, args, json);
+        return launch_provider(profile, model, reasoning, args, json);
+    }
+
+    let mut forwarded = args;
+    if let Some(model) = model {
+        forwarded.splice(0..0, ["--model".to_string(), model.to_string()]);
     }
 
     let mut revival_hint = None;
@@ -169,7 +191,7 @@ async fn launch_interactive(
     }
 
     let child_result = std::process::Command::new("codex")
-        .args(&args)
+        .args(&forwarded)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -273,17 +295,32 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// MCP servers and everything else) and the API key is injected into the child
 /// process environment under the profile's `env_key`. Nothing is written to
 /// `~/.codex`, so there is no backup/restore window to guard.
-fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<i32> {
+fn launch_provider(
+    profile: ProviderProfile,
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
+    args: Vec<String>,
+    json: bool,
+) -> Result<i32> {
     ensure_codex_available()?;
 
+    let selected = profile.resolve_model(model)?;
     let (env_name, env_value) = profile.launch_env();
-    let mut codex_args = profile.codex_config_args();
+    let mut codex_args = match &reasoning {
+        ReasoningLaunch::Saved => profile.codex_config_args(model)?,
+        other => profile.codex_config_args_with(model, other.clone())?,
+    };
     codex_args.extend(args);
 
     if !json {
+        let reasoning_note = match &reasoning {
+            ReasoningLaunch::Saved => String::new(),
+            ReasoningLaunch::Skip => " reasoning=(skip)".to_string(),
+            ReasoningLaunch::Effort(effort) => format!(" reasoning={effort}"),
+        };
         user_println(&format!(
-            "Launching codex with provider '{}' ({} / {})...",
-            profile.alias, profile.name, profile.model
+            "Launching Codex with provider '{}' ({}{})...",
+            profile.alias, selected.id, reasoning_note
         ));
     }
 
@@ -294,9 +331,9 @@ fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> R
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .spawn()
-        .context("Failed to start codex")?;
+        .context("Failed to start Codex")?;
 
-    let status = child.wait().context("waiting for codex")?;
+    let status = child.wait().context("waiting for Codex")?;
     let exit_code = child_exit_code(&status);
 
     if json {
@@ -305,7 +342,7 @@ fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> R
             "alias": profile.alias,
             "action": "launched",
             "provider": profile.provider_id,
-            "model": profile.model,
+            "model": selected.id,
             "exit_code": exit_code,
         }));
     } else {

@@ -89,7 +89,7 @@ The legacy `[use] mode` and `[use] min_remaining` keys are ignored and produce a
 | `CODEX_SWITCH_HOME` | Relocates codex-switch state (default `~/.codex-switch`); an empty value is ignored. |
 | `CS_PROXY` | Proxy URL; same as `--proxy`. |
 | `CS_COLOR` | Color mode; same as `--color`. |
-| `NO_COLOR` | Disables color output regardless of other settings. |
+| `NO_COLOR` | Disables color on CLI output regardless of other settings. The TUI still paints its designed palette. |
 | `RUST_LOG` | Overrides the log filter; `--debug` has higher priority. |
 | `CODEX_CA_CERTIFICATE`, `SSL_CERT_FILE` | Custom CA certificate for HTTPS, in Codex-compatible fallback order. |
 

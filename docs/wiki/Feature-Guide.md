@@ -45,7 +45,7 @@ The usage model includes the main 5-hour and 7-day windows, additional model-spe
 
 Normal reads refresh only stale entries. Use `list -f` or the TUI refresh action when a fresh network read is required.
 
-The TUI has two tabs: **Accounts** (ChatGPT OAuth, quota, scoring) and **Providers** (custom API endpoints). `Tab` / `Shift+Tab` switches between them. Account keys (`Enter`, `W`, mark, filter) apply only on Accounts.
+The TUI has two tabs: **Accounts** (ChatGPT OAuth, quota, scoring) and **Providers** (custom API endpoints). `Tab` / `Shift+Tab` switches between them. `o` launches Codex on both tabs. Account-only keys (`W`, mark, filter) stay on Accounts.
 
 The TUI account detail page is a single scrollable column with identity and organization labels, token expiry times in the local timezone, every quota pool with a pace marker, available reset cards, and the models the account may use. Model names and reasoning-effort capabilities are discovered from the authenticated service at runtime, not hardcoded. The full shortcut list is in the [command reference](Command-Reference#tui-shortcuts) and under `h` inside the TUI.
 
@@ -94,9 +94,9 @@ codex-switch provider add openrouter \
 codex-switch launch openrouter
 ```
 
-`launch <provider>` does not swap `$CODEX_HOME/auth.json`. It starts Codex with `-c` overrides that define and select the provider, and injects the key into the child environment only. MCP servers and other settings in `$CODEX_HOME/config.toml` stay in effect. Auto-select (`launch` with no alias) and `use` remain ChatGPT-only.
+`launch <provider>` does not swap `$CODEX_HOME/auth.json`. It starts Codex with `-c` overrides that define and select the provider (and `launch --model` to pick a saved model), and injects the key into the child environment only. MCP servers and other settings in `$CODEX_HOME/config.toml` stay in effect. Auto-select (`launch` with no alias) and `use` remain ChatGPT-only.
 
-Some models need extra Codex request settings: models that reject the built-in `web_search` server tool need `-c web_search=disabled`, and thinking models need `-c model_reasoning_effort=medium`. The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, model-specific settings, TUI add/remove, and the security contract are in [Custom API providers](Providers).
+A provider holds several models; reasoning effort and `web_search` are per model. In the TUI Providers tab, `Enter` / `o` opens a picker for a saved model and a one-shot reasoning override; `e` edits the provider. The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, model-specific settings, TUI add/edit/rename, and the security contract are in [Custom API providers](Providers).
 
 ## Recover exhausted accounts
 
