@@ -165,6 +165,64 @@ impl ProviderProfile {
     pub fn redacted_key(&self) -> String {
         redact_key(&self.api_key)
     }
+
+    /// The `codex -c …` override arguments that define and select this provider
+    /// for a single launch. These layer on top of the user's base
+    /// `~/.codex/config.toml` (so MCP servers and other settings are preserved)
+    /// and nothing is written to disk.
+    ///
+    /// The API key is intentionally **not** here — it is handed to Codex through
+    /// the environment (see [`launch_env`](Self::launch_env)) so it never appears
+    /// in argv or the process table.
+    pub fn codex_config_args(&self) -> Vec<String> {
+        let id = &self.provider_id;
+        [
+            format!("model_providers.{id}.name={}", toml_string(&self.name)),
+            format!(
+                "model_providers.{id}.base_url={}",
+                toml_string(&self.base_url)
+            ),
+            format!(
+                "model_providers.{id}.env_key={}",
+                toml_string(&self.env_key)
+            ),
+            format!(
+                "model_providers.{id}.wire_api={}",
+                toml_string(&self.wire_api)
+            ),
+            format!("model_provider={}", toml_string(id)),
+            format!("model={}", toml_string(&self.model)),
+        ]
+        .into_iter()
+        .flat_map(|kv| ["-c".to_string(), kv])
+        .collect()
+    }
+
+    /// The single environment override that hands Codex the API key under the
+    /// profile's `env_key`. Injected into the child process only.
+    pub fn launch_env(&self) -> (String, String) {
+        (self.env_key.clone(), self.api_key.clone())
+    }
+}
+
+/// Render a string as a TOML basic (quoted) string for a `codex -c key=value`
+/// override, escaping the characters TOML requires. Codex parses the value part
+/// as TOML, so a plain unquoted string would be misread (or rejected).
+fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Mask a secret for display: keep the last 4 characters when long enough,
@@ -363,6 +421,51 @@ mod tests {
         assert!(!exists("openrouter"));
         assert!(list_providers().unwrap().is_empty());
         assert!(remove("openrouter").is_err(), "removing twice must error");
+    }
+
+    #[test]
+    fn codex_config_args_define_and_select_the_provider_without_the_key() {
+        let p = sample("openrouter");
+        let args = p.codex_config_args();
+        let joined = args.join(" ");
+
+        // Every override is introduced by its own `-c`.
+        assert_eq!(args.iter().filter(|a| a.as_str() == "-c").count(), 6);
+        assert!(joined.contains(r#"model_providers.openrouter.name="OpenRouter""#));
+        assert!(
+            joined
+                .contains(r#"model_providers.openrouter.base_url="https://openrouter.ai/api/v1""#)
+        );
+        assert!(
+            joined.contains(r#"model_providers.openrouter.env_key="CODEX_SWITCH_OPENROUTER_KEY""#)
+        );
+        assert!(joined.contains(r#"model_providers.openrouter.wire_api="responses""#));
+        assert!(joined.contains(r#"model_provider="openrouter""#));
+        assert!(joined.contains(r#"model="openai/gpt-5.3-codex""#));
+
+        // The secret must never travel on the command line.
+        assert!(
+            !args.iter().any(|a| a.contains("sk-secret-1234")),
+            "the API key must never appear in argv"
+        );
+    }
+
+    #[test]
+    fn launch_env_carries_the_key_under_the_derived_var() {
+        let p = sample("openrouter");
+        assert_eq!(
+            p.launch_env(),
+            (
+                "CODEX_SWITCH_OPENROUTER_KEY".to_string(),
+                "sk-secret-1234".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn toml_string_quotes_and_escapes() {
+        assert_eq!(toml_string("OpenRouter"), r#""OpenRouter""#);
+        assert_eq!(toml_string(r#"a"b\c"#), r#""a\"b\\c""#);
     }
 
     #[cfg(unix)]
