@@ -136,7 +136,7 @@ On the Providers tab:
 | `h` | Help |
 | `q` | Quit |
 
-Add and edit use the same form. Add starts typing the alias immediately; Enter commits a field and continues to the next. Tab moves between alias, base URL, API key, and Models; `j`/`k` move inside the model list. The last row is `+ add model` — Enter (or `+` / `a`) adds a model and starts typing its id; `d` / `-` / Delete ask for confirmation (`y` removes, `n` / Esc keeps it). `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, `s` saves, Esc cancels. Edit starts on Base URL in navigation mode (Enter edits the focused cell). The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field.
+Add and edit use the same form. Add starts typing the alias immediately; Enter commits a field and continues to the next. Tab moves between alias, base URL, API key, and Models; `j`/`k` move inside the model list. The last row is `+ add model` — Enter (or `+` / `=` / `a`) adds a model and starts typing its id; `d` / `-` / Delete ask for confirmation (`y` removes, `n` / Esc keeps it). A provider must keep at least one model, so the last model cannot be removed. `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, `s` saves, Esc cancels. Edit starts on Base URL in navigation mode (Enter edits the focused cell). The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field.
 
 The stored key is never rendered in the table. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, then Enter (or `o` again) starts Codex. On the Providers list, Enter also opens that picker; `e` edits. `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
 
@@ -147,6 +147,26 @@ The stored key is never rendered in the table. `o` launches Codex on both tabs: 
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Provider definition and API key (directory `0700`, file `0600`) |
 
 Defaults to `~/.codex-switch/providers/`. Relocate the whole tree with `CODEX_SWITCH_HOME`; this still does not change where Codex reads `auth.json`.
+
+On disk, `name` always equals the alias (Codex requires `model_providers.<id>.name`). `default_model` must name one of the `[[models]]` entries. Example:
+
+```toml
+provider_id = "openrouter"
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "CODEX_SWITCH_OPENROUTER_KEY"
+default_model = "openai/gpt-5.3-codex"
+wire_api = "responses"
+
+[[models]]
+id = "openai/gpt-5.3-codex"
+
+[[models]]
+id = "deepseek/deepseek-r1-0528"
+reasoning = "medium"
+```
+
+The `api_key` field is stored in the same file but never printed by `list`, `show`, JSON, or the TUI.
 
 Security contract:
 

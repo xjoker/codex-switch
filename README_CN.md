@@ -44,13 +44,15 @@ codex-switch launch       # 用最佳账号启动 Codex
 ## 功能一览
 
 - 保存、导入、重命名、切换和可恢复地删除 Codex 账号。
-- 保存自定义 API 提供方（OpenRouter 等兼容 Responses 协议的接口），并通过 `launch` 启动 Codex，不写入 `~/.codex`：
+- 保存自定义 API 提供方（OpenRouter 等兼容 Responses 协议的接口）：一个端点可配置多个模型，思考等级与 `web_search` 按模型保存；TUI Providers 页用同一张表单新增/编辑（`a` / `e`），`Enter` / `o` 启动 Codex。通过 `launch` 启动，不写入 `~/.codex`：
 
   ```bash
   codex-switch provider add openrouter \
     --base-url https://openrouter.ai/api/v1 \
-    --model openai/gpt-5.3-codex
+    --model openai/gpt-5.3-codex \
+    --model deepseek/deepseek-r1-0528 --reasoning medium
   codex-switch launch openrouter
+  codex-switch launch openrouter --model deepseek/deepseek-r1-0528
   ```
 - CLI 与 TUI 展示主额度池和每个模型的独立额度池。
 - 自适应配速感知评分自动选号，并可直接用它启动 Codex。

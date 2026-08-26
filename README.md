@@ -44,13 +44,15 @@ codex-switch launch       # start Codex with the best account
 ## What it does
 
 - Saves, imports, renames, switches, and recoverably deletes Codex profiles.
-- Saves custom API providers (OpenRouter and other Responses-compatible endpoints) and launches Codex with them without writing to `~/.codex`:
+- Saves custom API providers (OpenRouter and other Responses-compatible endpoints) with multiple models per endpoint, and launches Codex with them without writing to `~/.codex`:
 
   ```bash
   codex-switch provider add openrouter \
     --base-url https://openrouter.ai/api/v1 \
-    --model openai/gpt-5.3-codex
+    --model openai/gpt-5.3-codex \
+    --model deepseek/deepseek-r1-0528 --reasoning medium
   codex-switch launch openrouter
+  codex-switch launch openrouter --model deepseek/deepseek-r1-0528
   ```
 - Displays the main and model-specific quota pools in CLI and TUI views.
 - Selects an eligible account with adaptive, pace-aware scoring, and launches Codex with it.
