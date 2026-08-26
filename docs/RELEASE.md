@@ -146,6 +146,9 @@ Before publishing the final dev candidate:
 **`error: src refspec dev matches more than one`**
 Use `refs/heads/dev:refs/heads/dev` for the branch or `refs/tags/dev:refs/tags/dev` for the tag.
 
+**The `dev` branch push started Wiki but not CI**
+Wiki sync only runs when `docs/wiki/**` or `.github/workflows/wiki.yml` changes. Branch quality is the `CI` workflow. Before moving the `dev` tag, confirm `gh run list --commit <sha> --workflow CI` lists Format and audit plus Test on linux, macos, and windows for that commit. An empty commit retriggers `CI` but not Wiki. If GitHub Actions is in an outage, the `push` event may create no workflow run; wait until Actions is operational, then push a new commit or use `workflow_dispatch`. Do not move the tag while that list is empty or failing.
+
 **The dev tag was pushed but CI did not run**
 Check whether the Release workflow was triggered and whether `on.push.tags` still includes `"dev"`.
 
