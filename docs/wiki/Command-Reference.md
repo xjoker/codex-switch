@@ -105,15 +105,15 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
 | `a` | Add a provider (form dialog) |
-| `e` / Enter | Edit the selected provider |
-| `o` | Launch Codex: pick a saved model and reasoning for this session |
+| `Enter` / `o` | Launch Codex: pick a saved model and reasoning for this session |
+| `e` | Edit the selected provider |
 | `n` | Rename the selected provider |
 | `d` | Remove the selected provider (confirmation required) |
 | `Tab` | Switch to Accounts |
 | `h` | Show help |
 | `q` | Quit |
 
-The Providers table never renders the stored key. Press `o` to pick a saved model (and optionally change reasoning for this session) then launch, or run `codex-switch launch <alias>` from the shell. Enter still opens the edit form. `l` is re-login on the Accounts tab, not launch.
+The Providers table never renders the stored key. `Enter` or `o` picks a saved model (and optionally changes reasoning for this session) then launches, or run `codex-switch launch <alias>` from the shell. `e` opens the edit form. `l` is re-login on the Accounts tab, not launch.
 
 Destructive or consumptive actions always require confirmation.
 

@@ -9,31 +9,14 @@ use ratatui::{
 use super::app::{App, Tab, UsageStatus};
 use super::keymap;
 use super::popup;
+use super::theme::{
+    BG, C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_WHITE, C_YELLOW, DIM, base, highlight,
+};
 use crate::jwt::PlanKind;
 use crate::output::{
     format_local_time, format_reset_short, format_reset_time, reset_credits_count,
 };
 use crate::usage::{UsageInfo, is_available};
-
-// ── RGB-only color palette ───────────────────────────────
-// All colors are explicit RGB to avoid mixing ANSI-16 + 24-bit,
-// which causes rendering glitches on Windows conhost (cmd.exe / PowerShell).
-
-const BG: Color = Color::Rgb(24, 24, 24); // near-black background
-const C_WHITE: Color = Color::Rgb(240, 240, 240); // primary text
-const C_GRAY: Color = Color::Rgb(180, 180, 180); // secondary text
-const DIM: Color = Color::Rgb(120, 120, 120); // dim labels / placeholders
-const C_RED: Color = Color::Rgb(255, 90, 90); // errors, warnings
-const C_GREEN: Color = Color::Rgb(80, 220, 120); // OK, active
-const C_YELLOW: Color = Color::Rgb(255, 220, 80); // keys, markers
-const C_CYAN: Color = Color::Rgb(100, 210, 255); // headers, prompts
-const C_MAGENTA: Color = Color::Rgb(220, 130, 255); // team plans
-const C_BLUE: Color = Color::Rgb(80, 140, 220); // borders (inactive)
-const C_HIGHLIGHT_BG: Color = Color::Rgb(55, 55, 65); // selected row bg
-
-fn base() -> Style {
-    Style::default().bg(BG)
-}
 
 fn status_message_color(is_error: bool) -> Color {
     if is_error { C_RED } else { C_CYAN }
@@ -98,10 +81,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
 fn render_help_popup(f: &mut Frame, state: &mut popup::PopupState, area: ratatui::layout::Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let key_style = Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(C_WHITE);
-    let heading_style = Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD);
-    let dim_style = Style::default().fg(DIM);
+    let key_style = base().fg(C_YELLOW).add_modifier(Modifier::BOLD);
+    let label_style = base().fg(C_WHITE);
+    let heading_style = base().fg(C_CYAN).add_modifier(Modifier::BOLD);
+    let dim_style = base().fg(DIM);
 
     // Compute key column width for alignment within section
     let groups = keymap::help_sections();
@@ -123,12 +106,12 @@ fn render_help_popup(f: &mut Frame, state: &mut popup::PopupState, area: ratatui
         for (k, label) in items {
             let pad = key_col.saturating_sub(display_width(k));
             let mut spans: Vec<Span<'static>> = Vec::new();
-            spans.push(Span::raw("  "));
+            spans.push(Span::styled("  ", base()));
             spans.push(Span::styled((*k).to_string(), key_style));
             if pad > 0 {
-                spans.push(Span::raw(" ".repeat(pad)));
+                spans.push(Span::styled(" ".repeat(pad), base()));
             }
-            spans.push(Span::raw("  "));
+            spans.push(Span::styled("  ", base()));
             spans.push(Span::styled((*label).to_string(), label_style));
             lines.push(Line::from(spans));
         }
@@ -199,17 +182,17 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             .border_style(base().fg(C_BLUE))
             .style(base());
         let hint = Paragraph::new(Line::from(vec![
-            Span::styled("No accounts yet. Press ", Style::default().fg(DIM)),
+            Span::styled("No accounts yet. Press ", base().fg(DIM)),
             Span::styled(
                 "a",
-                Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" to add one, or ", Style::default().fg(DIM)),
+            Span::styled(" to add one, or ", base().fg(DIM)),
             Span::styled(
                 "q",
-                Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" to quit.", Style::default().fg(DIM)),
+            Span::styled(" to quit.", base().fg(DIM)),
         ]))
         .block(block)
         .alignment(ratatui::layout::Alignment::Center);
@@ -534,11 +517,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             .border_style(base().fg(C_BLUE))
             .style(base()),
     )
-    .row_highlight_style(
-        Style::default()
-            .bg(C_HIGHLIGHT_BG)
-            .add_modifier(Modifier::BOLD),
-    )
+    .row_highlight_style(highlight())
     .style(base());
 
     f.render_stateful_widget(table, area, &mut table_state);
@@ -811,7 +790,7 @@ fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
             format!(" Accounts ({}) ", app.accounts.len()),
             accounts_style,
         ),
-        Span::raw("  "),
+        Span::styled("  ", base()),
         Span::styled(
             format!(" Providers ({}) ", app.providers.len()),
             providers_style,
@@ -882,11 +861,7 @@ fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(header)
-    .row_highlight_style(
-        Style::default()
-            .bg(C_HIGHLIGHT_BG)
-            .add_modifier(Modifier::BOLD),
-    )
+    .row_highlight_style(highlight())
     .style(base());
 
     let mut state = TableState::default().with_selected(app.provider_selected);
@@ -1007,24 +982,18 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         let dim = |t: &'static str| Span::styled(t, base().fg(DIM));
         let line = Line::from(vec![
             dim(" "),
-            key("j"),
-            dim("/"),
-            key("k"),
+            key("j/k"),
             dim(" nav \u{2502} "),
+            key("enter/o"),
+            dim(" launch \u{2502} "),
+            key("e"),
+            dim(" edit \u{2502} "),
             key("a"),
             dim(" add \u{2502} "),
-            key("e"),
-            dim("/"),
-            key("enter"),
-            dim(" edit \u{2502} "),
-            key("o"),
-            dim(" launch \u{2502} "),
             key("n"),
             dim(" rename \u{2502} "),
             key("d"),
             dim(" remove \u{2502} "),
-            key("Tab"),
-            dim(" accounts \u{2502} "),
             key("h"),
             dim(" help \u{2502} "),
             key("q"),
@@ -1346,7 +1315,7 @@ fn short_label(label: &str) -> &str {
     match label {
         "move selection" => "nav",
         "search" => "search",
-        "open selected (Accounts: menu, Providers: edit)" => "menu",
+        "open selected (Accounts: menu, Providers: launch picker)" => "menu",
         "refresh visible accounts" => "refresh",
         "show / hide account detail panel" => "quota",
         "show this help" => "help",
@@ -1454,12 +1423,12 @@ mod tests {
             "the API key must never render in the panel"
         );
         assert!(
-            joined.contains("o launch"),
-            "status bar must show o launch:\n{joined}"
+            joined.contains("enter/o launch"),
+            "status bar must show enter/o launch:\n{joined}"
         );
         assert!(
-            joined.contains("e/") && joined.contains("edit"),
-            "status bar must show e/enter edit:\n{joined}"
+            joined.contains("e edit"),
+            "status bar must show e edit:\n{joined}"
         );
         assert!(
             !joined.contains("l launch"),

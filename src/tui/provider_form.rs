@@ -1,25 +1,20 @@
 //! Single-dialog add/edit form for custom API providers.
 //!
-//! Navigation mode shows every field at once. Enter edits the focused cell;
-//! `s` saves; Esc cancels the edit or the form.
+//! Add starts typing the alias immediately. Enter commits the field and
+//! continues into the next one. After a model id is committed, the form stays
+//! on Models in navigation mode so `+/-`, `←/→`, `w`, `*`, and `s` work.
+//! Edit starts on Base URL in navigation mode so `s` is save, not a character.
 
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 
 use super::popup::{self, PopupState};
+use super::theme::{C_GREEN, C_RED, base, dim, header, key};
 use crate::provider::{ProviderModel, ProviderProfile};
-
-const C_WHITE: Color = Color::Rgb(240, 240, 240);
-const DIM: Color = Color::Rgb(120, 120, 120);
-const C_RED: Color = Color::Rgb(255, 90, 90);
-const C_YELLOW: Color = Color::Rgb(255, 220, 80);
-const C_CYAN: Color = Color::Rgb(100, 210, 255);
-const C_GREEN: Color = Color::Rgb(80, 220, 120);
 
 /// Reasoning-effort presets. Index 0 skips the override; the rest are saved as
 /// `model_reasoning_effort=<v>`. CLI `--reasoning` remains the escape hatch for
@@ -78,7 +73,7 @@ impl ProviderFormState {
             mode: FormMode::Add,
             popup: PopupState::new(),
             focus: Focus::Alias,
-            editing: false,
+            editing: true,
             alias: String::new(),
             base_url: String::new(),
             api_key: String::new(),
@@ -242,10 +237,18 @@ impl ProviderFormState {
                 FormOutcome::Continue
             }
             KeyCode::Enter | KeyCode::Tab => {
+                let from_models = self.focus == Focus::Models;
                 self.commit_edit();
-                if matches!(code, KeyCode::Tab) {
-                    self.focus_next();
+                // Add: Enter walks to the next field so you keep typing.
+                // Edit: Enter only commits, so `s` is save rather than a character.
+                // Models: after an id is committed, stay in nav for +/- / ←→ / w / * / s.
+                let enter_stays = matches!(code, KeyCode::Enter)
+                    && (from_models || self.mode == FormMode::Edit);
+                if enter_stays {
+                    return FormOutcome::Continue;
                 }
+                self.focus_next();
+                self.auto_edit_if_typing_field();
                 FormOutcome::Continue
             }
             KeyCode::Backspace if self.cursor > 0 => {
@@ -304,6 +307,17 @@ impl ProviderFormState {
         self.input = value;
         self.cursor = self.input.chars().count();
         self.editing = true;
+    }
+
+    fn auto_edit_if_typing_field(&mut self) {
+        match self.focus {
+            Focus::Alias | Focus::BaseUrl | Focus::ApiKey => self.begin_edit(),
+            Focus::Models => {
+                if self.models[self.model_idx].id.is_empty() {
+                    self.begin_edit();
+                }
+            }
+        }
     }
 
     fn commit_edit(&mut self) {
@@ -478,13 +492,8 @@ fn field_value<'a>(
 }
 
 pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
-    let key = Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD);
-    let label = Style::default().fg(C_WHITE);
-    let dim = Style::default().fg(DIM);
-    let header = Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD);
-    let focus_style = Style::default()
-        .fg(C_CYAN)
-        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let label = base();
+    let focus_style = header().add_modifier(ratatui::style::Modifier::UNDERLINED);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let alias_style = if form.focus == Focus::Alias {
@@ -504,26 +513,26 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
     };
 
     lines.push(Line::from(vec![
-        Span::styled("Alias     ", dim),
+        Span::styled("Alias     ", dim()),
         Span::styled(
             field_value(form, Focus::Alias, &form.alias, false),
             alias_style,
         ),
         if form.mode == FormMode::Edit {
-            Span::styled("  (rename with n on the list)", dim)
+            Span::styled("  (rename with n on the list)", dim())
         } else {
-            Span::raw("")
+            Span::styled("", base())
         },
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Base URL  ", dim),
+        Span::styled("Base URL  ", dim()),
         Span::styled(
             field_value(form, Focus::BaseUrl, &form.base_url, false),
             url_style,
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("API key   ", dim),
+        Span::styled("API key   ", dim()),
         Span::styled(
             field_value(form, Focus::ApiKey, &form.api_key, true),
             key_style,
@@ -533,9 +542,9 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
     lines.push(Line::from(Span::styled(
         format!("Models ({})", form.models.len()),
         if form.focus == Focus::Models {
-            header
+            header()
         } else {
-            header.fg(DIM)
+            dim()
         },
     )));
     for (idx, model) in form.models.iter().enumerate() {
@@ -559,49 +568,51 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             "search"
         };
         let row_style = if selected {
-            Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)
+            base().add_modifier(ratatui::style::Modifier::BOLD)
         } else {
             label
         };
         lines.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(C_GREEN)),
+            Span::styled(marker, base().fg(C_GREEN)),
             Span::styled(format!("{id}{default}"), row_style),
-            Span::styled(format!("  {reasoning}  {search}"), dim),
+            Span::styled(format!("  {reasoning}  {search}"), dim()),
         ]));
     }
     if let Some(error) = &form.error {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             error.clone(),
-            Style::default().fg(C_RED).add_modifier(Modifier::BOLD),
+            base()
+                .fg(C_RED)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         )));
     }
     lines.push(Line::from(""));
     if form.editing {
         lines.push(Line::from(vec![
-            Span::styled("enter", key),
-            Span::styled(" commit  ", dim),
-            Span::styled("esc", key),
-            Span::styled(" cancel edit", dim),
+            Span::styled("enter", key()),
+            Span::styled(" next  ", dim()),
+            Span::styled("esc", key()),
+            Span::styled(" cancel edit", dim()),
         ]));
     } else {
         lines.push(Line::from(vec![
-            Span::styled("tab", key),
-            Span::styled(" field  ", dim),
-            Span::styled("enter", key),
-            Span::styled(" edit  ", dim),
-            Span::styled("+/-", key),
-            Span::styled(" model  ", dim),
-            Span::styled("←/→", key),
-            Span::styled(" reasoning  ", dim),
-            Span::styled("w", key),
-            Span::styled(" search  ", dim),
-            Span::styled("*", key),
-            Span::styled(" default  ", dim),
-            Span::styled("s", key),
-            Span::styled(" save  ", dim),
-            Span::styled("esc", key),
-            Span::styled(" cancel", dim),
+            Span::styled("tab", key()),
+            Span::styled(" field  ", dim()),
+            Span::styled("enter", key()),
+            Span::styled(" edit  ", dim()),
+            Span::styled("+/-", key()),
+            Span::styled(" model  ", dim()),
+            Span::styled("←/→", key()),
+            Span::styled(" reasoning  ", dim()),
+            Span::styled("w", key()),
+            Span::styled(" search  ", dim()),
+            Span::styled("*", key()),
+            Span::styled(" default  ", dim()),
+            Span::styled("s", key()),
+            Span::styled(" save  ", dim()),
+            Span::styled("esc", key()),
+            Span::styled(" cancel", dim()),
         ]));
     }
     popup::render_popup(f, form.title(), &lines, &mut form.popup, area);
@@ -656,18 +667,11 @@ mod tests {
     fn add_form_saves_two_models_with_per_model_settings() {
         let _home = EnvHome::new();
         let mut form = ProviderFormState::add();
-        form.handle_key(KeyCode::Enter);
         type_into(&mut form, "openrouter");
-        form.handle_key(KeyCode::Enter);
-        form.handle_key(KeyCode::Tab);
         form.handle_key(KeyCode::Enter);
         type_into(&mut form, "https://openrouter.ai/api/v1");
         form.handle_key(KeyCode::Enter);
-        form.handle_key(KeyCode::Tab);
-        form.handle_key(KeyCode::Enter);
         type_into(&mut form, "sk-secret");
-        form.handle_key(KeyCode::Enter);
-        form.handle_key(KeyCode::Tab);
         form.handle_key(KeyCode::Enter);
         type_into(&mut form, "openai/gpt-5.3-codex");
         form.handle_key(KeyCode::Enter);
@@ -699,18 +703,11 @@ mod tests {
     fn add_form_rejects_a_bad_base_url_without_closing() {
         let _home = EnvHome::new();
         let mut form = ProviderFormState::add();
-        form.handle_key(KeyCode::Enter);
         type_into(&mut form, "r");
-        form.handle_key(KeyCode::Enter);
-        form.handle_key(KeyCode::Tab);
         form.handle_key(KeyCode::Enter);
         type_into(&mut form, "ftp://nope");
         form.handle_key(KeyCode::Enter);
-        form.handle_key(KeyCode::Tab);
-        form.handle_key(KeyCode::Enter);
         type_into(&mut form, "sk");
-        form.handle_key(KeyCode::Enter);
-        form.handle_key(KeyCode::Tab);
         form.handle_key(KeyCode::Enter);
         type_into(&mut form, "m");
         form.handle_key(KeyCode::Enter);

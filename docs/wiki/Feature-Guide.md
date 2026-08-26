@@ -96,7 +96,7 @@ codex-switch launch openrouter
 
 `launch <provider>` does not swap `$CODEX_HOME/auth.json`. It starts Codex with `-c` overrides that define and select the provider (and `launch --model` to pick a saved model), and injects the key into the child environment only. MCP servers and other settings in `$CODEX_HOME/config.toml` stay in effect. Auto-select (`launch` with no alias) and `use` remain ChatGPT-only.
 
-A provider holds several models; reasoning effort and `web_search` are per model. In the TUI Providers tab, `o` opens a picker for a saved model and a one-shot reasoning override; Enter still edits the provider. The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, model-specific settings, TUI add/edit/rename, and the security contract are in [Custom API providers](Providers).
+A provider holds several models; reasoning effort and `web_search` are per model. In the TUI Providers tab, `Enter` / `o` opens a picker for a saved model and a one-shot reasoning override; `e` edits the provider. The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, model-specific settings, TUI add/edit/rename, and the security contract are in [Custom API providers](Providers).
 
 ## Recover exhausted accounts
 

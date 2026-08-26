@@ -5,18 +5,13 @@ use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 
 use super::popup::{self, PopupState};
 use super::provider_form::{REASONING_CHOICES, reasoning_index};
+use super::theme::{base, dim, header, key};
 use crate::provider::{ProviderProfile, ReasoningLaunch};
-
-const C_WHITE: Color = Color::Rgb(240, 240, 240);
-const DIM: Color = Color::Rgb(120, 120, 120);
-const C_YELLOW: Color = Color::Rgb(255, 220, 80);
-const C_CYAN: Color = Color::Rgb(100, 210, 255);
 
 #[derive(Debug, Clone)]
 struct LaunchModel {
@@ -132,19 +127,15 @@ impl ProviderLaunchState {
 }
 
 pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, area: Rect) {
-    let key = Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD);
-    let label = Style::default().fg(C_WHITE);
-    let dim = Style::default().fg(DIM);
-    let header = Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     lines.push(Line::from(vec![
-        Span::styled("Provider  ", dim),
-        Span::styled(state.alias.clone(), header),
+        Span::styled("Provider  ", dim()),
+        Span::styled(state.alias.clone(), header()),
     ]));
     lines.push(Line::from(Span::styled(
         "Pick a saved model. Reasoning applies to this launch only.",
-        dim,
+        dim(),
     )));
     lines.push(Line::from(""));
 
@@ -157,29 +148,29 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
         } else {
             ""
         };
-        let style = if selected { header } else { label };
+        let style = if selected { header() } else { base() };
         lines.push(Line::from(vec![
-            Span::styled(marker, key),
+            Span::styled(marker, key()),
             Span::styled(format!("{}{default}{search}", model.id), style),
         ]));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("reasoning  ", dim),
-        Span::styled(REASONING_CHOICES[state.reasoning_idx].to_string(), header),
-        Span::styled("   (this session)", dim),
+        Span::styled("reasoning  ", dim()),
+        Span::styled(REASONING_CHOICES[state.reasoning_idx].to_string(), header()),
+        Span::styled("   (this session)", dim()),
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("j/k", key),
-        Span::styled(" model  ", dim),
-        Span::styled("←/→", key),
-        Span::styled(" reasoning  ", dim),
-        Span::styled("enter/o", key),
-        Span::styled(" launch  ", dim),
-        Span::styled("esc", key),
-        Span::styled(" cancel", dim),
+        Span::styled("j/k", key()),
+        Span::styled(" model  ", dim()),
+        Span::styled("←/→", key()),
+        Span::styled(" reasoning  ", dim()),
+        Span::styled("enter/o", key()),
+        Span::styled(" launch  ", dim()),
+        Span::styled("esc", key()),
+        Span::styled(" cancel", dim()),
     ]));
 
     popup::render_popup(f, "Launch provider", &lines, &mut state.popup, area);

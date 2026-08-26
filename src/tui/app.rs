@@ -633,8 +633,7 @@ impl App {
         self.provider_form = Some(super::provider_form::ProviderFormState::add());
     }
 
-    /// Open the edit-provider form (Providers tab, `e` / Enter).
-    /// Enter opens the row; it does not launch Codex.
+    /// Open the edit-provider form (Providers tab, `e`).
     pub fn open_provider_edit(&mut self) {
         match self.providers.get(self.provider_selected) {
             Some(p) => {
@@ -652,17 +651,17 @@ impl App {
         }
     }
 
-    /// Providers list keys. Launch is `o` (same as Accounts). `l` is re-login
-    /// on Accounts, so it never launches from this tab.
+    /// Providers list keys. Enter and `o` launch (pick a saved model). `e`
+    /// edits. `l` is re-login on Accounts, so it never launches from this tab.
     pub fn handle_provider_list_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Down | KeyCode::Char('j') => self.provider_select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.provider_select_prev(),
             KeyCode::Char('a') => self.open_provider_add(),
-            KeyCode::Enter | KeyCode::Char('e') => self.open_provider_edit(),
+            KeyCode::Char('e') => self.open_provider_edit(),
             KeyCode::Char('n') => self.start_provider_rename(),
             KeyCode::Char('d') => self.request_remove_provider(),
-            KeyCode::Char('o') => self.open_provider_launch(),
+            KeyCode::Enter | KeyCode::Char('o') => self.open_provider_launch(),
             KeyCode::Char('l') => {
                 self.set_status("o launches Codex; l is re-login on Accounts".to_string(), 4)
             }
@@ -2699,18 +2698,11 @@ mod tests {
         let mut app = App::new();
         app.open_provider_add();
 
-        app.handle_provider_form_key(KeyCode::Enter);
         type_str(&mut app, "myrouter");
-        app.handle_provider_form_key(KeyCode::Enter);
-        app.handle_provider_form_key(KeyCode::Tab);
         app.handle_provider_form_key(KeyCode::Enter);
         type_str(&mut app, "https://openrouter.ai/api/v1");
         app.handle_provider_form_key(KeyCode::Enter);
-        app.handle_provider_form_key(KeyCode::Tab);
-        app.handle_provider_form_key(KeyCode::Enter);
         type_str(&mut app, "sk-secret-xyz");
-        app.handle_provider_form_key(KeyCode::Enter);
-        app.handle_provider_form_key(KeyCode::Tab);
         app.handle_provider_form_key(KeyCode::Enter);
         type_str(&mut app, "openai/gpt-5.3-codex");
         app.handle_provider_form_key(KeyCode::Enter);
@@ -2765,7 +2757,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_enter_still_opens_the_edit_form() {
+    fn provider_enter_opens_the_launch_picker() {
         let mut app = App::new();
         app.providers.push(crate::provider::ProviderProfile::build(
             "or",
@@ -2774,6 +2766,11 @@ mod tests {
             "k",
         ));
         app.handle_provider_list_key(KeyCode::Enter);
+        assert!(app.provider_launch.is_some());
+        assert!(app.provider_form.is_none());
+
+        app.provider_launch = None;
+        app.handle_provider_list_key(KeyCode::Char('e'));
         assert!(app.provider_form.is_some());
         assert!(app.provider_launch.is_none());
     }

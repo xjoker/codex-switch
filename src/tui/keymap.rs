@@ -7,8 +7,8 @@
 /// - Same action uses the same key on every tab.
 /// - `o` launches Codex. `l` is re-login on Accounts (and batch). Never bind
 ///   launch to `l`: that letter already means login.
-/// - Enter opens the selected row (Accounts: action menu, Providers: edit
-///   form). In a dialog, Enter confirms and Esc cancels.
+/// - Enter opens the selected row (Accounts: action menu, Providers: launch
+///   picker). `e` edits a provider. In a dialog, Enter confirms and Esc cancels.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -152,13 +152,13 @@ pub const KEYMAP: &[Binding] = &[
     },
     // Providers tab
     Binding {
-        keys: "o",
+        keys: "enter / o",
         section: Section::Provider,
         label: "launch Codex (pick model and reasoning)",
         in_status_bar: false,
     },
     Binding {
-        keys: "e / enter",
+        keys: "e",
         section: Section::Provider,
         label: "edit provider",
         in_status_bar: false,
@@ -185,7 +185,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "enter",
         section: Section::Global,
-        label: "open selected (Accounts: menu, Providers: edit)",
+        label: "open selected (Accounts: menu, Providers: launch picker)",
         in_status_bar: true,
     },
     Binding {
@@ -279,11 +279,16 @@ mod tests {
     fn launch_is_o_on_every_tab_and_l_is_only_login() {
         let launch: Vec<_> = super::KEYMAP
             .iter()
-            .filter(|b| b.label.to_ascii_lowercase().contains("launch"))
+            .filter(|b| {
+                matches!(b.section, super::Section::Account | super::Section::Provider)
+                    && b.label.to_ascii_lowercase().contains("launch")
+            })
             .collect();
         assert!(
-            launch.iter().all(|b| b.keys == "o"),
-            "launch must be o everywhere, not l: {launch:?}"
+            launch
+                .iter()
+                .all(|b| b.keys.contains('o') && !b.keys.contains('l')),
+            "launch must include o and never l: {launch:?}"
         );
         assert!(launch.iter().any(|b| b.section == super::Section::Account));
         assert!(launch.iter().any(|b| b.section == super::Section::Provider));

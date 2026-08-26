@@ -128,17 +128,17 @@ On the Providers tab:
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
 | `a` | Add a provider (form dialog) |
-| `e` / Enter | Edit the selected provider |
-| `o` | Launch: pick a saved model and reasoning for this session |
+| `Enter` / `o` | Launch: pick a saved model and reasoning for this session |
+| `e` | Edit the selected provider |
 | `n` | Rename |
 | `d` | Remove (confirmation required) |
 | `Tab` | Return to Accounts |
 | `h` | Help |
 | `q` | Quit |
 
-Add and edit use the same form. Tab moves between alias, base URL, API key, and the model list. On the model list: `+` / `-` add or remove a model, `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, Enter edits the model id, `s` saves, Esc cancels. The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field.
+Add and edit use the same form. Add starts typing the alias immediately; Enter commits a field and continues to the next. After the model id is committed, the form stays on Models so `+` / `-` add or remove a model, `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, and `s` saves. Edit starts on Base URL in navigation mode (Enter edits the focused cell). Tab always moves between fields. The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field.
 
-The stored key is never rendered in the table. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, then Enter (or `o` again) starts Codex. `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). Enter on the Providers list still edits. `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
+The stored key is never rendered in the table. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, then Enter (or `o` again) starts Codex. On the Providers list, Enter also opens that picker; `e` edits. `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
 
 ## Storage and security
 

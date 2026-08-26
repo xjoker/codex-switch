@@ -5,15 +5,12 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-const BG: Color = Color::Rgb(24, 24, 24);
-const C_WHITE: Color = Color::Rgb(240, 240, 240);
-const DIM: Color = Color::Rgb(120, 120, 120);
-const C_CYAN: Color = Color::Rgb(100, 210, 255);
+use super::theme::{BG, C_RED, base, dim, header};
 
 /// Minimum terminal size below which we abort popup rendering.
 const MIN_TERM_W: u16 = 20;
@@ -102,8 +99,8 @@ pub fn render_popup(
     let block = Block::default()
         .title(format!(" {title} "))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(C_CYAN).bg(BG))
-        .style(Style::default().bg(BG).fg(C_WHITE));
+        .border_style(header())
+        .style(base());
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -140,7 +137,7 @@ pub fn render_popup(
         height: visible_h,
     };
     f.render_widget(
-        Paragraph::new(visible_slice.to_vec()).style(Style::default().bg(BG)),
+        Paragraph::new(visible_slice.to_vec()).style(base()),
         content_area,
     );
 
@@ -179,9 +176,9 @@ fn render_scrollbar(
         let cell_y = inner.y + i;
         let in_thumb = i >= thumb_pos && i < thumb_pos + thumb_h;
         let (ch, style) = if in_thumb {
-            ("\u{2588}", Style::default().fg(C_CYAN).bg(BG)) // █
+            ("\u{2588}", header()) // █
         } else {
-            ("\u{258C}", Style::default().fg(DIM).bg(BG)) // ▌ (subtle track)
+            ("\u{258C}", dim()) // ▌ (subtle track)
         };
         let area = Rect {
             x: bar_x,
@@ -207,7 +204,7 @@ fn render_too_small_fallback(f: &mut Frame, screen: Rect) {
     f.render_widget(
         Paragraph::new(msg).style(
             Style::default()
-                .fg(Color::Rgb(255, 90, 90))
+                .fg(C_RED)
                 .bg(BG)
                 .add_modifier(Modifier::BOLD),
         ),
@@ -257,13 +254,14 @@ fn truncate_line(line: &Line<'_>, max_width: usize) -> Line<'static> {
     }
     acc.push(Span::styled(
         "\u{2026}".to_string(),
-        Style::default().fg(DIM),
+        dim(),
     ));
     Line::from(acc)
 }
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
     use super::*;
 
     fn content(line: &Line<'_>) -> String {
@@ -313,5 +311,29 @@ mod tests {
         assert_eq!(truncated.width(), 5);
         assert_eq!(truncated.spans[0].style.fg, Some(Color::Red));
         assert_eq!(truncated.spans[1].style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn popup_paints_the_designed_dark_background() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = PopupState::new();
+        let lines = vec![Line::from(Span::styled("hello", super::super::theme::key()))];
+        terminal
+            .draw(|f| render_popup(f, "Title", &lines, &mut state, f.area()))
+            .unwrap();
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((20, 6))
+            .expect("cell inside popup");
+        assert_eq!(
+            cell.bg,
+            Color::Rgb(24, 24, 24),
+            "popup must pin the designed background, got {:?}",
+            cell.bg
+        );
     }
 }
