@@ -429,11 +429,6 @@ impl App {
                         .unwrap_or_default();
                     items.push(format!("  Status  limited{reason}"));
                 }
-                if usage.unlimited_credits == Some(true) {
-                    items.push("  credits unlimited".to_string());
-                } else if let Some(balance) = usage.credits_balance {
-                    items.push(format!("  credits ${balance:.2}"));
-                }
                 if usage.reset_credits_error.is_some() {
                     items.push("  Reset-card details are temporarily unavailable".to_string());
                 }
