@@ -1,4 +1,4 @@
 {
   "name": "codex-switch",
-  "install": "rustup toolchain install stable --profile minimal -c clippy -c rustfmt && rustup default stable && cargo fetch --locked && cargo build --all-targets --locked && cargo install cargo-audit --locked"
+  "install": "rustup toolchain install stable --profile minimal -c clippy -c rustfmt && rustup default stable && cargo fetch --locked && cargo build --all-targets --locked && cargo install cargo-audit --locked && npm install -g @openai/codex@0.149.1 --prefix \"$HOME/.local\""
 }
