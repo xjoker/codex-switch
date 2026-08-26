@@ -41,4 +41,6 @@ mod update;
 pub mod usage;
 #[allow(dead_code)]
 mod warmup;
+#[allow(dead_code)]
+mod warmup_schedule;
 pub mod workspace;

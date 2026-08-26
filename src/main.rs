@@ -19,6 +19,7 @@ mod tui;
 mod update;
 mod usage;
 mod warmup;
+mod warmup_schedule;
 mod workspace;
 
 use anyhow::Result;
