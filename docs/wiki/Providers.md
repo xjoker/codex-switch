@@ -1,0 +1,127 @@
+# Custom API providers
+
+A custom API provider is a saved third-party endpoint that `codex-switch launch` can hand to Codex CLI for one session. Typical case: OpenRouter, or another gateway that speaks Codex's Responses protocol.
+
+Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores a model-provider definition plus a bearer API key under `$CODEX_SWITCH_HOME`, then at launch injects that definition as `codex -c …` overrides. Nothing is written to `~/.codex`.
+
+> Never put an API key on the command line. `provider add` reads it from a hidden prompt, or from stdin with `--api-key-stdin`. The key is stored mode `0600` and never printed, listed, or placed in argv.
+
+## Add a provider
+
+```bash
+codex-switch provider add openrouter \
+  --base-url https://openrouter.ai/api/v1 \
+  --model openai/gpt-5.3-codex
+```
+
+The command then prompts for the API key without echoing it. For scripts, pass the key on stdin instead:
+
+```bash
+printf '%s' "$OPENROUTER_API_KEY" | codex-switch provider add openrouter \
+  --base-url https://openrouter.ai/api/v1 \
+  --model openai/gpt-5.3-codex \
+  --api-key-stdin
+```
+
+Optional flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--name` | the alias | Human-readable name Codex shows |
+| `--env-key` | `CODEX_SWITCH_<ALIAS>_KEY` | Environment variable Codex reads the key from at launch |
+| `--wire-api` | `responses` | Codex wire protocol; current Codex only accepts `responses` |
+| `--api-key-stdin` | off | Read the key from stdin instead of a hidden prompt |
+
+The alias follows the same rules as a ChatGPT profile (ASCII letters, digits, `_`, `-`, `.`; at most 64 characters) and must not collide with an existing profile, an existing provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`.
+
+Inspect and remove:
+
+```bash
+codex-switch provider list
+codex-switch provider show openrouter
+codex-switch provider remove openrouter
+```
+
+`show` prints a redacted key (`…` plus the last four characters). Removal deletes the stored key immediately; unlike ChatGPT profile deletion, it is not archived under `deleted-profiles/`. Non-interactive and `--json` runs require `--yes`.
+
+`--json` is supported on `provider add`, `list`, `show`, and `remove`. JSON never includes the raw key.
+
+## Launch Codex with a provider
+
+Name the provider alias. Auto-select (`launch` with no alias) stays ChatGPT-only.
+
+```bash
+codex-switch launch openrouter
+codex-switch launch openrouter -- --full-auto
+```
+
+`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider, and injects the API key into the child process environment under `env_key`. Extra arguments after `--` are appended as Codex CLI flags.
+
+Because `-c` layers on top of `$CODEX_HOME/config.toml`, MCP servers, skills, and other Codex settings in that file stay in effect for the session.
+
+`codex-switch use` does not accept a provider alias. A provider is applied only for the launched Codex process; a later bare `codex` invocation is unchanged.
+
+## OpenRouter and DeepSeek
+
+OpenRouter is the intended first provider: its `/api/v1` base URL plus a full model slug (including the vendor prefix) is what Codex expects.
+
+Codex currently speaks only `wire_api = "responses"`. DeepSeek's official API is Chat Completions, so pointing `--base-url` at DeepSeek directly will not work. Route DeepSeek (or any other Chat Completions-only vendor) through OpenRouter or another Responses-capable gateway, and set `--model` to that gateway's slug:
+
+```bash
+codex-switch provider add deepseek \
+  --base-url https://openrouter.ai/api/v1 \
+  --model deepseek/deepseek-chat \
+  --name "DeepSeek via OpenRouter"
+```
+
+Pick the slug from the gateway's catalog. If Codex rejects the model, the usual cause is a Chat Completions-only endpoint rather than a missing key.
+
+## TUI
+
+`codex-switch tui` has two tabs: **Accounts** (ChatGPT OAuth, quota, scoring) and **Providers** (alias, name, model, base URL). Switch with `Tab` / `Shift+Tab`.
+
+On the Providers tab:
+
+| Key | Action |
+|---|---|
+| `j` / `k` or `↑` / `↓` | Navigate |
+| `a` | Add a provider (alias → base URL → model → API key) |
+| `d` | Remove the selected provider (confirmation required) |
+| `Tab` | Return to Accounts |
+| `h` | Help |
+| `q` | Quit |
+
+The API-key step is masked (`*`). The stored key is never rendered in the table. The wizard does not set `--name`, `--env-key`, or `--wire-api`; those keep the CLI defaults (`name` = alias, derived `env_key`, `responses`). Use the CLI when those need to differ.
+
+Launching a provider is CLI-only; the Providers tab does not start Codex.
+
+## Storage and security
+
+| Location | Purpose |
+|---|---|
+| `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Provider definition and API key (directory `0700`, file `0600`) |
+
+Defaults to `~/.codex-switch/providers/`. Relocate the whole tree with `CODEX_SWITCH_HOME`; this still does not change where Codex reads `auth.json`.
+
+Security contract:
+
+- The key is never a CLI argument, so it does not appear in the process table as argv.
+- At launch it exists only in the Codex child environment, under a codex-switch-owned variable (`CODEX_SWITCH_<ALIAS>_KEY` by default) rather than a vendor's conventional name, so a pre-exported `OPENAI_API_KEY` or `OPENROUTER_API_KEY` is not reused by accident.
+- `list`, `show`, JSON output, and the TUI print a redacted form only.
+- Launch writes nothing under `$CODEX_HOME`. ChatGPT `use` / `launch` locking and `auth.json` backup/restore do not apply.
+
+Do not commit `provider.toml`, paste keys into issues, or share unredacted `--debug` output.
+
+## What this does not do
+
+- Persist a provider for a subsequent bare `codex` run (`use` remains ChatGPT-only).
+- Auto-select among providers, score them, or show quota / credits.
+- Talk Chat Completions, or wrap a local proxy.
+- Share an alias with a ChatGPT profile.
+
+## Next steps
+
+- Command flags and JSON shapes: [Command reference](Command-Reference#provider).
+- ChatGPT account, quota, and `use` workflows: [Feature guide](Feature-Guide).
+- Paths and `CODEX_SWITCH_HOME`: [Configuration](Configuration).
+- Module and storage layout: [Architecture overview](Architecture-Overview).

@@ -1,6 +1,6 @@
 # Configuration
 
-`codex-switch` uses `~/.codex-switch` by default. Set `CODEX_SWITCH_HOME` to relocate its profiles, cache, locks, logs, and daemon state. This does not change Codex's own home; set `CODEX_HOME` for that.
+`codex-switch` uses `~/.codex-switch` by default. Set `CODEX_SWITCH_HOME` to relocate its profiles, custom providers, cache, locks, logs, and daemon state. This does not change Codex's own home; set `CODEX_HOME` for that.
 
 Configuration is optional: a missing `config.toml` means defaults. An existing but unreadable or invalid file fails fast with its path instead of being silently ignored.
 
@@ -30,6 +30,7 @@ Accounts are added by logging in with `codex-switch login` or by importing an ex
 |---|---|
 | `$CODEX_HOME/auth.json` | Live authentication read by Codex. |
 | `$CODEX_SWITCH_HOME/profiles/<alias>/auth.json` | Saved profile authentication. |
+| `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Custom API provider definition and key (directory `0700`, file `0600`). |
 | `$CODEX_SWITCH_HOME/deleted-profiles/` | Recoverable deleted profiles. |
 | `$CODEX_SWITCH_HOME/current` | Current alias marker. |
 | `$CODEX_SWITCH_HOME/cache.json` | Per-profile usage cache. |
@@ -128,5 +129,6 @@ Every command writes diagnostic logs to `$CODEX_SWITCH_HOME/logs/`, one file per
 ## Next steps
 
 - See what these settings control in the [Feature guide](Feature-Guide).
+- Custom API provider storage and launch overlay: [Custom API providers](Providers).
 - Look up the flags that override configuration in the [Command reference](Command-Reference).
 - Diagnose configuration errors with [Troubleshooting](Troubleshooting).

@@ -38,7 +38,7 @@ If a command is unavailable on your platform, state exactly what was not run in 
 
 Update documentation in the same pull request when behavior changes:
 
-- `docs/wiki/` pages for user-visible behavior: `Feature-Guide.md`, `Command-Reference.md`, `Configuration.md`, `Updating.md`, `Troubleshooting.md`
+- `docs/wiki/` pages for user-visible behavior: `Feature-Guide.md`, `Providers.md`, `Command-Reference.md`, `Configuration.md`, `Updating.md`, `Troubleshooting.md`
 - `README.md` when the quick start or installation flow is affected
 - `docs/wiki/Architecture-Overview.md` for module, storage, or data-flow changes
 - `docs/wiki/Developer-Onboarding.md` for engineering workflow changes

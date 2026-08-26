@@ -8,6 +8,7 @@ Reader-facing documentation lives in [`docs/wiki/`](wiki) and is published autom
 |---|---|---|
 | New user | [Getting started](wiki/Getting-Started.md) | [Feature guide](wiki/Feature-Guide.md) |
 | Operator | [Configuration](wiki/Configuration.md) | [Troubleshooting](wiki/Troubleshooting.md) |
+| Custom API / OpenRouter | [Custom API providers](wiki/Providers.md) | [Command reference](wiki/Command-Reference.md) |
 | Contributor | [Contributing](../CONTRIBUTING.md) | [Developer onboarding](wiki/Developer-Onboarding.md) |
 | Maintainer | [Architecture overview](wiki/Architecture-Overview.md) | [Release process](RELEASE.md) |
 | Release reader | [Changelog](CHANGELOG.md) | [GitHub Releases](https://github.com/xjoker/codex-switch/releases) |
