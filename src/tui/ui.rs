@@ -56,11 +56,22 @@ pub fn render(f: &mut Frame, app: &mut App) {
     } else {
         0
     };
+    let providers_height = if app.providers.is_empty() {
+        0
+    } else {
+        providers_panel_height(app).min(
+            area.height
+                .saturating_sub(status_height as u16)
+                .saturating_sub(detail_height)
+                .saturating_sub(6),
+        )
+    };
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(6),                       // account list
             Constraint::Length(detail_height),        // detail panel
+            Constraint::Length(providers_height),     // custom providers panel
             Constraint::Length(status_height as u16), // status bar
         ])
         .split(area);
@@ -69,7 +80,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if app.detail_visible {
         render_detail_panel(f, app, vertical[1]);
     }
-    render_status_bar(f, app, vertical[2]);
+    if providers_height > 0 {
+        render_providers_panel(f, app, vertical[2]);
+    }
+    render_status_bar(f, app, vertical[3]);
 
     // Overlays (rendered last, on top of everything).
     // Help popup takes top priority since the user invoked it explicitly.
@@ -772,6 +786,41 @@ pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
     }
 }
 
+/// Height for the custom-providers panel: one row per provider plus borders,
+/// capped so a long list never crowds out the account table.
+fn providers_panel_height(app: &App) -> u16 {
+    (app.providers.len() as u16).saturating_add(2).min(12)
+}
+
+/// Read-only list of configured custom API providers. The stored API key is
+/// never rendered.
+fn render_providers_panel(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" Custom providers ")
+        .borders(Borders::ALL)
+        .border_style(base().fg(C_BLUE))
+        .style(base());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines: Vec<Line> = app
+        .providers
+        .iter()
+        .map(|p| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{}  ", p.alias),
+                    base().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("{}  ", p.name), base().fg(C_GRAY)),
+                Span::styled(format!("{}  ", p.model), base().fg(C_CYAN)),
+                Span::styled(format!("[{}]", p.base_url), base().fg(DIM)),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines).style(base()), inner);
+}
+
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // Rename input takes top priority
     if let Some(rs) = &app.rename {
@@ -1203,6 +1252,7 @@ mod tests {
         render_usage_gauges, reset_cards_color, reset_cards_table_state, status_message_color,
         table_text_widths, usage_gauges_height,
     };
+    use crate::tui::app::App;
     use crate::usage::{AdditionalRateLimit, ResetCredit, UsageInfo, WindowUsage};
     use ratatui::style::Modifier;
     use ratatui::{Terminal, backend::TestBackend};
@@ -1224,6 +1274,40 @@ mod tests {
     fn status_message_color_distinguishes_errors_from_information() {
         assert_eq!(status_message_color(false), C_CYAN);
         assert_eq!(status_message_color(true), C_RED);
+    }
+
+    #[test]
+    fn providers_panel_lists_custom_providers_without_the_key() {
+        let mut app = App::new();
+        app.providers.push(crate::provider::ProviderProfile {
+            alias: "openrouter".into(),
+            provider_id: "openrouter".into(),
+            name: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            env_key: "CODEX_SWITCH_OPENROUTER_KEY".into(),
+            model: "openai/gpt-5.3-codex".into(),
+            wire_api: "responses".into(),
+            api_key: "sk-secret-1234".into(),
+        });
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+
+        let joined = (0..30)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("Custom providers"),
+            "the panel header must render:\n{joined}"
+        );
+        assert!(joined.contains("openrouter"));
+        assert!(joined.contains("https://openrouter.ai/api/v1"));
+        assert!(
+            !joined.contains("sk-secret-1234"),
+            "the API key must never render in the panel"
+        );
     }
 
     #[test]

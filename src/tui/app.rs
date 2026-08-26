@@ -179,6 +179,9 @@ type ResetCardRefreshResult = (
 
 pub struct App {
     pub accounts: Vec<AccountEntry>,
+    /// Custom API provider profiles (OpenRouter, etc.). Shown in a separate
+    /// read-only panel; they carry no OAuth/usage and never join `accounts`.
+    pub providers: Vec<crate::provider::ProviderProfile>,
     pub selected: usize,
     pub search: Option<SearchState>,
     pub search_active: bool,
@@ -243,6 +246,7 @@ impl App {
         let cfg = crate::config::get();
         App {
             accounts: vec![],
+            providers: vec![],
             selected: 0,
             search: None,
             search_active: false,
@@ -694,6 +698,11 @@ impl App {
                     is_current,
                 })
             })
+            .collect();
+        self.providers = crate::provider::list_providers()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|alias| crate::provider::load(&alias).ok())
             .collect();
         self.marked
             .retain(|alias| self.accounts.iter().any(|account| &account.alias == alias));
