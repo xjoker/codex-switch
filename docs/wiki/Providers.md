@@ -30,10 +30,12 @@ Optional flags:
 | `--name` | the alias | Human-readable name Codex shows |
 | `--env-key` | `CODEX_SWITCH_<ALIAS>_KEY` | Environment variable Codex reads the key from at launch |
 | `--wire-api` | `responses` | Codex wire protocol; current Codex only accepts `responses` |
+| `--reasoning EFFORT` | none | Save `model_reasoning_effort=EFFORT` for thinking models (see below) |
+| `--no-web-search` | off | Save `web_search=disabled` for models that reject the built-in tool |
 | `--set KEY=VALUE` | none | Extra `codex -c` override saved with the provider and applied at launch (repeatable) |
 | `--api-key-stdin` | off | Read the key from stdin instead of a hidden prompt |
 
-`--set` saves a `codex -c KEY=VALUE` override with the provider, so a model-specific Codex setting is applied on every launch without retyping it after `--` (see [Model-specific request settings](#model-specific-request-settings)). Repeat it for several overrides. The value is passed to Codex verbatim — Codex, not codex-switch, decides which keys and values are valid — so only the `KEY=VALUE` shape is checked.
+These save `codex -c KEY=VALUE` overrides with the provider, so a model-specific Codex setting is applied on every launch without retyping it after `--` (see [Model-specific request settings](#model-specific-request-settings)). `--reasoning` and `--no-web-search` are convenience shortcuts for the two most common settings; `--set` (repeatable) covers any other override. Values are passed to Codex verbatim — Codex, not codex-switch, decides which keys and values are valid — so only the `KEY=VALUE` shape is checked. An explicit `--set` wins over a convenience flag for the same key.
 
 The alias follows the same rules as a ChatGPT profile (ASCII letters, digits, `_`, `-`, `.`; at most 64 characters) and must not collide with an existing profile, an existing provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`.
 
@@ -105,8 +107,10 @@ or saved once with the provider so every launch applies it:
 codex-switch provider add openrouter \
   --base-url https://openrouter.ai/api/v1 \
   --model openai/gpt-oss-20b \
-  --set web_search=disabled
+  --no-web-search
 ```
+
+(`--no-web-search` is shorthand for `--set web_search=disabled`.)
 
 ### Reasoning ("thinking") models
 
@@ -122,10 +126,12 @@ or save it with the provider so it is always applied:
 codex-switch provider add r1 \
   --base-url https://openrouter.ai/api/v1 \
   --model deepseek/deepseek-r1-0528 \
-  --set model_reasoning_effort=medium
+  --reasoning medium
 ```
 
-Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex also accepts `ultra`) come from the Codex version in use, so codex-switch does not restrict them — an unknown value is passed through and Codex reports if it is invalid. Plain chat models (`deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `openai/gpt-4o-mini`) need no reasoning flag. Repeat `--set` to combine both overrides when a model needs them.
+(`--reasoning medium` is shorthand for `--set model_reasoning_effort=medium`.)
+
+Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex also accepts `ultra`) come from the Codex version in use, so codex-switch does not restrict them — pass any value with `--reasoning` (or `--set`) and Codex reports if it is invalid. Plain chat models (`deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `openai/gpt-4o-mini`) need no reasoning flag. Combine `--reasoning` and `--no-web-search` (or repeat `--set`) when a model needs both.
 
 ## TUI
 
@@ -136,13 +142,13 @@ On the Providers tab:
 | Key | Action |
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
-| `a` | Add a provider (alias → base URL → model → API key) |
+| `a` | Add a provider (alias → base URL → model → reasoning → web_search → API key) |
 | `d` | Remove the selected provider (confirmation required) |
 | `Tab` | Return to Accounts |
 | `h` | Help |
 | `q` | Quit |
 
-The API-key step is masked (`*`). The stored key is never rendered in the table. The wizard does not set `--name`, `--env-key`, or `--wire-api`; those keep the CLI defaults (`name` = alias, derived `env_key`, `responses`). Use the CLI when those need to differ.
+The reasoning step is a single choice (`←`/`→`, default `(skip)` saves nothing); the web_search step is a toggle (`Space`, default leaves it enabled). Both are saved into the provider's `codex_config`. The API-key step is masked (`*`). The stored key is never rendered in the table. The wizard does not set `--name`, `--env-key`, or `--wire-api`; those keep the CLI defaults (`name` = alias, derived `env_key`, `responses`). Use the CLI (`--set`) for any override other than reasoning and web_search.
 
 Launching a provider is CLI-only; the Providers tab does not start Codex.
 
