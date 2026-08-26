@@ -44,6 +44,14 @@ codex-switch launch       # start Codex with the best account
 ## What it does
 
 - Saves, imports, renames, switches, and recoverably deletes Codex profiles.
+- Saves custom API providers (OpenRouter and other Responses-compatible endpoints) and launches Codex with them without writing to `~/.codex`:
+
+  ```bash
+  codex-switch provider add openrouter \
+    --base-url https://openrouter.ai/api/v1 \
+    --model openai/gpt-5.3-codex
+  codex-switch launch openrouter
+  ```
 - Displays the main and model-specific quota pools in CLI and TUI views.
 - Selects an eligible account with adaptive, pace-aware scoring, and launches Codex with it.
 - Supports reset cards, quota warmup, JSON output, proxies, and a Beta background daemon (LaunchAgent, systemd, or Windows Task Scheduler; tune `cache_refresh_interval_secs` and `auto_warmup`).
@@ -55,7 +63,7 @@ codex-switch launch       # start Codex with the best account
 
 ## Documentation
 
-The **[GitHub Wiki](https://github.com/xjoker/codex-switch/wiki)** is the complete documentation — getting started, feature guide, command reference, configuration, updating and channels, troubleshooting, FAQ, and the contributor guides (architecture, onboarding). Its sources live in [`docs/wiki/`](docs/wiki) and are reviewed with the code.
+The **[GitHub Wiki](https://github.com/xjoker/codex-switch/wiki)** is the complete documentation — getting started, feature guide, custom API providers, command reference, configuration, updating and channels, troubleshooting, FAQ, and the contributor guides (architecture, onboarding). Its sources live in [`docs/wiki/`](docs/wiki) and are reviewed with the code.
 
 Maintainer documents: [release process](docs/RELEASE.md) · [changelog](docs/CHANGELOG.md) · [contributing](CONTRIBUTING.md).
 

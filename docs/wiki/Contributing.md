@@ -11,7 +11,7 @@ Contributions normally target `dev`; `master` tracks stable releases. The short 
 - Preserve the safety contracts: JSON stdout, atomic file writes, cross-process locks, recoverable deletion, and the file-backed Codex credential-store requirement.
 - For a substantial feature or architecture change, open an issue first so the boundary can be agreed before implementation.
 
-Never attach credentials, auth files, personal account metadata, or unredacted debug output — in code, tests, issues, or pull requests. Read the full [contribution guidelines](https://github.com/xjoker/codex-switch/blob/dev/CONTRIBUTING.md) before opening a pull request.
+Never attach credentials, auth files, provider API keys, personal account metadata, or unredacted debug output — in code, tests, issues, or pull requests. Read the full [contribution guidelines](https://github.com/xjoker/codex-switch/blob/dev/CONTRIBUTING.md) before opening a pull request.
 
 ## Next steps
 

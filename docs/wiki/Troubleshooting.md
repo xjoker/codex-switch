@@ -5,6 +5,12 @@ Start with the complete error message, its file path, and the command that produ
 | Symptom | Action |
 |---|---|
 | No saved profiles | Run `codex-switch login` or `codex-switch import <path>`. |
+| `Profile '<alias>' not found` on `use` or ChatGPT `launch` | That alias is not a ChatGPT profile. Custom API providers are launched with `codex-switch launch <alias>` and listed by `codex-switch provider list`; `use` does not accept them. |
+| Codex rejects a custom provider / Chat Completions error | Current Codex only speaks `wire_api = "responses"`. Point `--base-url` at a Responses-capable gateway (OpenRouter) rather than a Chat Completions-only vendor API. See [Custom API providers](Providers). |
+| Custom provider fails with `Server tool request failed` (HTTP 400) | The model rejects Codex's built-in `web_search` server tool (some models accept it, some do not). Set `web_search = "disabled"` in `$CODEX_HOME/config.toml`, or launch with `-c web_search=disabled`. See [Model-specific request settings](Providers#model-specific-request-settings). |
+| Custom provider fails with `Reasoning is mandatory for this endpoint` (HTTP 400) | The model is a thinking model but Codex defaulted it to no reasoning. Launch with `-c model_reasoning_effort=medium` (or `low`/`high`). See [Model-specific request settings](Providers#model-specific-request-settings). |
+| `'<alias>' already names a ChatGPT profile` when adding a provider | Aliases are a single namespace. Choose a different provider alias. |
+| A removed provider cannot be recovered | Provider deletion removes the stored key immediately; unlike ChatGPT profiles, it is not archived under `deleted-profiles/`. Re-add it with `provider add`. |
 | Credential store is not file-backed | Set `cli_auth_credentials_store = "file"` in `$CODEX_HOME/config.toml`. |
 | Headless login cannot open a browser | Run `codex-switch login --device`. |
 | Windows daemon installation is denied | Open PowerShell as Administrator and retry. |
@@ -82,4 +88,5 @@ Include the operating system, terminal, `codex-switch --version`, exact command,
 
 - Check short behavior and security answers in the [FAQ](FAQ).
 - Review paths and settings in [Configuration](Configuration).
+- Custom API provider launch and key handling: [Custom API providers](Providers).
 - If the problem remains, report the redacted reproduction in the [GitHub issue tracker](https://github.com/xjoker/codex-switch/issues).

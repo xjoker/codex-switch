@@ -86,10 +86,11 @@ codex-switch launch      # select, start Codex, restore auth afterwards
 
 Saved profiles, cache, configuration, and daemon state default to `~/.codex-switch` (`%USERPROFILE%\.codex-switch` on Windows). The live Codex file stays at `$CODEX_HOME/auth.json`. See [Configuration](Configuration) for every path and setting.
 
-Never share profile files, `auth.json`, tokens, proxy credentials, or unredacted `--debug` output.
+Never share profile files, `auth.json`, tokens, provider API keys, proxy credentials, or unredacted `--debug` output.
 
 ## Next steps
 
 - Learn account, quota, launch, and daemon workflows in the [Feature guide](Feature-Guide).
+- Launch Codex against OpenRouter or another custom API: [Custom API providers](Providers).
 - Look up exact commands and TUI shortcuts in the [Command reference](Command-Reference).
 - Keep the binary current with [Updating](Updating).

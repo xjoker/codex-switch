@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
 };
 
-use super::app::{App, UsageStatus};
+use super::app::{App, Tab, UsageStatus};
 use super::keymap;
 use super::popup;
 use crate::jwt::PlanKind;
@@ -47,28 +47,40 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     let status_height = status_bar_height(app, area.width);
 
-    let detail_height = if app.detail_visible {
-        detail_panel_height(app).min(
-            area.height
-                .saturating_sub(status_height as u16)
-                .saturating_sub(6),
-        )
-    } else {
-        0
-    };
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(6),                       // account list
-            Constraint::Length(detail_height),        // detail panel
+            Constraint::Length(1),                    // tab bar
+            Constraint::Min(6),                       // active tab content
             Constraint::Length(status_height as u16), // status bar
         ])
         .split(area);
 
-    render_account_table(f, app, vertical[0]);
-    if app.detail_visible {
-        render_detail_panel(f, app, vertical[1]);
+    render_tab_bar(f, app, vertical[0]);
+
+    match app.active_tab {
+        Tab::Accounts => {
+            let content = vertical[1];
+            let detail_height = if app.detail_visible {
+                detail_panel_height(app).min(content.height.saturating_sub(6))
+            } else {
+                0
+            };
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(6),                // account list
+                    Constraint::Length(detail_height), // detail panel
+                ])
+                .split(content);
+            render_account_table(f, app, rows[0]);
+            if app.detail_visible {
+                render_detail_panel(f, app, rows[1]);
+            }
+        }
+        Tab::Providers => render_providers_tab(f, app, vertical[1]),
     }
+
     render_status_bar(f, app, vertical[2]);
 
     // Overlays (rendered last, on top of everything).
@@ -782,6 +794,107 @@ pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
     }
 }
 
+/// Top tab bar: Accounts (ChatGPT OAuth) vs Providers (third-party API+key).
+fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
+    let active = base().fg(BG).bg(C_CYAN).add_modifier(Modifier::BOLD);
+    let inactive = base().fg(C_GRAY);
+    let (accounts_style, providers_style) = match app.active_tab {
+        Tab::Accounts => (active, inactive),
+        Tab::Providers => (inactive, active),
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            format!(" Accounts ({}) ", app.accounts.len()),
+            accounts_style,
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!(" Providers ({}) ", app.providers.len()),
+            providers_style,
+        ),
+        Span::styled("   Tab to switch", base().fg(DIM)),
+    ]);
+    f.render_widget(Paragraph::new(line).style(base()), area);
+}
+
+/// Providers tab: read-only list of configured custom API providers. The stored
+/// API key is never rendered.
+fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" Custom providers ")
+        .borders(Borders::ALL)
+        .border_style(base().fg(C_BLUE))
+        .style(base());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.providers.is_empty() {
+        let hint = Paragraph::new(Line::from(vec![
+            Span::styled("No custom providers. Add one with ", base().fg(DIM)),
+            Span::styled(
+                "codex-switch provider add",
+                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(".", base().fg(DIM)),
+        ]))
+        .style(base());
+        f.render_widget(hint, inner);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from(" "),
+        Cell::from("Alias"),
+        Cell::from("Name"),
+        Cell::from("Model"),
+        Cell::from("Base URL"),
+    ])
+    .style(base().fg(C_CYAN).add_modifier(Modifier::BOLD));
+
+    let rows: Vec<Row> = app
+        .providers
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let selected = i == app.provider_selected;
+            let text_style = if selected {
+                base().fg(C_WHITE).add_modifier(Modifier::BOLD)
+            } else {
+                base().fg(C_GRAY)
+            };
+            Row::new(vec![
+                Cell::from(if selected { "\u{25b6}" } else { " " }).style(base().fg(C_GREEN)),
+                Cell::from(p.alias.clone()).style(text_style),
+                Cell::from(p.name.clone()).style(text_style),
+                Cell::from(p.model.clone()).style(base().fg(C_CYAN)),
+                Cell::from(p.base_url.clone()).style(base().fg(DIM)),
+            ])
+            .height(1)
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(2),
+            Constraint::Length(20),
+            Constraint::Length(24),
+            Constraint::Length(28),
+            Constraint::Min(20),
+        ],
+    )
+    .header(header)
+    .row_highlight_style(
+        Style::default()
+            .bg(C_HIGHLIGHT_BG)
+            .add_modifier(Modifier::BOLD),
+    )
+    .style(base());
+
+    let mut state = TableState::default().with_selected(app.provider_selected);
+    f.render_stateful_widget(table, inner, &mut state);
+}
+
 /// Compact pay-per-use credits balance for the table column. Mirrors the CLI
 /// `print_usage_line` wording: "unlimited" for unmetered accounts, a dollar
 /// amount when a balance is reported, and "--" when the account does not use
@@ -816,6 +929,58 @@ pub(super) fn credits_table_color(u: &UsageInfo) -> Color {
 }
 
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    // Add-provider wizard prompt takes top priority.
+    if let Some(state) = &app.provider_add {
+        use super::app::{ProviderAddStep, REASONING_CHOICES};
+        let label = Span::styled(
+            format!(" Add provider [{}]: ", state.step.prompt()),
+            base().fg(C_CYAN).add_modifier(Modifier::BOLD),
+        );
+        let line = match state.step {
+            ProviderAddStep::Reasoning => {
+                let choice = REASONING_CHOICES[state.reasoning_idx];
+                Line::from(vec![
+                    label,
+                    Span::styled(
+                        format!("< {choice} >"),
+                        base().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  (←/→ choose, Enter next / Esc cancel)", base().fg(DIM)),
+                ])
+            }
+            ProviderAddStep::WebSearch => {
+                let value = if state.no_web_search {
+                    "disabled"
+                } else {
+                    "enabled (default)"
+                };
+                Line::from(vec![
+                    label,
+                    Span::styled(
+                        format!("[{value}]"),
+                        base().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  (Space toggle, Enter next / Esc cancel)", base().fg(DIM)),
+                ])
+            }
+            _ => {
+                let shown = if state.step.is_secret() {
+                    "*".repeat(state.input.chars().count())
+                } else {
+                    state.input.clone()
+                };
+                Line::from(vec![
+                    label,
+                    Span::styled(shown, base().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+                    Span::styled("#", base().fg(C_GRAY)),
+                    Span::styled("  (Enter next / Esc cancel)", base().fg(DIM)),
+                ])
+            }
+        };
+        f.render_widget(Paragraph::new(line).style(base()), area);
+        return;
+    }
+
     // Rename input takes top priority
     if let Some(rs) = &app.rename {
         let line = Line::from(vec![
@@ -843,6 +1008,9 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 format!(
                     "Confirm reset card for '{alias}' expiring {expires_at}: y to use, any other key cancels"
                 )
+            }
+            super::app::ConfirmAction::RemoveProvider(alias) => {
+                format!("Remove provider '{alias}'? (y/n)")
             }
         };
         let line = Line::from(Span::styled(
@@ -885,6 +1053,28 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" for batch \u{2502} ", base().fg(DIM)),
             Span::styled("esc", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
             Span::styled(" to clear", base().fg(DIM)),
+        ]);
+        f.render_widget(Paragraph::new(line).style(base()), area);
+    } else if app.active_tab == Tab::Providers {
+        let key =
+            |k: &'static str| Span::styled(k, base().fg(C_YELLOW).add_modifier(Modifier::BOLD));
+        let dim = |t: &'static str| Span::styled(t, base().fg(DIM));
+        let line = Line::from(vec![
+            dim(" "),
+            key("j"),
+            dim("/"),
+            key("k"),
+            dim(" nav \u{2502} "),
+            key("a"),
+            dim(" add \u{2502} "),
+            key("d"),
+            dim(" remove \u{2502} "),
+            key("Tab"),
+            dim(" accounts \u{2502} "),
+            key("h"),
+            dim(" help \u{2502} "),
+            key("q"),
+            dim(" quit"),
         ]);
         f.render_widget(Paragraph::new(line).style(base()), area);
     } else {
@@ -1230,10 +1420,14 @@ fn format_auto_refresh_remaining(secs: u64) -> String {
 fn status_bar_height(app: &App, width: u16) -> usize {
     if app.status_msg.is_some()
         || app.rename.is_some()
+        || app.provider_add.is_some()
         || app.confirm.is_some()
         || app.search_active
         || !app.marked.is_empty()
     {
+        return 1;
+    }
+    if app.active_tab == Tab::Providers {
         return 1;
     }
     build_help_lines(width as usize).len()
@@ -1270,6 +1464,42 @@ mod tests {
     fn status_message_color_distinguishes_errors_from_information() {
         assert_eq!(status_message_color(false), C_CYAN);
         assert_eq!(status_message_color(true), C_RED);
+    }
+
+    #[test]
+    fn providers_tab_lists_custom_providers_without_the_key() {
+        let mut app = App::new();
+        app.active_tab = crate::tui::app::Tab::Providers;
+        app.providers.push(crate::provider::ProviderProfile {
+            alias: "openrouter".into(),
+            provider_id: "openrouter".into(),
+            name: "OpenRouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            env_key: "CODEX_SWITCH_OPENROUTER_KEY".into(),
+            model: "openai/gpt-5.3-codex".into(),
+            wire_api: "responses".into(),
+            codex_config: Vec::new(),
+            api_key: "sk-secret-1234".into(),
+        });
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+
+        let joined = (0..30)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("Custom providers"),
+            "the panel header must render:\n{joined}"
+        );
+        assert!(joined.contains("openrouter"));
+        assert!(joined.contains("https://openrouter.ai/api/v1"));
+        assert!(
+            !joined.contains("sk-secret-1234"),
+            "the API key must never render in the panel"
+        );
     }
 
     #[test]

@@ -366,6 +366,7 @@ fn wiki_navigation_is_task_oriented_and_progressive() {
         "FAQ.md",
         "Feature-Guide.md",
         "Getting-Started.md",
+        "Providers.md",
         "Troubleshooting.md",
         "Updating.md",
     ] {

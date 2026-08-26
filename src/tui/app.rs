@@ -157,6 +157,58 @@ pub enum ConfirmAction {
         credit_id: String,
         expires_at: String,
     },
+    RemoveProvider(String),
+}
+
+/// Reasoning-effort presets offered by the add-provider wizard. Index 0 skips
+/// the override entirely; the rest are saved as `model_reasoning_effort=<v>`.
+/// These are convenience presets only — the CLI `--set`/`--reasoning` remain the
+/// escape hatch for any other value Codex accepts (e.g. `ultra`).
+pub const REASONING_CHOICES: [&str; 7] =
+    ["(skip)", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Steps of the Providers-tab "add provider" wizard, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderAddStep {
+    Alias,
+    BaseUrl,
+    Model,
+    Reasoning,
+    WebSearch,
+    ApiKey,
+}
+
+impl ProviderAddStep {
+    /// Short prompt shown in the status bar for the current step.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            ProviderAddStep::Alias => "alias",
+            ProviderAddStep::BaseUrl => "base URL",
+            ProviderAddStep::Model => "model",
+            ProviderAddStep::Reasoning => "reasoning",
+            ProviderAddStep::WebSearch => "web_search",
+            ProviderAddStep::ApiKey => "API key",
+        }
+    }
+
+    /// The API-key step is masked in the UI so the secret is never shown.
+    pub fn is_secret(self) -> bool {
+        matches!(self, ProviderAddStep::ApiKey)
+    }
+}
+
+/// In-progress state of the multi-step add-provider wizard.
+pub struct ProviderAddState {
+    pub step: ProviderAddStep,
+    pub input: String,
+    pub cursor: usize,
+    pub alias: String,
+    pub base_url: String,
+    pub model: String,
+    /// Index into [`REASONING_CHOICES`]; 0 means "skip" (no override).
+    pub reasoning_idx: usize,
+    /// Whether the wizard will save `web_search=disabled`.
+    pub no_web_search: bool,
 }
 
 pub struct RenameState {
@@ -177,8 +229,27 @@ type ResetCardRefreshResult = (
     Result<(Option<u64>, Vec<crate::usage::ResetCredit>), String>,
 );
 
+/// Which top-level TUI tab is active. Accounts (ChatGPT OAuth) and Providers
+/// (third-party API + key) are isolated so their very different semantics
+/// (quota/scoring vs base_url/key) and key bindings never mix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Accounts,
+    Providers,
+}
+
 pub struct App {
     pub accounts: Vec<AccountEntry>,
+    /// Custom API provider profiles (OpenRouter, etc.), shown on the Providers
+    /// tab; they carry no OAuth/usage and never join `accounts`.
+    pub providers: Vec<crate::provider::ProviderProfile>,
+    /// Selected row within the Providers tab.
+    pub provider_selected: usize,
+    /// Active add-provider wizard, if the user is entering one.
+    pub provider_add: Option<ProviderAddState>,
+    /// Active top-level tab.
+    pub active_tab: Tab,
     pub selected: usize,
     pub search: Option<SearchState>,
     pub search_active: bool,
@@ -243,6 +314,10 @@ impl App {
         let cfg = crate::config::get();
         App {
             accounts: vec![],
+            providers: vec![],
+            provider_selected: 0,
+            provider_add: None,
+            active_tab: Tab::default(),
             selected: 0,
             search: None,
             search_active: false,
@@ -581,6 +656,246 @@ impl App {
         self.menu = Some(super::menu::MenuState::add());
     }
 
+    /// Switch between the Accounts and Providers tabs.
+    pub fn toggle_tab(&mut self) {
+        self.active_tab = match self.active_tab {
+            Tab::Accounts => Tab::Providers,
+            Tab::Providers => Tab::Accounts,
+        };
+    }
+
+    pub fn provider_select_next(&mut self) {
+        if !self.providers.is_empty() && self.provider_selected + 1 < self.providers.len() {
+            self.provider_selected += 1;
+        }
+    }
+
+    pub fn provider_select_prev(&mut self) {
+        if self.provider_selected > 0 {
+            self.provider_selected -= 1;
+        }
+    }
+
+    /// Open the multi-step add-provider wizard (Providers tab, `a`).
+    pub fn open_provider_add(&mut self) {
+        self.provider_add = Some(ProviderAddState {
+            step: ProviderAddStep::Alias,
+            input: String::new(),
+            cursor: 0,
+            alias: String::new(),
+            base_url: String::new(),
+            model: String::new(),
+            reasoning_idx: 0,
+            no_web_search: false,
+        });
+    }
+
+    /// Ask to remove the selected provider (Providers tab, `d`).
+    pub fn request_remove_provider(&mut self) {
+        match self.providers.get(self.provider_selected) {
+            Some(p) => self.confirm = Some(ConfirmAction::RemoveProvider(p.alias.clone())),
+            None => self.set_status_error("No provider selected".to_string(), 3),
+        }
+    }
+
+    /// Editing keys for the add-provider wizard (raw, case-sensitive input).
+    pub fn handle_provider_add_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                self.provider_add = None;
+                return;
+            }
+            KeyCode::Enter => {
+                self.provider_add_commit_step();
+                return;
+            }
+            _ => {}
+        }
+        let Some(state) = self.provider_add.as_mut() else {
+            return;
+        };
+        // Choice steps navigate options rather than editing a text buffer.
+        match state.step {
+            ProviderAddStep::Reasoning => {
+                match code {
+                    KeyCode::Up | KeyCode::Left if state.reasoning_idx > 0 => {
+                        state.reasoning_idx -= 1;
+                    }
+                    KeyCode::Down | KeyCode::Right
+                        if state.reasoning_idx + 1 < REASONING_CHOICES.len() =>
+                    {
+                        state.reasoning_idx += 1;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            ProviderAddStep::WebSearch => {
+                if matches!(
+                    code,
+                    KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Left
+                        | KeyCode::Right
+                        | KeyCode::Char(' ')
+                ) {
+                    state.no_web_search = !state.no_web_search;
+                }
+                return;
+            }
+            _ => {}
+        }
+        match code {
+            KeyCode::Backspace if state.cursor > 0 => {
+                state.cursor -= 1;
+                let byte_pos = char_to_byte(&state.input, state.cursor);
+                state.input.remove(byte_pos);
+            }
+            KeyCode::Delete => {
+                let char_count = state.input.chars().count();
+                if state.cursor < char_count {
+                    let byte_pos = char_to_byte(&state.input, state.cursor);
+                    state.input.remove(byte_pos);
+                }
+            }
+            KeyCode::Left if state.cursor > 0 => state.cursor -= 1,
+            KeyCode::Right => {
+                let char_count = state.input.chars().count();
+                if state.cursor < char_count {
+                    state.cursor += 1;
+                }
+            }
+            KeyCode::Home => state.cursor = 0,
+            KeyCode::End => state.cursor = state.input.chars().count(),
+            KeyCode::Char(c) => {
+                let byte_pos = char_to_byte(&state.input, state.cursor);
+                state.input.insert(byte_pos, c);
+                state.cursor += 1;
+            }
+            _ => {}
+        }
+    }
+
+    /// Validate and advance the current wizard step; finalize on the last one.
+    fn provider_add_commit_step(&mut self) {
+        let (step, value) = {
+            let Some(state) = self.provider_add.as_ref() else {
+                return;
+            };
+            (state.step, state.input.trim().to_string())
+        };
+        match step {
+            ProviderAddStep::Alias => {
+                if value.is_empty() {
+                    self.set_status_error("Alias cannot be empty".to_string(), 3);
+                    return;
+                }
+                if let Err(err) = validate_alias(&value) {
+                    self.set_status_error(format!("Invalid alias: {err}"), 3);
+                    return;
+                }
+                if crate::provider::exists(&value) || self.accounts.iter().any(|a| a.alias == value)
+                {
+                    self.set_status_error(format!("'{value}' already exists"), 3);
+                    return;
+                }
+                if let Some(state) = self.provider_add.as_mut() {
+                    state.alias = value;
+                    state.step = ProviderAddStep::BaseUrl;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::BaseUrl => {
+                if !(value.starts_with("http://") || value.starts_with("https://")) {
+                    self.set_status_error(
+                        "base URL must start with http:// or https://".to_string(),
+                        3,
+                    );
+                    return;
+                }
+                if let Some(state) = self.provider_add.as_mut() {
+                    state.base_url = value;
+                    state.step = ProviderAddStep::Model;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::Model => {
+                if value.is_empty() {
+                    self.set_status_error("Model cannot be empty".to_string(), 3);
+                    return;
+                }
+                if let Some(state) = self.provider_add.as_mut() {
+                    state.model = value;
+                    state.step = ProviderAddStep::Reasoning;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::Reasoning => {
+                if let Some(state) = self.provider_add.as_mut() {
+                    state.step = ProviderAddStep::WebSearch;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::WebSearch => {
+                if let Some(state) = self.provider_add.as_mut() {
+                    state.step = ProviderAddStep::ApiKey;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::ApiKey => {
+                if value.is_empty() {
+                    self.set_status_error("API key cannot be empty".to_string(), 3);
+                    return;
+                }
+                let Some(state) = self.provider_add.take() else {
+                    return;
+                };
+                let mut codex_config = Vec::new();
+                if state.reasoning_idx > 0 {
+                    codex_config.push(format!(
+                        "model_reasoning_effort={}",
+                        REASONING_CHOICES[state.reasoning_idx]
+                    ));
+                }
+                if state.no_web_search {
+                    codex_config.push("web_search=disabled".to_string());
+                }
+                let profile = crate::provider::ProviderProfile {
+                    provider_id: crate::provider::sanitize_provider_id(&state.alias),
+                    name: state.alias.clone(),
+                    base_url: state.base_url,
+                    env_key: crate::provider::derive_env_key(&state.alias),
+                    model: state.model,
+                    wire_api: "responses".to_string(),
+                    codex_config,
+                    api_key: value,
+                    alias: state.alias.clone(),
+                };
+                match profile
+                    .validate()
+                    .and_then(|()| crate::provider::save(&profile))
+                {
+                    Ok(()) => {
+                        self.set_status(format!("Added provider '{}'", profile.alias), 4);
+                        self.active_tab = Tab::Providers;
+                        self.load_profiles();
+                        if let Some(idx) =
+                            self.providers.iter().position(|p| p.alias == profile.alias)
+                        {
+                            self.provider_selected = idx;
+                        }
+                    }
+                    Err(e) => self.set_status_error(format!("Add provider failed: {e}"), 6),
+                }
+            }
+        }
+    }
+
     pub fn open_relogin_flow_menu(&mut self, alias: String, email: Option<String>) {
         self.menu = Some(super::menu::MenuState::relogin_flow(alias, email));
     }
@@ -690,6 +1005,14 @@ impl App {
                 })
             })
             .collect();
+        self.providers = crate::provider::list_providers()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|alias| crate::provider::load(&alias).ok())
+            .collect();
+        if self.provider_selected >= self.providers.len() {
+            self.provider_selected = self.providers.len().saturating_sub(1);
+        }
         self.marked
             .retain(|alias| self.accounts.iter().any(|account| &account.alias == alias));
         // A reload can follow credential replacement for an existing alias.
@@ -1418,6 +1741,13 @@ impl App {
                 }
                 Err(e) => self.set_status_error(format!("Delete failed: {e}"), 5),
             },
+            ConfirmAction::RemoveProvider(alias) => match crate::provider::remove(&alias) {
+                Ok(()) => {
+                    self.set_status(format!("Removed provider {alias}"), 3);
+                    self.load_profiles();
+                }
+                Err(e) => self.set_status_error(format!("Remove provider failed: {e}"), 5),
+            },
             ConfirmAction::BatchDelete(aliases) => {
                 let mut ok = 0usize;
                 let mut errors: Vec<String> = Vec::new();
@@ -1884,12 +2214,19 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 app.handle_search_key(key.code);
                 continue;
             }
+            // The add-provider wizard needs raw, case-sensitive keystrokes
+            // (aliases, URLs, and keys are all case-sensitive).
+            if app.provider_add.is_some() {
+                app.handle_provider_add_key(key.code);
+                continue;
+            }
 
             // Capital 'W' is a distinct global binding (toggle auto-warmup),
             // separate from menu 'w' (per-account warmup). Detect it before
             // case normalization so it survives the lowercase dispatch below.
             // Only meaningful in the main view (no popup/menu/confirm overlay).
             if matches!(key.code, KeyCode::Char('W'))
+                && app.active_tab == Tab::Accounts
                 && app.help_popup.is_none()
                 && app.menu.is_none()
                 && app.confirm.is_none()
@@ -1927,47 +2264,61 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
 
             match code {
                 KeyCode::Char('q') => break,
-                KeyCode::Esc => {
-                    if app.search.is_some() {
-                        app.search = None;
-                        app.update_view();
-                    } else if !app.marked.is_empty() {
-                        app.clear_marks();
-                    }
-                }
-                KeyCode::Down | KeyCode::Char('j') if app.selected + 1 < app.view_indices.len() => {
-                    app.selected += 1;
-                }
-                KeyCode::Up | KeyCode::Char('k') if app.selected > 0 => {
-                    app.selected -= 1;
-                }
-                KeyCode::Enter => {
-                    if app.marked.is_empty() {
-                        app.open_account_menu();
-                    } else {
-                        app.open_batch_menu();
-                    }
-                }
-                KeyCode::Char('a') => app.open_add_menu(),
-                KeyCode::Char('r') => app.refresh(Refresh::Forced),
-                KeyCode::Char('t') => app.toggle_auto_refresh(),
-                KeyCode::Char('i') => app.toggle_detail_panel(),
-                KeyCode::Char('s') => app.cycle_sort(),
                 KeyCode::Char('h') => app.open_help(),
-                KeyCode::Char(' ') => app.toggle_mark(),
-                KeyCode::Char('/') => {
-                    if let Some(search) = &mut app.search {
-                        search.cursor = search.query.chars().count();
-                    } else {
-                        app.search = Some(SearchState {
-                            query: String::new(),
-                            cursor: 0,
-                        });
-                        app.update_view();
-                    }
-                    app.search_active = true;
-                }
-                _ => {}
+                KeyCode::Tab | KeyCode::BackTab => app.toggle_tab(),
+                _ => match app.active_tab {
+                    Tab::Accounts => match code {
+                        KeyCode::Esc => {
+                            if app.search.is_some() {
+                                app.search = None;
+                                app.update_view();
+                            } else if !app.marked.is_empty() {
+                                app.clear_marks();
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j')
+                            if app.selected + 1 < app.view_indices.len() =>
+                        {
+                            app.selected += 1;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') if app.selected > 0 => {
+                            app.selected -= 1;
+                        }
+                        KeyCode::Enter => {
+                            if app.marked.is_empty() {
+                                app.open_account_menu();
+                            } else {
+                                app.open_batch_menu();
+                            }
+                        }
+                        KeyCode::Char('a') => app.open_add_menu(),
+                        KeyCode::Char('r') => app.refresh(Refresh::Forced),
+                        KeyCode::Char('t') => app.toggle_auto_refresh(),
+                        KeyCode::Char('i') => app.toggle_detail_panel(),
+                        KeyCode::Char('s') => app.cycle_sort(),
+                        KeyCode::Char(' ') => app.toggle_mark(),
+                        KeyCode::Char('/') => {
+                            if let Some(search) = &mut app.search {
+                                search.cursor = search.query.chars().count();
+                            } else {
+                                app.search = Some(SearchState {
+                                    query: String::new(),
+                                    cursor: 0,
+                                });
+                                app.update_view();
+                            }
+                            app.search_active = true;
+                        }
+                        _ => {}
+                    },
+                    Tab::Providers => match code {
+                        KeyCode::Down | KeyCode::Char('j') => app.provider_select_next(),
+                        KeyCode::Up | KeyCode::Char('k') => app.provider_select_prev(),
+                        KeyCode::Char('a') => app.open_provider_add(),
+                        KeyCode::Char('d') => app.request_remove_provider(),
+                        _ => {}
+                    },
+                },
             }
         }
     }
@@ -2340,11 +2691,180 @@ mod tests {
         finish_login_or_cancel, finish_refresh_then_commit, refresh_fetches_loaded_usage,
         refresh_forces_negative_caches, reset_card_failure_from_outcome, retained_usage_by_alias,
     };
+    use super::{ConfirmAction, ProviderAddStep, Tab};
     use crate::{
         jwt::{AccountInfo, OrgInfo},
         usage::{Refresh, ResetCredit, UsageInfo},
         warmup::ModelEntry,
     };
+    use crossterm::event::KeyCode;
+
+    /// Isolate `CODEX_SWITCH_HOME`/`CODEX_HOME` for tests that touch provider
+    /// storage. Serialized via the shared env lock so it can't race sibling
+    /// tests that also relocate these variables.
+    struct EnvHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        prev_cs: Option<std::ffi::OsString>,
+        prev_ch: Option<std::ffi::OsString>,
+    }
+
+    impl EnvHome {
+        fn new() -> Self {
+            let lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let prev_cs = std::env::var_os("CODEX_SWITCH_HOME");
+            let prev_ch = std::env::var_os("CODEX_HOME");
+            unsafe {
+                std::env::set_var("CODEX_SWITCH_HOME", dir.path());
+                std::env::set_var("CODEX_HOME", dir.path().join("codex"));
+            }
+            Self {
+                _lock: lock,
+                _dir: dir,
+                prev_cs,
+                prev_ch,
+            }
+        }
+    }
+
+    impl Drop for EnvHome {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev_cs {
+                    Some(v) => std::env::set_var("CODEX_SWITCH_HOME", v),
+                    None => std::env::remove_var("CODEX_SWITCH_HOME"),
+                }
+                match &self.prev_ch {
+                    Some(v) => std::env::set_var("CODEX_HOME", v),
+                    None => std::env::remove_var("CODEX_HOME"),
+                }
+            }
+        }
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_provider_add_key(KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn provider_add_wizard_collects_fields_and_saves() {
+        let _home = EnvHome::new();
+        let mut app = App::new();
+        app.open_provider_add();
+
+        type_str(&mut app, "myrouter");
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "https://openrouter.ai/api/v1");
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "openai/gpt-5.3-codex");
+        app.handle_provider_add_key(KeyCode::Enter);
+        // Reasoning step: leave on default "(skip)"; web_search step: leave default.
+        app.handle_provider_add_key(KeyCode::Enter);
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "sk-secret-xyz");
+        app.handle_provider_add_key(KeyCode::Enter);
+
+        assert!(
+            app.provider_add.is_none(),
+            "wizard should close after the final step"
+        );
+        let p = crate::provider::load("myrouter").expect("provider must be saved");
+        assert_eq!(p.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(p.model, "openai/gpt-5.3-codex");
+        assert_eq!(p.env_key, "CODEX_SWITCH_MYROUTER_KEY");
+        assert_eq!(p.api_key, "sk-secret-xyz");
+        assert_eq!(p.wire_api, "responses");
+        assert!(
+            p.codex_config.is_empty(),
+            "skipping both choice steps saves no overrides"
+        );
+        assert_eq!(app.active_tab, Tab::Providers);
+        assert!(app.providers.iter().any(|x| x.alias == "myrouter"));
+    }
+
+    #[test]
+    fn provider_add_wizard_saves_reasoning_and_web_search_choices() {
+        let _home = EnvHome::new();
+        let mut app = App::new();
+        app.open_provider_add();
+
+        type_str(&mut app, "thinker");
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "https://openrouter.ai/api/v1");
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "deepseek/deepseek-r1-0528");
+        app.handle_provider_add_key(KeyCode::Enter);
+        // Reasoning step: move from "(skip)" to "medium" (index 3).
+        app.handle_provider_add_key(KeyCode::Right);
+        app.handle_provider_add_key(KeyCode::Right);
+        app.handle_provider_add_key(KeyCode::Right);
+        app.handle_provider_add_key(KeyCode::Enter);
+        // web_search step: toggle to disabled.
+        app.handle_provider_add_key(KeyCode::Char(' '));
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "sk-secret-xyz");
+        app.handle_provider_add_key(KeyCode::Enter);
+
+        let p = crate::provider::load("thinker").expect("provider must be saved");
+        assert_eq!(
+            p.codex_config,
+            vec![
+                "model_reasoning_effort=medium".to_string(),
+                "web_search=disabled".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_add_wizard_stays_on_step_for_a_bad_base_url() {
+        let _home = EnvHome::new();
+        let mut app = App::new();
+        app.open_provider_add();
+        type_str(&mut app, "r");
+        app.handle_provider_add_key(KeyCode::Enter); // alias accepted -> base URL step
+        type_str(&mut app, "ftp://nope");
+        app.handle_provider_add_key(KeyCode::Enter); // rejected
+
+        let state = app.provider_add.as_ref().expect("wizard stays open");
+        assert_eq!(state.step, ProviderAddStep::BaseUrl);
+    }
+
+    #[test]
+    fn request_and_confirm_remove_provider_deletes_it() {
+        let _home = EnvHome::new();
+        let profile = crate::provider::ProviderProfile {
+            alias: "gone".into(),
+            provider_id: "gone".into(),
+            name: "Gone".into(),
+            base_url: "https://example.com/v1".into(),
+            env_key: "CODEX_SWITCH_GONE_KEY".into(),
+            model: "m".into(),
+            wire_api: "responses".into(),
+            codex_config: Vec::new(),
+            api_key: "k".into(),
+        };
+        crate::provider::save(&profile).unwrap();
+
+        let mut app = App::new();
+        app.load_profiles();
+        app.active_tab = Tab::Providers;
+        app.provider_selected = 0;
+        assert!(app.providers.iter().any(|x| x.alias == "gone"));
+
+        app.request_remove_provider();
+        assert!(
+            matches!(&app.confirm, Some(ConfirmAction::RemoveProvider(a)) if a == "gone"),
+            "remove must ask for confirmation first"
+        );
+        app.confirm_action();
+        assert!(!crate::provider::exists("gone"));
+        assert!(app.providers.iter().all(|x| x.alias != "gone"));
+    }
 
     #[test]
     fn cancelled_batch_counts_the_current_account_as_attempted() {

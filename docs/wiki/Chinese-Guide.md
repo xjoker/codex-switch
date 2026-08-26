@@ -43,6 +43,7 @@ codex-switch tui
 
 - [开始使用](Getting-Started) — 安装、登录和首次启动
 - [功能指南](Feature-Guide) — 主要工作流与安全边界
+- [自定义 API 提供方](Providers) — OpenRouter 等第三方接口（英文页）
 - [命令参考](Command-Reference) — 全部命令、全局选项和 TUI 快捷键
 - [配置](Configuration) — 路径、代理、daemon 与 launch 设置
 - [更新](Updating) — 更新方式、通道切换和旧版本迁移

@@ -1,4 +1,5 @@
 use crate::output::{print_json, user_println};
+use crate::provider::{self, ProviderProfile};
 use crate::signals::ShutdownListener;
 use crate::{auth, config, profile};
 use anyhow::{Context, Result};
@@ -37,6 +38,17 @@ pub(crate) async fn launch_cmd(
 ) -> Result<()> {
     use std::io::IsTerminal;
 
+    // A custom API provider profile takes a separate, simpler path: it has no
+    // OAuth auth.json to stage, so it never touches ~/.codex/auth.json. It is
+    // translated into `codex -c …` overrides with the key injected via the
+    // environment. Auto-select (no alias) stays ChatGPT-only.
+    if let Some(alias) = alias
+        && provider::exists(alias)
+    {
+        let profile = provider::load(alias)?;
+        return launch_provider(profile, args, json);
+    }
+
     let mut revival_hint = None;
     let target_alias = match alias {
         Some(alias) => {
@@ -65,15 +77,7 @@ pub(crate) async fn launch_cmd(
         user_println(&super::profile::revival_hint_message(hint));
     }
 
-    match std::process::Command::new("codex")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        Ok(_) => {}
-        Err(_) => anyhow::bail!("codex not found in PATH. Install: npm install -g @openai/codex"),
-    }
+    ensure_codex_available()?;
 
     let codex_auth = auth::codex_auth_path()?;
     // Unique per-invocation backup name (PID + timestamp): prevents two
@@ -191,14 +195,7 @@ pub(crate) async fn launch_cmd(
     // Wait for codex to exit
     let status = child.wait().context("waiting for codex")?;
 
-    // Compute exit code: prefer code(), fall back to 128+signal on Unix
-    #[cfg(unix)]
-    let exit_code = status.code().unwrap_or_else(|| {
-        use std::os::unix::process::ExitStatusExt;
-        status.signal().map(|s| 128 + s).unwrap_or(1)
-    });
-    #[cfg(not(unix))]
-    let exit_code = status.code().unwrap_or(1);
+    let exit_code = child_exit_code(&status);
 
     if json {
         let mut payload = serde_json::json!({
@@ -220,6 +217,86 @@ pub(crate) async fn launch_cmd(
         std::process::exit(exit_code);
     }
 
+    Ok(())
+}
+
+/// Verify the `codex` binary is reachable before we stage anything or spawn it.
+fn ensure_codex_available() -> Result<()> {
+    match std::process::Command::new("codex")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(_) => Ok(()),
+        Err(_) => anyhow::bail!("codex not found in PATH. Install: npm install -g @openai/codex"),
+    }
+}
+
+/// Codex's exit code, mapping a Unix signal death to `128 + signal`.
+fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        status.code().unwrap_or_else(|| {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal().map(|s| 128 + s).unwrap_or(1)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        status.code().unwrap_or(1)
+    }
+}
+
+/// Launch Codex against a custom API provider profile.
+///
+/// Unlike the ChatGPT path this stages nothing: the provider is applied as
+/// `codex -c …` overrides (which layer over the user's base config, preserving
+/// MCP servers and everything else) and the API key is injected into the child
+/// process environment under the profile's `env_key`. Nothing is written to
+/// `~/.codex`, so there is no backup/restore window to guard.
+fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<()> {
+    ensure_codex_available()?;
+
+    let (env_name, env_value) = profile.launch_env();
+    let mut codex_args = profile.codex_config_args();
+    codex_args.extend(args);
+
+    if !json {
+        user_println(&format!(
+            "Launching codex with provider '{}' ({} / {})...",
+            profile.alias, profile.name, profile.model
+        ));
+    }
+
+    let mut child = std::process::Command::new("codex")
+        .args(&codex_args)
+        .env(env_name, env_value)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("Failed to start codex")?;
+
+    let status = child.wait().context("waiting for codex")?;
+    let exit_code = child_exit_code(&status);
+
+    if json {
+        print_json(&serde_json::json!({
+            "ok": status.success(),
+            "alias": profile.alias,
+            "action": "launched",
+            "provider": profile.provider_id,
+            "model": profile.model,
+            "exit_code": exit_code,
+        }));
+    } else {
+        user_println("codex exited");
+    }
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
 

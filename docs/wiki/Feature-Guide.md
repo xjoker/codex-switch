@@ -45,6 +45,8 @@ The usage model includes the main 5-hour and 7-day windows, additional model-spe
 
 Normal reads refresh only stale entries. Use `list -f` or the TUI refresh action when a fresh network read is required.
 
+The TUI has two tabs: **Accounts** (ChatGPT OAuth, quota, scoring) and **Providers** (custom API endpoints). `Tab` / `Shift+Tab` switches between them. Account keys (`Enter`, `W`, mark, filter) apply only on Accounts.
+
 The TUI account detail page is a single scrollable column with identity and organization labels, token expiry times in the local timezone, every quota pool with a pace marker, available reset cards, and the models the account may use. Model names and reasoning-effort capabilities are discovered from the authenticated service at runtime, not hardcoded. The full shortcut list is in the [command reference](Command-Reference#tui-shortcuts) and under `h` inside the TUI.
 
 ## Select an account
@@ -80,6 +82,21 @@ codex-switch launch -- --full-auto
 ```
 
 The launch lock serializes overlapping launch sessions. The restore delay is configurable (`launch.restore_delay_secs`) because Codex does not expose an authentication-read handshake.
+
+## Launch Codex with a custom API provider
+
+A provider profile is a third-party API endpoint plus a bearer key, stored under `$CODEX_SWITCH_HOME/providers/` rather than as a ChatGPT `auth.json`. Typical case: OpenRouter.
+
+```bash
+codex-switch provider add openrouter \
+  --base-url https://openrouter.ai/api/v1 \
+  --model openai/gpt-5.3-codex
+codex-switch launch openrouter
+```
+
+`launch <provider>` does not swap `$CODEX_HOME/auth.json`. It starts Codex with `-c` overrides that define and select the provider, and injects the key into the child environment only. MCP servers and other settings in `$CODEX_HOME/config.toml` stay in effect. Auto-select (`launch` with no alias) and `use` remain ChatGPT-only.
+
+Some models need extra Codex request settings: models that reject the built-in `web_search` server tool need `-c web_search=disabled`, and thinking models need `-c model_reasoning_effort=medium`. The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, model-specific settings, TUI add/remove, and the security contract are in [Custom API providers](Providers).
 
 ## Recover exhausted accounts
 
@@ -131,10 +148,11 @@ codex-switch self-update
 
 Most non-interactive commands support `--json` or `--json-pretty`. Structured output stays on stdout; progress and diagnostic messages use stderr. Commands that can consume a reset card or delete a profile require explicit non-interactive confirmation.
 
-Never publish profile files, `auth.json`, unredacted debug output, proxy credentials, account IDs, email addresses, or workspace names.
+Never publish profile files, `auth.json`, provider API keys, unredacted debug output, proxy credentials, account IDs, email addresses, or workspace names.
 
 ## Next steps
 
 - Need an exact command, flag, or TUI shortcut? Open the [Command reference](Command-Reference).
+- Launching Codex against OpenRouter or another custom API? Open [Custom API providers](Providers).
 - Tune paths, proxy, daemon, and launch behavior in [Configuration](Configuration).
 - Something failed? Start with [Troubleshooting](Troubleshooting).

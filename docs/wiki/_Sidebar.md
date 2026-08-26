@@ -7,6 +7,7 @@
 ## Use codex-switch
 
 - [Feature guide](Feature-Guide)
+- [Custom API providers](Providers)
 - [Command reference](Command-Reference)
 - [Configuration](Configuration)
 - [Updating](Updating)
