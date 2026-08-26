@@ -60,7 +60,7 @@ codex-switch self-update --check
 
 ## Provider
 
-`provider add` required flags are `--base-url` and `--model`. Optional `--name` defaults to the alias; `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). `--set KEY=VALUE` (repeatable) saves an extra `codex -c` override applied on every launch — passed to Codex verbatim, so only the `KEY=VALUE` shape is checked. `--api-key-stdin` is required when there is no interactive terminal.
+`provider add` required flags are `--base-url` and `--model`. Optional `--name` defaults to the alias; `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). `--reasoning EFFORT` saves `model_reasoning_effort=EFFORT` (for thinking models) and `--no-web-search` saves `web_search=disabled`; `--set KEY=VALUE` (repeatable) saves any other `codex -c` override. All are applied on every launch and passed to Codex verbatim (only the `KEY=VALUE` shape is checked); an explicit `--set` wins over a convenience flag for the same key. `--api-key-stdin` is required when there is no interactive terminal.
 
 The alias must not collide with a ChatGPT profile, another provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`. Removal is immediate and is not archived under `deleted-profiles/`.
 
