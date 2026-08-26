@@ -177,11 +177,25 @@ type ResetCardRefreshResult = (
     Result<(Option<u64>, Vec<crate::usage::ResetCredit>), String>,
 );
 
+/// Which top-level TUI tab is active. Accounts (ChatGPT OAuth) and Providers
+/// (third-party API + key) are isolated so their very different semantics
+/// (quota/scoring vs base_url/key) and key bindings never mix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Accounts,
+    Providers,
+}
+
 pub struct App {
     pub accounts: Vec<AccountEntry>,
-    /// Custom API provider profiles (OpenRouter, etc.). Shown in a separate
-    /// read-only panel; they carry no OAuth/usage and never join `accounts`.
+    /// Custom API provider profiles (OpenRouter, etc.), shown on the Providers
+    /// tab; they carry no OAuth/usage and never join `accounts`.
     pub providers: Vec<crate::provider::ProviderProfile>,
+    /// Selected row within the Providers tab.
+    pub provider_selected: usize,
+    /// Active top-level tab.
+    pub active_tab: Tab,
     pub selected: usize,
     pub search: Option<SearchState>,
     pub search_active: bool,
@@ -247,6 +261,8 @@ impl App {
         App {
             accounts: vec![],
             providers: vec![],
+            provider_selected: 0,
+            active_tab: Tab::default(),
             selected: 0,
             search: None,
             search_active: false,
@@ -590,6 +606,26 @@ impl App {
         self.menu = Some(super::menu::MenuState::add());
     }
 
+    /// Switch between the Accounts and Providers tabs.
+    pub fn toggle_tab(&mut self) {
+        self.active_tab = match self.active_tab {
+            Tab::Accounts => Tab::Providers,
+            Tab::Providers => Tab::Accounts,
+        };
+    }
+
+    pub fn provider_select_next(&mut self) {
+        if !self.providers.is_empty() && self.provider_selected + 1 < self.providers.len() {
+            self.provider_selected += 1;
+        }
+    }
+
+    pub fn provider_select_prev(&mut self) {
+        if self.provider_selected > 0 {
+            self.provider_selected -= 1;
+        }
+    }
+
     pub fn open_relogin_flow_menu(&mut self, alias: String, email: Option<String>) {
         self.menu = Some(super::menu::MenuState::relogin_flow(alias, email));
     }
@@ -704,6 +740,9 @@ impl App {
             .into_iter()
             .filter_map(|alias| crate::provider::load(&alias).ok())
             .collect();
+        if self.provider_selected >= self.providers.len() {
+            self.provider_selected = self.providers.len().saturating_sub(1);
+        }
         self.marked
             .retain(|alias| self.accounts.iter().any(|account| &account.alias == alias));
         // A reload can follow credential replacement for an existing alias.
@@ -1904,6 +1943,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
             // case normalization so it survives the lowercase dispatch below.
             // Only meaningful in the main view (no popup/menu/confirm overlay).
             if matches!(key.code, KeyCode::Char('W'))
+                && app.active_tab == Tab::Accounts
                 && app.help_popup.is_none()
                 && app.menu.is_none()
                 && app.confirm.is_none()
@@ -1941,47 +1981,59 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
 
             match code {
                 KeyCode::Char('q') => break,
-                KeyCode::Esc => {
-                    if app.search.is_some() {
-                        app.search = None;
-                        app.update_view();
-                    } else if !app.marked.is_empty() {
-                        app.clear_marks();
-                    }
-                }
-                KeyCode::Down | KeyCode::Char('j') if app.selected + 1 < app.view_indices.len() => {
-                    app.selected += 1;
-                }
-                KeyCode::Up | KeyCode::Char('k') if app.selected > 0 => {
-                    app.selected -= 1;
-                }
-                KeyCode::Enter => {
-                    if app.marked.is_empty() {
-                        app.open_account_menu();
-                    } else {
-                        app.open_batch_menu();
-                    }
-                }
-                KeyCode::Char('a') => app.open_add_menu(),
-                KeyCode::Char('r') => app.refresh(Refresh::Forced),
-                KeyCode::Char('t') => app.toggle_auto_refresh(),
-                KeyCode::Char('i') => app.toggle_detail_panel(),
-                KeyCode::Char('s') => app.cycle_sort(),
                 KeyCode::Char('h') => app.open_help(),
-                KeyCode::Char(' ') => app.toggle_mark(),
-                KeyCode::Char('/') => {
-                    if let Some(search) = &mut app.search {
-                        search.cursor = search.query.chars().count();
-                    } else {
-                        app.search = Some(SearchState {
-                            query: String::new(),
-                            cursor: 0,
-                        });
-                        app.update_view();
-                    }
-                    app.search_active = true;
-                }
-                _ => {}
+                KeyCode::Tab | KeyCode::BackTab => app.toggle_tab(),
+                _ => match app.active_tab {
+                    Tab::Accounts => match code {
+                        KeyCode::Esc => {
+                            if app.search.is_some() {
+                                app.search = None;
+                                app.update_view();
+                            } else if !app.marked.is_empty() {
+                                app.clear_marks();
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j')
+                            if app.selected + 1 < app.view_indices.len() =>
+                        {
+                            app.selected += 1;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') if app.selected > 0 => {
+                            app.selected -= 1;
+                        }
+                        KeyCode::Enter => {
+                            if app.marked.is_empty() {
+                                app.open_account_menu();
+                            } else {
+                                app.open_batch_menu();
+                            }
+                        }
+                        KeyCode::Char('a') => app.open_add_menu(),
+                        KeyCode::Char('r') => app.refresh(Refresh::Forced),
+                        KeyCode::Char('t') => app.toggle_auto_refresh(),
+                        KeyCode::Char('i') => app.toggle_detail_panel(),
+                        KeyCode::Char('s') => app.cycle_sort(),
+                        KeyCode::Char(' ') => app.toggle_mark(),
+                        KeyCode::Char('/') => {
+                            if let Some(search) = &mut app.search {
+                                search.cursor = search.query.chars().count();
+                            } else {
+                                app.search = Some(SearchState {
+                                    query: String::new(),
+                                    cursor: 0,
+                                });
+                                app.update_view();
+                            }
+                            app.search_active = true;
+                        }
+                        _ => {}
+                    },
+                    Tab::Providers => match code {
+                        KeyCode::Down | KeyCode::Char('j') => app.provider_select_next(),
+                        KeyCode::Up | KeyCode::Char('k') => app.provider_select_prev(),
+                        _ => {}
+                    },
+                },
             }
         }
     }

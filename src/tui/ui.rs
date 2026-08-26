@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
 };
 
-use super::app::{App, UsageStatus};
+use super::app::{App, Tab, UsageStatus};
 use super::keymap;
 use super::popup;
 use crate::jwt::PlanKind;
@@ -47,43 +47,41 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     let status_height = status_bar_height(app, area.width);
 
-    let detail_height = if app.detail_visible {
-        detail_panel_height(app).min(
-            area.height
-                .saturating_sub(status_height as u16)
-                .saturating_sub(6),
-        )
-    } else {
-        0
-    };
-    let providers_height = if app.providers.is_empty() {
-        0
-    } else {
-        providers_panel_height(app).min(
-            area.height
-                .saturating_sub(status_height as u16)
-                .saturating_sub(detail_height)
-                .saturating_sub(6),
-        )
-    };
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(6),                       // account list
-            Constraint::Length(detail_height),        // detail panel
-            Constraint::Length(providers_height),     // custom providers panel
+            Constraint::Length(1),                    // tab bar
+            Constraint::Min(6),                       // active tab content
             Constraint::Length(status_height as u16), // status bar
         ])
         .split(area);
 
-    render_account_table(f, app, vertical[0]);
-    if app.detail_visible {
-        render_detail_panel(f, app, vertical[1]);
+    render_tab_bar(f, app, vertical[0]);
+
+    match app.active_tab {
+        Tab::Accounts => {
+            let content = vertical[1];
+            let detail_height = if app.detail_visible {
+                detail_panel_height(app).min(content.height.saturating_sub(6))
+            } else {
+                0
+            };
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(6),                // account list
+                    Constraint::Length(detail_height), // detail panel
+                ])
+                .split(content);
+            render_account_table(f, app, rows[0]);
+            if app.detail_visible {
+                render_detail_panel(f, app, rows[1]);
+            }
+        }
+        Tab::Providers => render_providers_tab(f, app, vertical[1]),
     }
-    if providers_height > 0 {
-        render_providers_panel(f, app, vertical[2]);
-    }
-    render_status_bar(f, app, vertical[3]);
+
+    render_status_bar(f, app, vertical[2]);
 
     // Overlays (rendered last, on top of everything).
     // Help popup takes top priority since the user invoked it explicitly.
@@ -786,15 +784,32 @@ pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
     }
 }
 
-/// Height for the custom-providers panel: one row per provider plus borders,
-/// capped so a long list never crowds out the account table.
-fn providers_panel_height(app: &App) -> u16 {
-    (app.providers.len() as u16).saturating_add(2).min(12)
+/// Top tab bar: Accounts (ChatGPT OAuth) vs Providers (third-party API+key).
+fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
+    let active = base().fg(BG).bg(C_CYAN).add_modifier(Modifier::BOLD);
+    let inactive = base().fg(C_GRAY);
+    let (accounts_style, providers_style) = match app.active_tab {
+        Tab::Accounts => (active, inactive),
+        Tab::Providers => (inactive, active),
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            format!(" Accounts ({}) ", app.accounts.len()),
+            accounts_style,
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!(" Providers ({}) ", app.providers.len()),
+            providers_style,
+        ),
+        Span::styled("   Tab to switch", base().fg(DIM)),
+    ]);
+    f.render_widget(Paragraph::new(line).style(base()), area);
 }
 
-/// Read-only list of configured custom API providers. The stored API key is
-/// never rendered.
-fn render_providers_panel(f: &mut Frame, app: &App, area: Rect) {
+/// Providers tab: read-only list of configured custom API providers. The stored
+/// API key is never rendered.
+fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(" Custom providers ")
         .borders(Borders::ALL)
@@ -803,22 +818,71 @@ fn render_providers_panel(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let lines: Vec<Line> = app
+    if app.providers.is_empty() {
+        let hint = Paragraph::new(Line::from(vec![
+            Span::styled("No custom providers. Add one with ", base().fg(DIM)),
+            Span::styled(
+                "codex-switch provider add",
+                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(".", base().fg(DIM)),
+        ]))
+        .style(base());
+        f.render_widget(hint, inner);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from(" "),
+        Cell::from("Alias"),
+        Cell::from("Name"),
+        Cell::from("Model"),
+        Cell::from("Base URL"),
+    ])
+    .style(base().fg(C_CYAN).add_modifier(Modifier::BOLD));
+
+    let rows: Vec<Row> = app
         .providers
         .iter()
-        .map(|p| {
-            Line::from(vec![
-                Span::styled(
-                    format!("{}  ", p.alias),
-                    base().fg(C_WHITE).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("{}  ", p.name), base().fg(C_GRAY)),
-                Span::styled(format!("{}  ", p.model), base().fg(C_CYAN)),
-                Span::styled(format!("[{}]", p.base_url), base().fg(DIM)),
+        .enumerate()
+        .map(|(i, p)| {
+            let selected = i == app.provider_selected;
+            let text_style = if selected {
+                base().fg(C_WHITE).add_modifier(Modifier::BOLD)
+            } else {
+                base().fg(C_GRAY)
+            };
+            Row::new(vec![
+                Cell::from(if selected { "\u{25b6}" } else { " " }).style(base().fg(C_GREEN)),
+                Cell::from(p.alias.clone()).style(text_style),
+                Cell::from(p.name.clone()).style(text_style),
+                Cell::from(p.model.clone()).style(base().fg(C_CYAN)),
+                Cell::from(p.base_url.clone()).style(base().fg(DIM)),
             ])
+            .height(1)
         })
         .collect();
-    f.render_widget(Paragraph::new(lines).style(base()), inner);
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(2),
+            Constraint::Length(20),
+            Constraint::Length(24),
+            Constraint::Length(28),
+            Constraint::Min(20),
+        ],
+    )
+    .header(header)
+    .row_highlight_style(
+        Style::default()
+            .bg(C_HIGHLIGHT_BG)
+            .add_modifier(Modifier::BOLD),
+    )
+    .style(base());
+
+    let mut state = TableState::default().with_selected(app.provider_selected);
+    f.render_stateful_widget(table, inner, &mut state);
 }
 
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -1277,8 +1341,9 @@ mod tests {
     }
 
     #[test]
-    fn providers_panel_lists_custom_providers_without_the_key() {
+    fn providers_tab_lists_custom_providers_without_the_key() {
         let mut app = App::new();
+        app.active_tab = crate::tui::app::Tab::Providers;
         app.providers.push(crate::provider::ProviderProfile {
             alias: "openrouter".into(),
             provider_id: "openrouter".into(),
