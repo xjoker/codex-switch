@@ -160,12 +160,21 @@ pub enum ConfirmAction {
     RemoveProvider(String),
 }
 
+/// Reasoning-effort presets offered by the add-provider wizard. Index 0 skips
+/// the override entirely; the rest are saved as `model_reasoning_effort=<v>`.
+/// These are convenience presets only — the CLI `--set`/`--reasoning` remain the
+/// escape hatch for any other value Codex accepts (e.g. `ultra`).
+pub const REASONING_CHOICES: [&str; 7] =
+    ["(skip)", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 /// Steps of the Providers-tab "add provider" wizard, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderAddStep {
     Alias,
     BaseUrl,
     Model,
+    Reasoning,
+    WebSearch,
     ApiKey,
 }
 
@@ -176,6 +185,8 @@ impl ProviderAddStep {
             ProviderAddStep::Alias => "alias",
             ProviderAddStep::BaseUrl => "base URL",
             ProviderAddStep::Model => "model",
+            ProviderAddStep::Reasoning => "reasoning",
+            ProviderAddStep::WebSearch => "web_search",
             ProviderAddStep::ApiKey => "API key",
         }
     }
@@ -194,6 +205,10 @@ pub struct ProviderAddState {
     pub alias: String,
     pub base_url: String,
     pub model: String,
+    /// Index into [`REASONING_CHOICES`]; 0 means "skip" (no override).
+    pub reasoning_idx: usize,
+    /// Whether the wizard will save `web_search=disabled`.
+    pub no_web_search: bool,
 }
 
 pub struct RenameState {
@@ -675,6 +690,8 @@ impl App {
             alias: String::new(),
             base_url: String::new(),
             model: String::new(),
+            reasoning_idx: 0,
+            no_web_search: false,
         });
     }
 
@@ -702,6 +719,37 @@ impl App {
         let Some(state) = self.provider_add.as_mut() else {
             return;
         };
+        // Choice steps navigate options rather than editing a text buffer.
+        match state.step {
+            ProviderAddStep::Reasoning => {
+                match code {
+                    KeyCode::Up | KeyCode::Left if state.reasoning_idx > 0 => {
+                        state.reasoning_idx -= 1;
+                    }
+                    KeyCode::Down | KeyCode::Right
+                        if state.reasoning_idx + 1 < REASONING_CHOICES.len() =>
+                    {
+                        state.reasoning_idx += 1;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            ProviderAddStep::WebSearch => {
+                if matches!(
+                    code,
+                    KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Left
+                        | KeyCode::Right
+                        | KeyCode::Char(' ')
+                ) {
+                    state.no_web_search = !state.no_web_search;
+                }
+                return;
+            }
+            _ => {}
+        }
         match code {
             KeyCode::Backspace if state.cursor > 0 => {
                 state.cursor -= 1;
@@ -785,6 +833,20 @@ impl App {
                 }
                 if let Some(state) = self.provider_add.as_mut() {
                     state.model = value;
+                    state.step = ProviderAddStep::Reasoning;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::Reasoning => {
+                if let Some(state) = self.provider_add.as_mut() {
+                    state.step = ProviderAddStep::WebSearch;
+                    state.input.clear();
+                    state.cursor = 0;
+                }
+            }
+            ProviderAddStep::WebSearch => {
+                if let Some(state) = self.provider_add.as_mut() {
                     state.step = ProviderAddStep::ApiKey;
                     state.input.clear();
                     state.cursor = 0;
@@ -798,6 +860,16 @@ impl App {
                 let Some(state) = self.provider_add.take() else {
                     return;
                 };
+                let mut codex_config = Vec::new();
+                if state.reasoning_idx > 0 {
+                    codex_config.push(format!(
+                        "model_reasoning_effort={}",
+                        REASONING_CHOICES[state.reasoning_idx]
+                    ));
+                }
+                if state.no_web_search {
+                    codex_config.push("web_search=disabled".to_string());
+                }
                 let profile = crate::provider::ProviderProfile {
                     provider_id: crate::provider::sanitize_provider_id(&state.alias),
                     name: state.alias.clone(),
@@ -805,7 +877,7 @@ impl App {
                     env_key: crate::provider::derive_env_key(&state.alias),
                     model: state.model,
                     wire_api: "responses".to_string(),
-                    codex_config: Vec::new(),
+                    codex_config,
                     api_key: value,
                     alias: state.alias.clone(),
                 };
@@ -2696,6 +2768,9 @@ mod tests {
         app.handle_provider_add_key(KeyCode::Enter);
         type_str(&mut app, "openai/gpt-5.3-codex");
         app.handle_provider_add_key(KeyCode::Enter);
+        // Reasoning step: leave on default "(skip)"; web_search step: leave default.
+        app.handle_provider_add_key(KeyCode::Enter);
+        app.handle_provider_add_key(KeyCode::Enter);
         type_str(&mut app, "sk-secret-xyz");
         app.handle_provider_add_key(KeyCode::Enter);
 
@@ -2709,8 +2784,45 @@ mod tests {
         assert_eq!(p.env_key, "CODEX_SWITCH_MYROUTER_KEY");
         assert_eq!(p.api_key, "sk-secret-xyz");
         assert_eq!(p.wire_api, "responses");
+        assert!(
+            p.codex_config.is_empty(),
+            "skipping both choice steps saves no overrides"
+        );
         assert_eq!(app.active_tab, Tab::Providers);
         assert!(app.providers.iter().any(|x| x.alias == "myrouter"));
+    }
+
+    #[test]
+    fn provider_add_wizard_saves_reasoning_and_web_search_choices() {
+        let _home = EnvHome::new();
+        let mut app = App::new();
+        app.open_provider_add();
+
+        type_str(&mut app, "thinker");
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "https://openrouter.ai/api/v1");
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "deepseek/deepseek-r1-0528");
+        app.handle_provider_add_key(KeyCode::Enter);
+        // Reasoning step: move from "(skip)" to "medium" (index 3).
+        app.handle_provider_add_key(KeyCode::Right);
+        app.handle_provider_add_key(KeyCode::Right);
+        app.handle_provider_add_key(KeyCode::Right);
+        app.handle_provider_add_key(KeyCode::Enter);
+        // web_search step: toggle to disabled.
+        app.handle_provider_add_key(KeyCode::Char(' '));
+        app.handle_provider_add_key(KeyCode::Enter);
+        type_str(&mut app, "sk-secret-xyz");
+        app.handle_provider_add_key(KeyCode::Enter);
+
+        let p = crate::provider::load("thinker").expect("provider must be saved");
+        assert_eq!(
+            p.codex_config,
+            vec![
+                "model_reasoning_effort=medium".to_string(),
+                "web_search=disabled".to_string(),
+            ]
+        );
     }
 
     #[test]
