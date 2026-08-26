@@ -117,6 +117,21 @@ pub fn lock_launch_session() -> Result<File> {
     acquire_file_lock(&path, LOCK_WAIT_TIMEOUT, "launch session")
 }
 
+/// Reject concurrent reset-card consumes for the same profile across processes.
+pub fn lock_reset_card_consume(profile_path: &Path) -> Result<File> {
+    let parent = profile_path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "profile auth path has no parent: {}",
+            profile_path.display()
+        )
+    })?;
+    acquire_file_lock(
+        &parent.join("reset-card-consume.lock"),
+        Duration::ZERO,
+        "reset card consume",
+    )
+}
+
 struct AuthTransaction {
     _launch: File,
     _auth: File,
@@ -490,6 +505,27 @@ fn scan_profiles_by_identity(identity: &AccountIdentity) -> IdentityMatches {
 pub fn find_profile_by_identity(identity: &AccountIdentity) -> Option<String> {
     let IdentityMatches { exact, email_only } = scan_profiles_by_identity(identity);
     exact.or_else(|| email_only.into_iter().next())
+}
+
+/// The saved profile that these to-be-imported credentials already belong to,
+/// if any.
+///
+/// `import` is deliberately create-only (see [`save_imported_auth_value`]), so a
+/// re-import of an already-saved account would otherwise write a *second*
+/// profile for it. Because OpenAI refresh tokens are single-use, the two copies
+/// then race: whichever refreshes first rotates the token and the other dies
+/// with `refresh_token_reused`, forcing a full re-login. Callers use this to
+/// skip such a re-import instead of duplicating the account.
+///
+/// Detection is intentionally conservative and read-only — it never writes and
+/// never overwrites, so a false positive can only decline an import, never hand
+/// an account to the wrong profile:
+/// - byte-identical to a stored profile ([`find_matching_profile`]), or
+/// - the exact same `account_id` **and** `email` as a stored profile
+///   ([`find_profile_by_identity_exact`]). Requiring the email too means a
+///   shared Team `account_id` alone never matches a different member.
+pub fn existing_import_target(source: &Path, val: &serde_json::Value) -> Option<String> {
+    find_matching_profile(source).or_else(|| find_profile_by_identity_exact(&extract_identity(val)))
 }
 
 pub fn alias_from_email(email: &str) -> String {
@@ -1256,7 +1292,23 @@ mod tests {
     use anyhow::Result;
     use fs4::FileExt;
 
-    use super::{cmd_delete, cmd_save, cmd_use, rename_profile, switch_profile, validate_alias};
+    use super::{
+        cmd_delete, cmd_save, cmd_use, lock_reset_card_consume, rename_profile, switch_profile,
+        validate_alias,
+    };
+
+    #[test]
+    fn reset_card_lock_rejects_a_concurrent_process_instead_of_queueing() {
+        let home = tempfile::tempdir().unwrap();
+        let auth_path = home.path().join("account/auth.json");
+        let first = lock_reset_card_consume(&auth_path).unwrap();
+
+        let second = lock_reset_card_consume(&auth_path).unwrap_err();
+        assert!(second.to_string().contains("remained held"));
+
+        drop(first);
+        assert!(lock_reset_card_consume(&auth_path).is_ok());
+    }
 
     struct TestEnv {
         _lock: MutexGuard<'static, ()>,
@@ -1729,6 +1781,35 @@ mod tests {
             super::detect_auth_change(),
             super::AuthChange::NoChange
         ));
+    }
+
+    #[test]
+    fn existing_import_target_matches_saved_account_and_ignores_others() {
+        let env = TestEnv::new();
+        // Save a profile for alice / acct_1.
+        let val = realistic_auth_json("alice@example.com", "acct_1", "acc_a", "ref_a");
+        let live = crate::auth::codex_auth_path().unwrap();
+        crate::auth::write_auth(&live, &val).unwrap();
+        super::cmd_save(Some("alice")).unwrap();
+
+        // A fresh dump of the SAME account with rotated tokens (so the bytes,
+        // and thus the file hash, differ) is still detected by account_id +
+        // email — this is exactly the re-import that would otherwise duplicate
+        // the account and spend its single-use refresh token.
+        let reimport = realistic_auth_json("alice@example.com", "acct_1", "acc_new", "ref_new");
+        let src = env._home.path().join("incoming.json");
+        std::fs::write(&src, serde_json::to_vec(&reimport).unwrap()).unwrap();
+        assert_eq!(
+            super::existing_import_target(&src, &reimport).as_deref(),
+            Some("alice"),
+            "a re-import of a saved account must be detected so it can be skipped"
+        );
+
+        // A genuinely different account is not matched, so it still imports.
+        let other = realistic_auth_json("bob@example.com", "acct_2", "acc_b", "ref_b");
+        let other_src = env._home.path().join("other.json");
+        std::fs::write(&other_src, serde_json::to_vec(&other).unwrap()).unwrap();
+        assert_eq!(super::existing_import_target(&other_src, &other), None);
     }
 
     #[test]

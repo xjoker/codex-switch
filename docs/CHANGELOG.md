@@ -1,5 +1,34 @@
 # Changelog
 
+## v20260811.3.0 — 2026-08-11
+
+- **Reset Card details refresh without blocking the account table** — Main Usage results render immediately while card details refresh in a serialized background queue. The Cards column shows a cyan refresh marker during work and a yellow waiting marker during HTTP 429 cooldown, while preserving the last known unexpired cards.
+- **One rate limit stops every later Reset Card GET** — All card-detail readers share one paced request gate. The first HTTP 429 records the server's wait hint, opens a global cooldown, and returns without replaying; HTTP 401 also stops immediately. Only an explicit zero clears cards, and request generations prevent a stale account response from restoring cards after newer Usage data.
+
+## v20260811.2.0 — 2026-08-11
+
+- **Reset Card discovery** — Treat a missing main Usage reset-card summary as unknown instead of zero, then query card details through the existing serialized path so unexpired cards remain visible.
+- **Reset Card 429 isolation** — Keep the detail endpoint on its bounded 1→2 second exponential retry so one limited account cannot hold the global detail queue for 30→60 seconds.
+
+## v20260811.1.0 — 2026-08-11
+
+- **HTTP 429 handling now slows down instead of amplifying rate limits** — The default TUI refresh interval is five minutes. Replay-safe GET requests honor `Retry-After` and response-body hints, otherwise use bounded exponential backoff with jitter; non-replayable authentication and warmup POST requests wait after a 429 without being replayed. Usage retries stop at one layer instead of multiplying across nested loops.
+- **Reset-card consumption is fail-closed against duplicate charges** — One confirmation sends at most one consume POST, and ambiguous transport, rate-limit, server, or response errors require verification instead of automatic replay. Confirmations bind the exact card ID the user saw, the TUI blocks another consume after success or an unknown outcome, and a zero-wait per-profile OS lock rejects concurrent processes rather than queueing a stale confirmation that could select the next card.
+
+## v20260810.3.0 — 2026-08-10
+
+- **Reset-card expiry warnings are consistent inside account details** — The account detail popup now colors the Reset cards heading, available count, and expiry row with the same earliest-expiry thresholds as the account table: red below three days, yellow below seven days, and green otherwise. A failed detail fetch stays yellow, while a positive count without a trustworthy expiry stays neutral instead of being misreported as safely green.
+
+## v20260810.2.0 — 2026-08-10
+
+- **Reset-card detail refresh avoids endpoint-wide rate limits** — Card details are requested only when the primary usage response reports missing Card records, and those secondary requests are serialized across accounts. HTTP 429 retries now honor numeric `Retry-After` values and otherwise use exponential backoff, preventing a six-account refresh from repeatedly stampeding the auxiliary endpoint.
+
+## v20260810.1.0 — 2026-08-10
+
+- **Reset cards survive transient detail-fetch failures** — The reset-card endpoint now retries transport failures, HTTP 429/5xx responses, and malformed JSON up to three times. If all attempts fail, the TUI keeps a count-matched cached card list while still reporting that fresh details are unavailable, so one flaky secondary request no longer replaces useful Card data with `err`.
+- **Reset cards warn before they expire** — The TUI Card count turns yellow when the earliest valid card has less than seven days remaining and red below three days, making the warning visible without opening the account menu.
+- **Dependency and automation maintenance** — Updated `libc`, `thiserror`, `toml`, `serde_json`, and `serde`, and configured Dependabot to target the active `dev` branch instead of the repository default branch.
+
 ## v20260804.1.0 — 2026-08-04
 
 - **`self-update --version` rejects anything that is not a version number** — The argument becomes a path segment in a GitHub release lookup, and `..` inside a URL path is resolved rather than treated as text, so a malformed value could have pointed the lookup at another repository's release metadata. The value is now both percent-encoded and rejected outright before any request is made, and a typo is reported as a bad argument instead of surfacing as a confusing 404.

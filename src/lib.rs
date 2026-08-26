@@ -17,6 +17,8 @@ pub mod config;
 mod daemon;
 #[allow(dead_code)]
 mod error;
+#[allow(dead_code)]
+mod http_retry;
 pub mod jwt;
 #[allow(dead_code)]
 mod logging;

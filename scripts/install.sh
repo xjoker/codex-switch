@@ -10,6 +10,8 @@ set -euo pipefail
 #   CS_VERSION=20260712.1.0 curl -fsSL .../install.sh | bash  # install specific version
 
 REPO="xjoker/codex-switch"
+PROVENANCE_ASSET="codex-switch-build-provenance.json"
+RELEASE_WORKFLOW="xjoker/codex-switch/.github/workflows/release.yml"
 USER_INSTALL_DIR="${HOME}/.local/bin"
 SYSTEM_INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="codex-switch"
@@ -22,6 +24,49 @@ PATH_BLOCK_END="# <<< codex-switch PATH <<<"
 info()  { printf '\033[0;34m[info]\033[0m  %s\n' "$*"; }
 warn()  { printf '\033[0;33m[warn]\033[0m  %s\n' "$*" >&2; }
 error() { printf '\033[0;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Verify the downloaded archive's Sigstore build provenance, the same guarantee
+# `self-update` enforces. The SHA-256 check only proves the archive matches the
+# checksum published in the *same* release, so an attacker who can replace both
+# files is trusted; attestation instead proves the artifact was built by this
+# repository's release workflow on a GitHub-hosted runner and cannot be forged.
+#
+# Uses offline `--bundle` mode, which needs neither `gh auth login` nor any
+# GitHub API call, so it works during a fresh `curl | bash` install. When a
+# GitHub CLI with attestation support is unavailable the archive is still
+# checksum-verified; set CS_REQUIRE_PROVENANCE=1 to make that a hard failure.
+verify_build_provenance() {
+  local archive_path="$1"
+  local require="${CS_REQUIRE_PROVENANCE:-0}"
+
+  if ! command -v gh >/dev/null 2>&1 || ! gh attestation --help >/dev/null 2>&1; then
+    if [ "$require" = "1" ]; then
+      error "CS_REQUIRE_PROVENANCE=1 but a GitHub CLI with attestation support was not found. Install https://cli.github.com/ and retry."
+    fi
+    warn "GitHub CLI with attestation support not found; skipping build-provenance verification (the SHA-256 checksum was still verified). Install https://cli.github.com/ and re-run, or set CS_REQUIRE_PROVENANCE=1 to require it."
+    return 0
+  fi
+
+  local bundle_url="${DOWNLOAD_URL%/*}/${PROVENANCE_ASSET}"
+  local bundle_path="${TMP_DIR}/${PROVENANCE_ASSET}"
+  if ! curl -fsSL "$bundle_url" -o "$bundle_path"; then
+    if [ "$require" = "1" ]; then
+      error "CS_REQUIRE_PROVENANCE=1 but the build-provenance bundle could not be downloaded from ${bundle_url}."
+    fi
+    warn "Could not download the build-provenance bundle (${bundle_url}); skipping provenance verification (the SHA-256 checksum was still verified)."
+    return 0
+  fi
+
+  if gh attestation verify "$archive_path" \
+    --bundle "$bundle_path" \
+    --repo "$REPO" \
+    --signer-workflow "$RELEASE_WORKFLOW" \
+    --deny-self-hosted-runners >/dev/null 2>&1; then
+    info "Build provenance verified: ${ASSET_NAME}"
+  else
+    error "Build-provenance verification failed for ${ASSET_NAME}; refusing to install. The artifact is not attested as built by ${RELEASE_WORKFLOW}."
+  fi
+}
 
 resolve_profile_target() (
   local profile_target="$1"
@@ -344,6 +389,7 @@ fi
 
 [ "$ACTUAL_SHA256" = "$EXPECTED_SHA256" ] || error "Checksum mismatch for ${ASSET_NAME}; refusing to extract it."
 info "Checksum verified: ${ASSET_NAME}"
+verify_build_provenance "${TMP_DIR}/${ASSET_NAME}"
 tar xzf "${TMP_DIR}/${ASSET_NAME}" -C "$TMP_DIR"
 
 if [ "$MIGRATE_LEGACY" = true ] && [ "$LEGACY_NEEDS_SUDO" = true ]; then

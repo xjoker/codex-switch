@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use reqwest::RequestBuilder;
 use serde::Deserialize;
 
+use crate::http_retry::{self, ReplaySafety};
+
 const ACCOUNTS_CHECK_URL: &str = "https://chatgpt.com/backend-api/wham/accounts/check";
 
 #[derive(Debug, Deserialize)]
@@ -142,17 +144,17 @@ pub(crate) async fn fetch_workspace_name(
         return Ok(WorkspaceLookup::Unlisted);
     }
     let url = accounts_check_url();
-    let response = build_accounts_check_request(client, &url, access_token, account_id, is_fedramp)
-        .send()
-        .await
-        .with_context(|| "requesting ChatGPT workspace metadata")?;
-    let status = response.status();
+    let response = http_retry::send(
+        build_accounts_check_request(client, &url, access_token, account_id, is_fedramp),
+        ReplaySafety::Idempotent,
+    )
+    .await
+    .with_context(|| "requesting ChatGPT workspace metadata")?;
+    let status = response.status;
     if !status.is_success() {
         anyhow::bail!("workspace metadata request failed (HTTP {status})");
     }
-    let body = response
-        .json::<AccountsCheckResponse>()
-        .await
+    let body = serde_json::from_slice::<AccountsCheckResponse>(&response.body)
         .with_context(|| format!("parsing workspace metadata response (HTTP {status})"))?;
     Ok(body.workspace_name_for(account_id))
 }

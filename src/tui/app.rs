@@ -65,12 +65,14 @@ fn refresh_priority(refresh: Refresh) -> u8 {
 pub struct ResetCardFailure {
     message: String,
     invalidate_cache: bool,
+    outcome_unknown: bool,
 }
 
 fn map_reset_card_failure(message: String, invalidate_cache: bool) -> ResetCardFailure {
     ResetCardFailure {
         message,
         invalidate_cache,
+        outcome_unknown: invalidate_cache,
     }
 }
 
@@ -150,7 +152,11 @@ impl SortMode {
 pub enum ConfirmAction {
     Delete(String),
     BatchDelete(Vec<String>),
-    ConsumeResetCard { alias: String, expires_at: String },
+    ConsumeResetCard {
+        alias: String,
+        credit_id: String,
+        expires_at: String,
+    },
 }
 
 pub struct RenameState {
@@ -164,6 +170,12 @@ pub struct SearchState {
     pub query: String,
     pub cursor: usize,
 }
+
+type ResetCardRefreshResult = (
+    String,
+    u64,
+    Result<(Option<u64>, Vec<crate::usage::ResetCredit>), String>,
+);
 
 pub struct App {
     pub accounts: Vec<AccountEntry>,
@@ -189,6 +201,13 @@ pub struct App {
         tokio::sync::mpsc::Receiver<(String, Result<ConsumedResetCredit, ResetCardFailure>)>,
     pub reset_card_sender:
         tokio::sync::mpsc::Sender<(String, Result<ConsumedResetCredit, ResetCardFailure>)>,
+    pub pending_reset_card_refreshes: tokio::sync::mpsc::Receiver<ResetCardRefreshResult>,
+    pub reset_card_refresh_sender: tokio::sync::mpsc::Sender<ResetCardRefreshResult>,
+    pub reset_card_refresh_tasks: HashMap<String, u64>,
+    pub usage_generations: HashMap<String, u64>,
+    pub reset_card_cooldown_until: Option<Instant>,
+    /// Prevents duplicate confirmations from starting two irreversible consumes.
+    pub reset_card_tasks: BTreeSet<String>,
     /// Tracks in-flight warmup tasks: task_id → (alias, start_time).
     /// Each spawn gets a unique `warmup_next_id`; results are matched by ID
     /// so a late-arriving result from a timed-out task cannot clear a newer task.
@@ -219,6 +238,7 @@ impl App {
         let (workspace_tx, workspace_rx) = tokio::sync::mpsc::channel(128);
         let (warmup_tx, warmup_rx) = tokio::sync::mpsc::channel(64);
         let (reset_card_tx, reset_card_rx) = tokio::sync::mpsc::channel(16);
+        let (reset_card_refresh_tx, reset_card_refresh_rx) = tokio::sync::mpsc::channel(64);
         let (model_tx, model_rx) = tokio::sync::mpsc::channel(32);
         let cfg = crate::config::get();
         App {
@@ -243,6 +263,12 @@ impl App {
             warmup_sender: warmup_tx,
             pending_reset_cards: reset_card_rx,
             reset_card_sender: reset_card_tx,
+            pending_reset_card_refreshes: reset_card_refresh_rx,
+            reset_card_refresh_sender: reset_card_refresh_tx,
+            reset_card_refresh_tasks: HashMap::new(),
+            usage_generations: HashMap::new(),
+            reset_card_cooldown_until: None,
+            reset_card_tasks: BTreeSet::new(),
             warmup_tasks: HashMap::new(),
             warmup_next_id: 0,
             confirm: None,
@@ -402,11 +428,6 @@ impl App {
                         .map(|value| format!(" · {}", value.replace(['_', '-'], " ")))
                         .unwrap_or_default();
                     items.push(format!("  Status  limited{reason}"));
-                }
-                if usage.unlimited_credits == Some(true) {
-                    items.push("  credits unlimited".to_string());
-                } else if let Some(balance) = usage.credits_balance {
-                    items.push(format!("  credits ${balance:.2}"));
                 }
                 if usage.reset_credits_error.is_some() {
                     items.push("  Reset-card details are temporarily unavailable".to_string());
@@ -590,6 +611,13 @@ impl App {
     }
 
     pub fn request_consume_reset_card(&mut self, alias: &str) {
+        if self.reset_card_tasks.contains(alias) {
+            self.set_status_error(
+                format!("{alias}: reset card consumption already in progress"),
+                5,
+            );
+            return;
+        }
         let Some(entry) = self.accounts.iter().find(|a| a.alias == alias) else {
             return;
         };
@@ -603,6 +631,7 @@ impl App {
         };
         self.confirm = Some(ConfirmAction::ConsumeResetCard {
             alias: alias.to_string(),
+            credit_id: credit.id.clone(),
             expires_at: credit
                 .expires_at
                 .as_deref()
@@ -992,6 +1021,9 @@ impl App {
                     to_refresh.insert(alias);
                 }
                 Err(e) => {
+                    if !e.outcome_unknown {
+                        self.reset_card_tasks.remove(&alias);
+                    }
                     if e.invalidate_cache
                         && let Err(err) = cache::invalidate(&alias)
                     {
@@ -1005,6 +1037,146 @@ impl App {
             if let Some(idx) = self.accounts.iter().position(|a| a.alias == alias) {
                 self.fetch_usage_for(idx, Refresh::Forced);
             }
+        }
+    }
+
+    fn request_reset_card_refresh(&mut self, alias: &str, generation: u64) {
+        if self
+            .reset_card_cooldown_until
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return;
+        }
+        if self.reset_card_refresh_tasks.get(alias) == Some(&generation) {
+            return;
+        }
+        self.reset_card_refresh_tasks
+            .insert(alias.to_string(), generation);
+        let path = match profile_auth_path(alias) {
+            Ok(path) => path,
+            Err(error) => {
+                self.reset_card_refresh_tasks.remove(alias);
+                tracing::debug!("[{alias}] reset-card detail path unavailable: {error}");
+                return;
+            }
+        };
+        let alias = alias.to_string();
+        let sender = self.reset_card_refresh_sender.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            self.reset_card_refresh_tasks.remove(&alias);
+            return;
+        };
+        runtime.spawn(async move {
+            let result = crate::usage::refresh_reset_credits_for_profile(&alias, &path)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = sender.send((alias, generation, result)).await;
+        });
+    }
+
+    pub fn poll_reset_card_refreshes(&mut self) {
+        let mut changed = false;
+        while let Ok((alias, generation, result)) = self.pending_reset_card_refreshes.try_recv() {
+            if self.reset_card_refresh_tasks.get(&alias) == Some(&generation) {
+                self.reset_card_refresh_tasks.remove(&alias);
+            }
+            if self.usage_generations.get(&alias) != Some(&generation) {
+                continue;
+            }
+            let rate_limited = matches!(
+                &result,
+                Err(error) if error.contains("HTTP 429") || error.contains("cooling down")
+            );
+            if rate_limited {
+                self.reset_card_cooldown_until = Some(Instant::now() + Duration::from_secs(30));
+                self.set_status_error(
+                    "Reset Card service rate-limited; card refresh is cooling down".to_string(),
+                    8,
+                );
+            }
+            let Some(entry) = self.accounts.iter_mut().find(|entry| entry.alias == alias) else {
+                continue;
+            };
+            let UsageStatus::Loaded(usage) = &mut entry.usage else {
+                continue;
+            };
+            match result {
+                Ok((available_count, credits)) => {
+                    if available_count == Some(0) {
+                        usage.reset_credits_available_count = Some(0);
+                        usage.reset_credits.clear();
+                    } else {
+                        if let Some(count) = available_count {
+                            usage.reset_credits_available_count = Some(count);
+                        }
+                        if !credits.is_empty() {
+                            if available_count.is_none() {
+                                usage.reset_credits_available_count = Some(credits.len() as u64);
+                            }
+                            usage.reset_credits = credits;
+                        }
+                    }
+                    usage.reset_credits_error = None;
+                }
+                Err(error) => {
+                    usage.reset_credits_error = Some(error);
+                }
+            }
+            let available_count = usage.reset_credits_available_count;
+            let credits = usage.reset_credits.clone();
+            let error = usage.reset_credits_error.clone();
+            let expected_fetched_at = usage.fetched_at;
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn_blocking(move || {
+                    crate::cache::put_reset_credits(
+                        &alias,
+                        expected_fetched_at,
+                        available_count,
+                        &credits,
+                        error.as_deref(),
+                    );
+                });
+            } else {
+                crate::cache::put_reset_credits(
+                    &alias,
+                    expected_fetched_at,
+                    available_count,
+                    &credits,
+                    error.as_deref(),
+                );
+            }
+            changed = true;
+        }
+        if changed {
+            self.update_view();
+            self.rebuild_open_account_menu();
+        }
+    }
+
+    pub fn run_due_reset_card_cooldown(&mut self) {
+        let Some(until) = self.reset_card_cooldown_until else {
+            return;
+        };
+        if Instant::now() < until {
+            return;
+        }
+        self.reset_card_cooldown_until = None;
+        let aliases: Vec<(String, u64)> = self
+            .accounts
+            .iter()
+            .filter_map(|entry| match &entry.usage {
+                UsageStatus::Loaded(usage)
+                    if crate::usage::should_fetch_reset_credit_details(usage) =>
+                {
+                    self.usage_generations
+                        .get(&entry.alias)
+                        .map(|generation| (entry.alias.clone(), *generation))
+                }
+                _ => None,
+            })
+            .collect();
+        for (alias, generation) in aliases {
+            self.request_reset_card_refresh(&alias, generation);
         }
     }
 
@@ -1116,6 +1288,7 @@ impl App {
     }
 
     fn refresh_indices(&mut self, target_indices: &[usize], refresh: Refresh) {
+        let mut card_refreshes = Vec::new();
         for &i in target_indices {
             let entry = &mut self.accounts[i];
             if let UsageStatus::Error(_) = &entry.usage {
@@ -1124,11 +1297,22 @@ impl App {
             if matches!(refresh, Refresh::Cached)
                 && let Some(cached) = crate::cache::get(&entry.alias)
             {
+                let should_refresh_cards = crate::usage::should_fetch_reset_credit_details(&cached);
                 entry.usage = UsageStatus::Loaded(Box::new(cached));
+                if should_refresh_cards {
+                    let generation = self.usage_next_id;
+                    self.usage_next_id = self.usage_next_id.wrapping_add(1);
+                    self.usage_generations
+                        .insert(entry.alias.clone(), generation);
+                    card_refreshes.push((entry.alias.clone(), generation));
+                }
             }
         }
         for &i in target_indices {
             self.fetch_usage_for(i, refresh);
+        }
+        for (alias, generation) in card_refreshes {
+            self.request_reset_card_refresh(&alias, generation);
         }
         self.update_view();
     }
@@ -1170,11 +1354,19 @@ impl App {
                 Ok(u) => UsageStatus::Loaded(Box::new(u)),
                 Err(e) => UsageStatus::Error(e),
             };
+            self.usage_generations.insert(alias.clone(), request_id);
+            let should_refresh_cards = matches!(
+                &self.accounts[idx].usage,
+                UsageStatus::Loaded(usage) if crate::usage::should_fetch_reset_credit_details(usage)
+            );
             crate::cache::apply_workspace_name(&mut self.accounts[idx].info);
             refresh_open_account |= open_account_alias.as_deref() == Some(alias.as_str());
             changed = true;
             if let Some(refresh) = self.pending_usage_refreshes.remove(&alias) {
                 self.fetch_usage_for(idx, refresh);
+            }
+            if should_refresh_cards {
+                self.request_reset_card_refresh(&alias, request_id);
             }
         }
         while let Ok(alias) = self.pending_workspace.try_recv() {
@@ -1254,25 +1446,36 @@ impl App {
                     self.set_status_error(msg, 6);
                 }
             }
-            ConfirmAction::ConsumeResetCard { alias, .. } => {
-                self.consume_reset_card(&alias);
+            ConfirmAction::ConsumeResetCard {
+                alias, credit_id, ..
+            } => {
+                self.consume_reset_card(&alias, &credit_id);
             }
         }
     }
 
-    fn consume_reset_card(&mut self, alias: &str) {
+    fn consume_reset_card(&mut self, alias: &str, credit_id: &str) {
+        if !self.reset_card_tasks.insert(alias.to_string()) {
+            self.set_status_error(
+                format!("{alias}: reset card consumption already in progress"),
+                5,
+            );
+            return;
+        }
         let path = match profile_auth_path(alias) {
             Ok(p) => p,
             Err(e) => {
+                self.reset_card_tasks.remove(alias);
                 self.set_status_error(format!("Path error for {alias}: {e}"), 5);
                 return;
             }
         };
         let alias_owned = alias.to_string();
+        let credit_id = credit_id.to_string();
         let tx = self.reset_card_sender.clone();
         self.set_status(format!("Using reset card for {alias}..."), 6);
         tokio::spawn(async move {
-            let result = crate::usage::consume_earliest_reset_credit(&alias_owned, &path)
+            let result = crate::usage::consume_reset_credit_by_id(&alias_owned, &path, &credit_id)
                 .await
                 .map_err(|error| {
                     let unknown = error.outcome_unknown_after_request();
@@ -1653,6 +1856,8 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
         app.poll_results();
         app.poll_warmup_results();
         app.poll_reset_card_results();
+        app.poll_reset_card_refreshes();
+        app.run_due_reset_card_cooldown();
         app.poll_model_results();
         app.poll_update();
         app.tick();
@@ -2223,6 +2428,34 @@ mod tests {
     }
 
     #[test]
+    fn reset_card_confirmation_is_blocked_while_consume_is_in_flight() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Loaded(Box::new(UsageInfo {
+                reset_credits: vec![ResetCredit {
+                    id: "credit-1".into(),
+                    granted_at: None,
+                    expires_at: None,
+                }],
+                ..UsageInfo::default()
+            })),
+            is_current: false,
+        });
+        app.reset_card_tasks.insert("account".into());
+
+        app.request_consume_reset_card("account");
+
+        assert!(app.confirm.is_none());
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|message| message.contains("already in progress"))
+        );
+    }
+
+    #[test]
     fn usage_result_rebuilds_an_open_account_detail() {
         let mut app = App::new();
         app.accounts.push(AccountEntry {
@@ -2248,6 +2481,121 @@ mod tests {
             panic!("account detail should remain open");
         };
         assert!(info.usage.is_some());
+    }
+
+    #[test]
+    fn reset_card_rate_limit_keeps_cards_visible_and_enters_cooldown() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Loaded(Box::new(UsageInfo {
+                reset_credits_available_count: Some(1),
+                reset_credits: vec![ResetCredit {
+                    id: "credit-1".into(),
+                    granted_at: None,
+                    expires_at: None,
+                }],
+                ..UsageInfo::default()
+            })),
+            is_current: false,
+        });
+        app.view_indices.push(0);
+        app.usage_generations.insert("account".into(), 7);
+        app.reset_card_refresh_tasks.insert("account".into(), 7);
+        app.reset_card_refresh_sender
+            .try_send((
+                "account".into(),
+                7,
+                Err("reset credits request failed (HTTP 429 Too Many Requests)".into()),
+            ))
+            .unwrap();
+
+        app.poll_reset_card_refreshes();
+
+        let UsageStatus::Loaded(usage) = &app.accounts[0].usage else {
+            panic!("main usage must stay visible after a card-only rate limit");
+        };
+        assert_eq!(usage.reset_credits_available_count, Some(1));
+        assert_eq!(usage.reset_credits.len(), 1);
+        assert!(app.reset_card_cooldown_until.is_some());
+        assert!(!app.reset_card_refresh_tasks.contains_key("account"));
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|message| message.contains("cooling down"))
+        );
+    }
+
+    #[test]
+    fn ambiguous_empty_card_refresh_does_not_clear_last_known_cards() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Loaded(Box::new(UsageInfo {
+                reset_credits_available_count: Some(1),
+                reset_credits: vec![ResetCredit {
+                    id: "credit-1".into(),
+                    granted_at: None,
+                    expires_at: None,
+                }],
+                ..UsageInfo::default()
+            })),
+            is_current: false,
+        });
+        app.view_indices.push(0);
+        app.usage_generations.insert("account".into(), 7);
+        app.reset_card_refresh_sender
+            .try_send(("account".into(), 7, Ok((None, Vec::new()))))
+            .unwrap();
+
+        app.poll_reset_card_refreshes();
+
+        let UsageStatus::Loaded(usage) = &app.accounts[0].usage else {
+            panic!("main usage must stay visible after an ambiguous card response");
+        };
+        assert_eq!(usage.reset_credits_available_count, Some(1));
+        assert_eq!(usage.reset_credits.len(), 1);
+    }
+
+    #[test]
+    fn stale_card_refresh_cannot_restore_cards_after_a_newer_explicit_zero() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Loaded(Box::new(UsageInfo {
+                reset_credits_available_count: Some(0),
+                ..UsageInfo::default()
+            })),
+            is_current: false,
+        });
+        app.view_indices.push(0);
+        app.usage_generations.insert("account".into(), 2);
+        app.reset_card_refresh_tasks.insert("account".into(), 1);
+        app.reset_card_refresh_sender
+            .try_send((
+                "account".into(),
+                1,
+                Ok((
+                    Some(1),
+                    vec![ResetCredit {
+                        id: "stale-credit".into(),
+                        granted_at: None,
+                        expires_at: None,
+                    }],
+                )),
+            ))
+            .unwrap();
+
+        app.poll_reset_card_refreshes();
+
+        let UsageStatus::Loaded(usage) = &app.accounts[0].usage else {
+            panic!("newer main usage must remain loaded");
+        };
+        assert_eq!(usage.reset_credits_available_count, Some(0));
+        assert!(usage.reset_credits.is_empty());
     }
 
     #[test]

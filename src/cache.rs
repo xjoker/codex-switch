@@ -192,7 +192,10 @@ fn save_cache_at(path: &std::path::Path, cache: &CacheFile) -> Result<()> {
 
 fn to_entry(u: &UsageInfo) -> CacheEntry {
     CacheEntry {
-        ts: now_secs(),
+        ts: u
+            .fetched_at
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or_else(now_secs),
         primary_used: u.primary.as_ref().and_then(|w| w.used_percent),
         primary_reset: u.primary.as_ref().and_then(|w| w.resets_at),
         primary_window_minutes: u.primary.as_ref().and_then(|w| w.window_minutes),
@@ -277,6 +280,31 @@ pub fn put(alias: &str, usage: &UsageInfo) {
         save_cache(&cache)
     }) {
         tracing::warn!("Failed to write cache: {err}");
+    }
+}
+
+/// Update only the Reset Card snapshot without replacing newer main Usage data.
+pub fn put_reset_credits(
+    alias: &str,
+    expected_fetched_at: Option<i64>,
+    available_count: Option<u64>,
+    credits: &[ResetCredit],
+    error: Option<&str>,
+) {
+    if let Err(err) = with_cache_lock(|| {
+        let mut cache = load_cache();
+        let Some(entry) = cache.entries.get_mut(alias) else {
+            return Ok(());
+        };
+        if expected_fetched_at != Some(entry.ts as i64) {
+            return Ok(());
+        }
+        entry.reset_credits_available_count = available_count;
+        entry.reset_credits = credits.to_vec();
+        entry.reset_credits_error = error.map(sanitize_for_storage);
+        save_cache(&cache)
+    }) {
+        tracing::warn!("Failed to update reset-card cache for {alias}: {err}");
     }
 }
 

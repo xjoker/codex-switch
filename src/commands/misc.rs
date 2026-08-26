@@ -15,10 +15,10 @@ pub(crate) async fn reset_card_cmd(alias: &str, yes: bool, json: bool) -> Result
     let usage = usage::fetch_usage_retried_force(alias, &path, &profile::read_current())
         .await
         .map_err(|e| anyhow::anyhow!("{alias}: {}", e.detail))?;
-    let credit = usage::earliest_reset_credit(&usage.reset_credits)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("{alias}: no available reset cards"))?;
-
+    let credit = match usage::earliest_reset_credit(&usage.reset_credits).cloned() {
+        Some(credit) => credit,
+        None => usage::fetch_earliest_reset_credit(alias, &path).await?,
+    };
     if !yes {
         let expires = credit
             .expires_at
@@ -30,7 +30,7 @@ pub(crate) async fn reset_card_cmd(alias: &str, yes: bool, json: bool) -> Result
         }
     }
 
-    let result = match usage::consume_earliest_reset_credit(alias, &path).await {
+    let result = match usage::consume_reset_credit_by_id(alias, &path, &credit.id).await {
         Ok(result) => result,
         Err(error) if error.outcome_unknown_after_request() => {
             if let Err(err) = cache::invalidate(alias) {

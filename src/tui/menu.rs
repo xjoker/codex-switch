@@ -495,26 +495,43 @@ impl MenuState {
                 for item in &info.usage_meta {
                     left_lines.push(Line::from(Span::styled(item.clone(), dim)));
                 }
+                let credits_text = match info.usage.as_deref() {
+                    Some(u) if u.unlimited_credits == Some(true) => "unlimited".to_string(),
+                    Some(u) => match u.credits_balance {
+                        Some(balance) => format!("${balance:.2}"),
+                        None => "not available".to_string(),
+                    },
+                    None => "not available".to_string(),
+                };
+                let credits_color = info
+                    .usage
+                    .as_deref()
+                    .map(super::ui::credits_table_color)
+                    .unwrap_or(DIM);
+                let credits_style = Style::default().fg(credits_color);
+                left_lines.push(Line::from(vec![
+                    Span::styled("Credits  ", credits_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(credits_text, credits_style),
+                ]));
                 let cards = info
                     .reset_cards
                     .map(|count| format!("{count} available"))
                     .unwrap_or_else(|| "not available".to_string());
+                let cards_color = info
+                    .usage
+                    .as_deref()
+                    .map(super::ui::reset_cards_color)
+                    .unwrap_or(DIM);
+                let cards_style = Style::default().fg(cards_color);
                 left_lines.push(Line::from(vec![
-                    Span::styled("Reset cards  ", header_style.add_modifier(Modifier::BOLD)),
-                    Span::styled(
-                        cards,
-                        Style::default().fg(if info.can_consume_reset_card {
-                            C_GREEN
-                        } else {
-                            DIM
-                        }),
-                    ),
+                    Span::styled("Reset cards  ", cards_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(cards, cards_style),
                 ]));
                 for (idx, expiry) in info.reset_card_expiries.iter().enumerate() {
                     let note = if idx == 0 { "  next to use" } else { "" };
                     left_lines.push(Line::from(vec![
                         Span::styled(format!("  #{}  ", idx + 1), dim),
-                        Span::styled(expiry.clone(), label_style),
+                        Span::styled(expiry.clone(), cards_style),
                         Span::styled(note, dim),
                     ]));
                 }
@@ -683,7 +700,7 @@ mod tests {
         AccountMenuInfo, C_CYAN, C_GREEN, C_PURPLE, C_RED, C_YELLOW, MenuAction, MenuState,
         model_line_spans, quota_lines,
     };
-    use crate::usage::{AdditionalRateLimit, UsageInfo, WindowUsage};
+    use crate::usage::{AdditionalRateLimit, ResetCredit, UsageInfo, WindowUsage};
 
     fn find_text(backend: &TestBackend, needle: &str) -> Option<(u16, u16)> {
         let area = backend.buffer().area;
@@ -702,6 +719,128 @@ mod tests {
             }
         }
         None
+    }
+
+    fn account_menu_with_reset_card_expiring_in(seconds: i64) -> MenuState {
+        let expires_at =
+            chrono::DateTime::from_timestamp(crate::auth::now_unix_secs() + seconds, 0)
+                .unwrap()
+                .to_rfc3339();
+        let usage = UsageInfo {
+            reset_credits_available_count: Some(1),
+            reset_credits: vec![ResetCredit {
+                id: "card".into(),
+                granted_at: None,
+                expires_at: Some(expires_at),
+            }],
+            ..Default::default()
+        };
+
+        MenuState::account(AccountMenuInfo {
+            alias: "account".into(),
+            email: None,
+            account_id: None,
+            user_id: None,
+            workspace_name: None,
+            is_fedramp: false,
+            plan_label: "Pro".into(),
+            plan_type: Some("pro".into()),
+            is_current: true,
+            organizations: Vec::new(),
+            auth_expiries: Vec::new(),
+            usage: Some(Box::new(usage)),
+            usage_meta: Vec::new(),
+            models: Vec::new(),
+            reset_cards: Some(1),
+            reset_card_expiries: vec!["expires soon".into()],
+            can_consume_reset_card: true,
+        })
+    }
+
+    #[test]
+    fn account_details_use_reset_card_expiry_warning_colors() {
+        for (seconds, expected) in [
+            (2 * 24 * 60 * 60, C_RED),
+            (6 * 24 * 60 * 60, C_YELLOW),
+            (8 * 24 * 60 * 60, C_GREEN),
+        ] {
+            let mut menu = account_menu_with_reset_card_expiring_in(seconds);
+            let backend = TestBackend::new(100, 30);
+            let mut terminal = Terminal::new(backend).unwrap();
+
+            terminal
+                .draw(|frame| menu.render(frame, frame.area()))
+                .unwrap();
+
+            for needle in ["Reset cards", "1 available", "expires soon"] {
+                let pos = find_text(terminal.backend(), needle).expect("reset card detail text");
+                assert_eq!(
+                    terminal.backend().buffer().cell(pos).unwrap().fg,
+                    expected,
+                    "{needle} should use the reset-card expiry warning color"
+                );
+            }
+        }
+    }
+
+    fn account_menu_with_usage(usage: UsageInfo) -> MenuState {
+        MenuState::account(AccountMenuInfo {
+            alias: "account".into(),
+            email: None,
+            account_id: None,
+            user_id: None,
+            workspace_name: None,
+            is_fedramp: false,
+            plan_label: "Pro".into(),
+            plan_type: Some("pro".into()),
+            is_current: true,
+            organizations: Vec::new(),
+            auth_expiries: Vec::new(),
+            usage: Some(Box::new(usage)),
+            usage_meta: Vec::new(),
+            models: Vec::new(),
+            reset_cards: Some(0),
+            reset_card_expiries: Vec::new(),
+            can_consume_reset_card: false,
+        })
+    }
+
+    #[test]
+    fn account_details_show_a_dedicated_credits_field() {
+        // A pay-per-use balance renders as a dollar amount with the healthy color.
+        let mut menu = account_menu_with_usage(UsageInfo {
+            credits_balance: Some(15.5),
+            unlimited_credits: Some(false),
+            ..Default::default()
+        });
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| menu.render(frame, frame.area()))
+            .unwrap();
+        assert!(
+            find_text(terminal.backend(), "Credits").is_some(),
+            "the detail popup must have a dedicated Credits field"
+        );
+        let pos = find_text(terminal.backend(), "$15.50").expect("credits balance rendered");
+        assert_eq!(terminal.backend().buffer().cell(pos).unwrap().fg, C_GREEN);
+
+        // Accounts without the credits system still get an explicit slot rather
+        // than silently omitting it (the bug this fixes).
+        let mut menu = account_menu_with_usage(UsageInfo {
+            unlimited_credits: Some(false),
+            ..Default::default()
+        });
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| menu.render(frame, frame.area()))
+            .unwrap();
+        assert!(find_text(terminal.backend(), "Credits").is_some());
+        assert!(
+            find_text(terminal.backend(), "not available").is_some(),
+            "a no-credits account must show an explicit placeholder"
+        );
     }
 
     #[test]

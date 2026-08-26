@@ -102,14 +102,14 @@ impl Default for NetworkConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct TuiConfig {
-    /// TUI auto-refresh interval in seconds (default: 120, minimum: 30)
+    /// TUI auto-refresh interval in seconds (default: 300, minimum: 30)
     pub auto_refresh_interval_secs: u64,
 }
 
 impl Default for TuiConfig {
     fn default() -> Self {
         Self {
-            auto_refresh_interval_secs: 120,
+            auto_refresh_interval_secs: 300,
         }
     }
 }
@@ -336,6 +336,13 @@ pub fn daemon_log_level() -> String {
 #[cfg(test)]
 mod tests {
     use super::load_from_str;
+
+    #[test]
+    fn tui_auto_refresh_defaults_to_five_minutes() {
+        let config = load_from_str("").unwrap();
+
+        assert_eq!(config.tui.auto_refresh_interval_secs, 300);
+    }
 
     #[test]
     fn daemon_zero_intervals_use_defaults() {

@@ -112,6 +112,17 @@ pub(crate) async fn import_cmd(path: &str, alias: Option<&str>, json: bool) -> R
                 alias: imported.alias,
                 action: imported.action.to_string(),
             });
+        } else if imported.action == "unchanged" {
+            println!(
+                "{}",
+                color::success(&format!(
+                    "Already saved as profile '{}'; skipped {} to protect its single-use refresh \
+                     token. Run `codex-switch login {}` to refresh that profile.",
+                    imported.alias,
+                    imported.source.display(),
+                    imported.alias
+                ))
+            );
         } else {
             println!(
                 "{}",
@@ -279,6 +290,26 @@ async fn import_one_file(
         .email
         .as_deref()
         .map(profile::alias_from_email);
+
+    // Refuse to duplicate an account that is already saved. `import` is
+    // create-only, so validating (which rotates the single-use refresh token)
+    // and then writing a second profile would race the two copies into
+    // `refresh_token_reused`. This runs *before* validation so the source
+    // token is never spent on a re-import. It only declines — it never
+    // overwrites — so a conservative match cannot hand credentials to the
+    // wrong profile.
+    if let Some(existing) = profile::existing_import_target(source, &val) {
+        let mut account = source_account;
+        cache::apply_workspace_name(&mut account);
+        let usage = cache::get(&existing).unwrap_or_default();
+        return Ok(profile::ImportSuccess {
+            source: source.to_path_buf(),
+            alias: existing,
+            action: "unchanged",
+            account,
+            usage,
+        });
+    }
 
     let usage::ImportValidation {
         refreshed,
