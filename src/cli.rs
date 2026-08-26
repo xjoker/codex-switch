@@ -53,8 +53,8 @@ pub enum ProviderCommand {
         #[arg(long, value_name = "EFFORT", action = clap::ArgAction::Append)]
         reasoning: Vec<String>,
         /// Disable web_search on the most recent --model (repeatable)
-        #[arg(long, action = clap::ArgAction::SetTrue)]
-        no_web_search: bool,
+        #[arg(long, action = clap::ArgAction::Count)]
+        no_web_search: u8,
         /// Extra `codex -c KEY=VALUE` override to apply at launch (repeatable);
         /// passed through verbatim, so any value Codex accepts works
         #[arg(long = "set", value_name = "KEY=VALUE")]
@@ -240,4 +240,44 @@ pub enum Commands {
     /// Background daemon (Beta) for automatic account switching
     #[command(subcommand)]
     Daemon(DaemonCommand),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn provider_add_allows_no_web_search_on_each_model() {
+        let cli = Cli::try_parse_from([
+            "codex-switch",
+            "provider",
+            "add",
+            "or",
+            "--base-url",
+            "https://openrouter.ai/api/v1",
+            "--model",
+            "a",
+            "--no-web-search",
+            "--model",
+            "b",
+            "--no-web-search",
+            "--api-key-stdin",
+        ])
+        .expect("repeatable --no-web-search must parse");
+        match cli.command {
+            Commands::Provider(ProviderCommand::Add {
+                no_web_search,
+                model,
+                ..
+            }) => {
+                assert_eq!(model, ["a", "b"]);
+                assert_eq!(
+                    no_web_search, 2,
+                    "each --no-web-search is kept so models_from_cli_args can attach it"
+                );
+            }
+            _ => panic!("expected provider add"),
+        }
+    }
 }
