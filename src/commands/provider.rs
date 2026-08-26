@@ -16,6 +16,7 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
             name,
             env_key,
             wire_api,
+            set,
             api_key_stdin,
         } => add(
             alias,
@@ -24,6 +25,7 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
             name,
             env_key,
             wire_api,
+            set,
             api_key_stdin,
             json,
         ),
@@ -41,6 +43,7 @@ fn add(
     name: Option<String>,
     env_key: Option<String>,
     wire_api: String,
+    codex_config: Vec<String>,
     api_key_stdin: bool,
     json: bool,
 ) -> Result<()> {
@@ -61,6 +64,7 @@ fn add(
         env_key: env_key.unwrap_or_else(|| provider::derive_env_key(&alias)),
         model,
         wire_api,
+        codex_config,
         api_key,
         alias: alias.clone(),
     };
@@ -127,6 +131,7 @@ fn list(json: bool) -> Result<()> {
                     "model": p.model,
                     "wire_api": p.wire_api,
                     "env_key": p.env_key,
+                    "codex_config": p.codex_config,
                     "has_key": !p.api_key.is_empty(),
                 })
             })
@@ -161,6 +166,7 @@ fn show(alias: &str, json: bool) -> Result<()> {
             "model": p.model,
             "wire_api": p.wire_api,
             "env_key": p.env_key,
+            "codex_config": p.codex_config,
             "key": p.redacted_key(),
         }));
         return Ok(());
@@ -172,6 +178,13 @@ fn show(alias: &str, json: bool) -> Result<()> {
     user_println(&format!("model       {}", p.model));
     user_println(&format!("wire_api    {}", p.wire_api));
     user_println(&format!("env_key     {}", p.env_key));
+    if p.codex_config.is_empty() {
+        user_println("codex_config (none)");
+    } else {
+        for entry in &p.codex_config {
+            user_println(&format!("codex_config {entry}"));
+        }
+    }
     user_println(&format!("key         {}", p.redacted_key()));
     Ok(())
 }
