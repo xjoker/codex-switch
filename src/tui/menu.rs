@@ -133,16 +133,10 @@ fn quota_window_lines(
             .round()
             .clamp(0.0, (BAR_WIDTH - 1) as f64) as usize
     });
-    let mut spans = vec![Span::styled(
-        format!("{label:<3} "),
-        base().fg(C_WHITE),
-    )];
+    let mut spans = vec![Span::styled(format!("{label:<3} "), base().fg(C_WHITE))];
     for index in 0..BAR_WIDTH {
         let (symbol, style) = if Some(index) == pace_index {
-            (
-                "┃",
-                base().fg(C_CYAN).add_modifier(Modifier::BOLD),
-            )
+            ("┃", base().fg(C_CYAN).add_modifier(Modifier::BOLD))
         } else if index < used_width {
             ("█", base().fg(used_color))
         } else {
@@ -230,10 +224,7 @@ fn format_duration(seconds: i64) -> String {
 
 fn quota_lines(usage: Option<&crate::usage::UsageInfo>) -> Vec<Line<'static>> {
     let Some(usage) = usage else {
-        return vec![Line::from(Span::styled(
-            "Usage not loaded",
-            base().fg(DIM),
-        ))];
+        return vec![Line::from(Span::styled("Usage not loaded", base().fg(DIM)))];
     };
     let mut lines = Vec::new();
     let mut add_pool = |name: &str,

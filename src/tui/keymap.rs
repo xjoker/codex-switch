@@ -280,8 +280,10 @@ mod tests {
         let launch: Vec<_> = super::KEYMAP
             .iter()
             .filter(|b| {
-                matches!(b.section, super::Section::Account | super::Section::Provider)
-                    && b.label.to_ascii_lowercase().contains("launch")
+                matches!(
+                    b.section,
+                    super::Section::Account | super::Section::Provider
+                ) && b.label.to_ascii_lowercase().contains("launch")
             })
             .collect();
         assert!(

@@ -234,8 +234,8 @@ impl ProviderFormState {
                 // Add: Enter walks to the next field so you keep typing.
                 // Edit: Enter only commits, so `s` is save rather than a character.
                 // Models: after an id is committed, stay in nav for +/- / ←→ / w / * / s.
-                let enter_stays = matches!(code, KeyCode::Enter)
-                    && (from_models || self.mode == FormMode::Edit);
+                let enter_stays =
+                    matches!(code, KeyCode::Enter) && (from_models || self.mode == FormMode::Edit);
                 if enter_stays {
                     return FormOutcome::Continue;
                 }
@@ -679,18 +679,8 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
     }
     let add_selected = form.is_add_row();
     lines.push(Line::from(vec![
-        Span::styled(
-            if add_selected { "▶ " } else { "  " },
-            base().fg(C_GREEN),
-        ),
-        Span::styled(
-            "+ add model",
-            if add_selected {
-                header()
-            } else {
-                dim()
-            },
-        ),
+        Span::styled(if add_selected { "▶ " } else { "  " }, base().fg(C_GREEN)),
+        Span::styled("+ add model", if add_selected { header() } else { dim() }),
         Span::styled("   d/- remove", dim()),
     ]));
     if let Some(error) = &form.error {
@@ -924,10 +914,7 @@ mod tests {
         let original = ProviderProfile::build(
             "demo",
             "https://openrouter.ai/api/v1",
-            vec![
-                ProviderModel::from_id("a"),
-                ProviderModel::from_id("b"),
-            ],
+            vec![ProviderModel::from_id("a"), ProviderModel::from_id("b")],
             "sk",
         );
         let mut form = ProviderFormState::edit(&original);
@@ -972,7 +959,10 @@ mod tests {
         let original = ProviderProfile::build(
             "demo",
             "https://openrouter.ai/api/v1",
-            vec![ProviderModel::from_id("keep"), ProviderModel::from_id("drop")],
+            vec![
+                ProviderModel::from_id("keep"),
+                ProviderModel::from_id("drop"),
+            ],
             "sk",
         );
         let mut form = ProviderFormState::edit(&original);
@@ -1028,7 +1018,10 @@ mod tests {
         let original = ProviderProfile::build(
             "demo",
             "https://openrouter.ai/api/v1",
-            vec![ProviderModel::from_id("keep"), ProviderModel::from_id("drop")],
+            vec![
+                ProviderModel::from_id("keep"),
+                ProviderModel::from_id("drop"),
+            ],
             "sk",
         );
         let mut form = ProviderFormState::edit(&original);

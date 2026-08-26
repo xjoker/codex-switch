@@ -183,15 +183,9 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
             .style(base());
         let hint = Paragraph::new(Line::from(vec![
             Span::styled("No accounts yet. Press ", base().fg(DIM)),
-            Span::styled(
-                "a",
-                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("a", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
             Span::styled(" to add one, or ", base().fg(DIM)),
-            Span::styled(
-                "q",
-                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("q", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
             Span::styled(" to quit.", base().fg(DIM)),
         ]))
         .block(block)

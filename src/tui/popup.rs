@@ -252,17 +252,14 @@ fn truncate_line(line: &Line<'_>, max_width: usize) -> Line<'static> {
         }
         break;
     }
-    acc.push(Span::styled(
-        "\u{2026}".to_string(),
-        dim(),
-    ));
+    acc.push(Span::styled("\u{2026}".to_string(), dim()));
     Line::from(acc)
 }
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Color;
     use super::*;
+    use ratatui::style::Color;
 
     fn content(line: &Line<'_>) -> String {
         line.spans
@@ -320,7 +317,10 @@ mod tests {
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = PopupState::new();
-        let lines = vec![Line::from(Span::styled("hello", super::super::theme::key()))];
+        let lines = vec![Line::from(Span::styled(
+            "hello",
+            super::super::theme::key(),
+        ))];
         terminal
             .draw(|f| render_popup(f, "Title", &lines, &mut state, f.area()))
             .unwrap();
