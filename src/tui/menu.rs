@@ -69,6 +69,8 @@ pub enum MenuAction {
     Close,
     /// Switch to alias.
     Use(String),
+    /// Launch Codex with alias (ChatGPT profile or custom provider).
+    Launch(String),
     /// Open re-login flow chooser for alias.
     ReloginRequest(String, Option<String>),
     /// Trigger re-login with chosen flow.
@@ -349,6 +351,7 @@ impl MenuState {
                     MenuAction::Noop
                 }
                 KeyCode::Char('u') => MenuAction::Use(info.alias.clone()),
+                KeyCode::Char('o') => MenuAction::Launch(info.alias.clone()),
                 KeyCode::Char('l') => {
                     MenuAction::ReloginRequest(info.alias.clone(), info.email.clone())
                 }
@@ -552,6 +555,7 @@ impl MenuState {
                 )));
                 let actions = [
                     ("u", "use", true),
+                    ("o", "launch", true),
                     ("r", "refresh", true),
                     ("w", "warmup", true),
                     ("c", "card", info.can_consume_reset_card),
@@ -559,7 +563,7 @@ impl MenuState {
                     ("n", "rename", true),
                     ("d", "delete", true),
                 ];
-                for row in [&actions[..4], &actions[4..]] {
+                for row in [&actions[..5], &actions[5..]] {
                     let mut action_spans = Vec::new();
                     for (idx, (key, label, enabled)) in row.iter().enumerate() {
                         if idx > 0 {
@@ -841,6 +845,33 @@ mod tests {
             find_text(terminal.backend(), "not available").is_some(),
             "a no-credits account must show an explicit placeholder"
         );
+    }
+
+    #[test]
+    fn account_menu_launch_action() {
+        let mut menu = MenuState::account(AccountMenuInfo {
+            alias: "work".into(),
+            email: None,
+            account_id: None,
+            user_id: None,
+            workspace_name: None,
+            is_fedramp: false,
+            plan_label: "Unknown".into(),
+            plan_type: None,
+            is_current: false,
+            organizations: Vec::new(),
+            auth_expiries: Vec::new(),
+            usage: None,
+            usage_meta: Vec::new(),
+            models: Vec::new(),
+            reset_cards: None,
+            reset_card_expiries: Vec::new(),
+            can_consume_reset_card: false,
+        });
+        assert!(matches!(
+            menu.handle_key(KeyCode::Char('o')),
+            MenuAction::Launch(alias) if alias == "work"
+        ));
     }
 
     #[test]

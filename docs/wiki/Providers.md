@@ -143,6 +143,7 @@ On the Providers tab:
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
 | `a` | Add a provider (alias → base URL → model → reasoning → web_search → API key) |
+| `l` / `Enter` | Launch Codex with the selected provider |
 | `d` | Remove the selected provider (confirmation required) |
 | `Tab` | Return to Accounts |
 | `h` | Help |
@@ -150,7 +151,7 @@ On the Providers tab:
 
 The reasoning step is a single choice (`←`/`→`, default `(skip)` saves nothing); the web_search step is a toggle (`Space`, default leaves it enabled). Both are saved into the provider's `codex_config`. The API-key step is masked (`*`). The stored key is never rendered in the table. The wizard does not set `--name`, `--env-key`, or `--wire-api`; those keep the CLI defaults (`name` = alias, derived `env_key`, `responses`). Use the CLI (`--set`) for any override other than reasoning and web_search.
 
-Launching a provider is CLI-only; the Providers tab does not start Codex.
+On the Accounts tab, press `o` to launch the selected ChatGPT profile, or open the account menu with `Enter` and press `o` there. Codex runs in the foreground; the TUI resumes when Codex exits.
 
 ## Storage and security
 
