@@ -430,7 +430,7 @@ impl ProviderFormState {
     }
 }
 
-fn reasoning_index(value: Option<&str>) -> usize {
+pub(crate) fn reasoning_index(value: Option<&str>) -> usize {
     let Some(value) = value else {
         return 0;
     };

@@ -89,6 +89,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_help_popup(f, state, area);
     } else if let Some(form) = app.provider_form.as_mut() {
         super::provider_form::render_provider_form(f, form, area);
+    } else if let Some(launch) = app.provider_launch.as_mut() {
+        super::provider_launch::render_provider_launch(f, launch, area);
     } else if let Some(menu) = app.menu.as_mut() {
         menu.render(f, area);
     }
@@ -1013,6 +1015,8 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             dim(" add \u{2502} "),
             key("e"),
             dim(" edit \u{2502} "),
+            key("l"),
+            dim(" launch \u{2502} "),
             key("n"),
             dim(" rename \u{2502} "),
             key("d"),
@@ -1369,6 +1373,7 @@ fn status_bar_height(app: &App, width: u16) -> usize {
     if app.status_msg.is_some()
         || app.rename.is_some()
         || app.provider_form.is_some()
+        || app.provider_launch.is_some()
         || app.confirm.is_some()
         || app.search_active
         || !app.marked.is_empty()

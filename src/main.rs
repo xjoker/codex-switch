@@ -8,6 +8,7 @@ mod daemon;
 mod error;
 mod http_retry;
 mod jwt;
+mod launch;
 mod logging;
 mod login;
 mod output;
@@ -23,23 +24,8 @@ mod workspace;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
-use output::{MessageMode, print_error, user_println};
+use output::{MessageMode, print_error, should_report_error, user_println};
 use tracing_subscriber::EnvFilter;
-
-#[derive(Debug)]
-pub(crate) struct OutputAlreadyReported;
-
-impl std::fmt::Display for OutputAlreadyReported {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("command failed; details were already reported")
-    }
-}
-
-impl std::error::Error for OutputAlreadyReported {}
-
-fn should_report_error(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<OutputAlreadyReported>().is_none()
-}
 
 /// The post-command profile re-sync (see `dispatch`) is best-effort: most failures
 /// (profile deleted mid-command, unreadable auth.json, IO errors) are expected and stay
@@ -156,7 +142,8 @@ async fn main() {
 
 #[cfg(test)]
 mod error_reporting_tests {
-    use super::{OutputAlreadyReported, should_report_error};
+    use super::should_report_error;
+    use crate::output::OutputAlreadyReported;
 
     #[test]
     fn already_reported_errors_are_not_printed_or_logged_again() {

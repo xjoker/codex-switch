@@ -26,7 +26,7 @@ Development and pull requests normally target `dev`. The `master` branch represe
 |---|---|---|
 | CLI shape | `src/cli.rs`, `src/commands/` | CLI integration tests and `--help` smoke test |
 | Authentication or storage | `src/auth.rs`, `src/profile.rs` | Unit tests plus isolated-home integration tests |
-| Custom API providers | `src/provider.rs`, `src/commands/provider.rs`, launch provider path in `src/commands/launch.rs`, TUI tabs in `src/tui/` | Isolated-home unit tests; the key must never appear in argv |
+| Custom API providers | `src/provider.rs`, `src/commands/provider.rs`, launch provider path in `src/launch.rs`, TUI tabs in `src/tui/` | Isolated-home unit tests; the key must never appear in argv |
 | Usage parsing/API | `src/usage/api.rs`, `src/usage/parse.rs` | Mock HTTP and parser tests |
 | Account selection | `src/usage/scoring.rs`, `src/commands/profile.rs` | Pure scoring tests and end-to-end scoring tests |
 | TUI behavior | `src/tui/` | State/render unit tests and terminal smoke test |

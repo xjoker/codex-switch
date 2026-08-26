@@ -197,6 +197,8 @@ pub struct App {
     pub provider_selected: usize,
     /// Active add/edit provider form.
     pub provider_form: Option<super::provider_form::ProviderFormState>,
+    /// Active launch picker (Providers tab, `l`).
+    pub provider_launch: Option<super::provider_launch::ProviderLaunchState>,
     /// Active top-level tab.
     pub active_tab: Tab,
     pub selected: usize,
@@ -266,6 +268,7 @@ impl App {
             providers: vec![],
             provider_selected: 0,
             provider_form: None,
+            provider_launch: None,
             active_tab: Tab::default(),
             selected: 0,
             search: None,
@@ -645,6 +648,38 @@ impl App {
         match self.providers.get(self.provider_selected) {
             Some(p) => self.confirm = Some(ConfirmAction::RemoveProvider(p.alias.clone())),
             None => self.set_status_error("No provider selected".to_string(), 3),
+        }
+    }
+
+    pub fn open_provider_launch(&mut self) {
+        match self.providers.get(self.provider_selected) {
+            Some(p) => {
+                self.provider_launch =
+                    Some(super::provider_launch::ProviderLaunchState::from_profile(p));
+            }
+            None => self.set_status_error("No provider selected".to_string(), 3),
+        }
+    }
+
+    pub fn handle_provider_launch_key(
+        &mut self,
+        code: KeyCode,
+    ) -> Option<(String, String, crate::provider::ReasoningLaunch)> {
+        let picker = self.provider_launch.as_mut()?;
+        match picker.handle_key(code) {
+            super::provider_launch::LaunchPickerOutcome::Continue => None,
+            super::provider_launch::LaunchPickerOutcome::Cancel => {
+                self.provider_launch = None;
+                None
+            }
+            super::provider_launch::LaunchPickerOutcome::Launch {
+                alias,
+                model,
+                reasoning,
+            } => {
+                self.provider_launch = None;
+                Some((alias, model, reasoning))
+            }
         }
     }
 
@@ -2031,6 +2066,12 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 app.handle_provider_form_key(key.code);
                 continue;
             }
+            if app.provider_launch.is_some() {
+                if let Some((alias, model, reasoning)) = app.handle_provider_launch_key(key.code) {
+                    perform_launch(terminal, &mut app, alias, Some(model), reasoning).await;
+                }
+                continue;
+            }
 
             // Capital 'W' is a distinct global binding (toggle auto-warmup),
             // separate from menu 'w' (per-account warmup). Detect it before
@@ -2103,6 +2144,24 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                             }
                         }
                         KeyCode::Char('a') => app.open_add_menu(),
+                        KeyCode::Char('o') if app.marked.is_empty() => {
+                            if let Some(alias) = app
+                                .selected_account_idx()
+                                .and_then(|idx| app.accounts.get(idx))
+                                .map(|entry| entry.alias.clone())
+                            {
+                                perform_launch(
+                                    terminal,
+                                    &mut app,
+                                    alias,
+                                    None,
+                                    crate::provider::ReasoningLaunch::Saved,
+                                )
+                                .await;
+                            } else {
+                                app.set_status_error("No account selected".to_string(), 3);
+                            }
+                        }
                         KeyCode::Char('r') => app.refresh(Refresh::Forced),
                         KeyCode::Char('t') => app.toggle_auto_refresh(),
                         KeyCode::Char('i') => app.toggle_detail_panel(),
@@ -2129,6 +2188,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                         KeyCode::Enter | KeyCode::Char('e') => app.open_provider_edit(),
                         KeyCode::Char('n') => app.start_provider_rename(),
                         KeyCode::Char('d') => app.request_remove_provider(),
+                        KeyCode::Char('l') => app.open_provider_launch(),
                         _ => {}
                     },
                 },
@@ -2157,6 +2217,17 @@ async fn handle_menu_key(app: &mut App, terminal: &mut DefaultTerminal, code: Ke
                 app.selected = view_idx;
             }
             app.switch_selected();
+        }
+        MenuAction::Launch(alias) => {
+            app.close_menu();
+            perform_launch(
+                terminal,
+                app,
+                alias,
+                None,
+                crate::provider::ReasoningLaunch::Saved,
+            )
+            .await;
         }
         MenuAction::ReloginRequest(alias, email) => {
             app.open_relogin_flow_menu(alias, email);
@@ -2235,6 +2306,54 @@ fn resume_tui_after_plain_output(terminal: &mut DefaultTerminal) {
     reset_plain_terminal_view();
     *terminal = ratatui::init();
     let _ = terminal.clear();
+}
+
+async fn perform_launch(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    alias: String,
+    model: Option<String>,
+    reasoning: crate::provider::ReasoningLaunch,
+) {
+    suspend_tui_for_plain_output();
+    crate::output::set_message_mode(crate::output::MessageMode::Stdout);
+
+    match &model {
+        Some(model) => println!("\n=== Launch Codex: {alias} / {model} ===\n"),
+        None => println!("\n=== Launch Codex: {alias} ===\n"),
+    }
+
+    let result = crate::launch::launch_for_tui(&alias, model.as_deref(), reasoning).await;
+
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    match &result {
+        Ok(exit_code) if *exit_code == 0 => println!("\nCodex exited successfully."),
+        Ok(exit_code) => println!("\nCodex exited with code {exit_code}."),
+        Err(e) => eprintln!("\nError: {e}"),
+    }
+    println!("\nReturning to TUI...");
+    if result.is_err() || result.as_ref().is_ok_and(|code| *code != 0) {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+    }
+
+    crate::output::set_message_mode(crate::output::MessageMode::Silent);
+    resume_tui_after_plain_output(terminal);
+
+    match result {
+        Ok(0) => {
+            app.set_status(format!("Codex session ended ({alias})"), 4);
+            app.load_profiles_preserving_selection();
+            app.refresh(Refresh::Cached);
+            if app.auto_refresh_enabled {
+                app.next_auto_refresh = Some(Instant::now() + app.auto_refresh_interval);
+            }
+        }
+        Ok(exit_code) => {
+            app.set_status_error(format!("Codex exited with code {exit_code}"), 5);
+        }
+        Err(e) => app.set_status_error(format!("Launch failed: {e}"), 6),
+    }
 }
 
 /// Suspend the TUI, run OAuth (browser PKCE or device code), persist the
@@ -2597,6 +2716,56 @@ mod tests {
         assert_eq!(p.wire_api, "responses");
         assert_eq!(app.active_tab, Tab::Providers);
         assert!(app.providers.iter().any(|x| x.alias == "myrouter"));
+    }
+
+    #[test]
+    fn provider_launch_picker_picks_a_saved_model_without_writing() {
+        let mut app = App::new();
+        app.providers.push(crate::provider::ProviderProfile::build(
+            "or",
+            "https://openrouter.ai/api/v1",
+            vec![
+                crate::provider::ProviderModel::from_id("minimax/minimax-m3:free"),
+                crate::provider::ProviderModel {
+                    id: "liquid/lfm-2.5-2.6b:free".into(),
+                    reasoning: Some("high".into()),
+                    no_web_search: true,
+                },
+            ],
+            "sk-test",
+        ));
+        app.open_provider_launch();
+        assert!(app.provider_launch.is_some());
+        assert!(app.handle_provider_launch_key(KeyCode::Down).is_none());
+        let (alias, model, reasoning) = app
+            .handle_provider_launch_key(KeyCode::Enter)
+            .expect("enter launches");
+        assert_eq!(alias, "or");
+        assert_eq!(model, "liquid/lfm-2.5-2.6b:free");
+        assert_eq!(
+            reasoning,
+            crate::provider::ReasoningLaunch::Effort("high".into())
+        );
+        assert!(app.provider_launch.is_none());
+        assert_eq!(
+            app.providers[0].models[1].reasoning.as_deref(),
+            Some("high"),
+            "picker must not persist a launch-only reasoning change"
+        );
+    }
+
+    #[test]
+    fn provider_enter_still_opens_the_edit_form() {
+        let mut app = App::new();
+        app.providers.push(crate::provider::ProviderProfile::build(
+            "or",
+            "https://openrouter.ai/api/v1",
+            vec![crate::provider::ProviderModel::from_id("m")],
+            "k",
+        ));
+        app.open_provider_edit();
+        assert!(app.provider_form.is_some());
+        assert!(app.provider_launch.is_none());
     }
 
     #[test]

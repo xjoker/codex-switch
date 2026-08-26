@@ -2,11 +2,28 @@ use std::io::{self, IsTerminal, Write};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use anyhow::Error;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use serde::Serialize;
 
 use crate::jwt::AccountInfo;
 use crate::usage::{AdditionalRateLimit, ResetCredit, UsageInfo, WindowUsage};
+
+/// Marker error: the command already printed a user-facing failure message.
+#[derive(Debug)]
+pub struct OutputAlreadyReported;
+
+impl std::fmt::Display for OutputAlreadyReported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("command failed; details were already reported")
+    }
+}
+
+impl std::error::Error for OutputAlreadyReported {}
+
+pub(crate) fn should_report_error(error: &Error) -> bool {
+    error.downcast_ref::<OutputAlreadyReported>().is_none()
+}
 
 // ── JSON types ───────────────────────────────────────────
 

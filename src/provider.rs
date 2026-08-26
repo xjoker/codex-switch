@@ -97,6 +97,17 @@ pub struct ProviderProfile {
     pub api_key: String,
 }
 
+/// How reasoning is applied for one launch. Does not write the provider file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReasoningLaunch {
+    /// Use the selected model's saved `reasoning`.
+    Saved,
+    /// Omit `model_reasoning_effort` even if the model saved one.
+    Skip,
+    /// Force this effort for this launch only.
+    Effort(String),
+}
+
 fn providers_dir() -> Result<PathBuf> {
     Ok(auth::app_home()?.join("providers"))
 }
@@ -355,6 +366,14 @@ impl ProviderProfile {
     /// the environment (see [`launch_env`](Self::launch_env)) so it never appears
     /// in argv or the process table.
     pub fn codex_config_args(&self, model_id: Option<&str>) -> Result<Vec<String>> {
+        self.codex_config_args_with(model_id, ReasoningLaunch::Saved)
+    }
+
+    pub fn codex_config_args_with(
+        &self,
+        model_id: Option<&str>,
+        reasoning: ReasoningLaunch,
+    ) -> Result<Vec<String>> {
         let model = self.resolve_model(model_id)?;
         let id = &self.provider_id;
         let mut pairs = vec![
@@ -374,7 +393,12 @@ impl ProviderProfile {
             format!("model_provider={}", toml_string(id)),
             format!("model={}", toml_string(&model.id)),
         ];
-        if let Some(effort) = &model.reasoning {
+        let effort = match &reasoning {
+            ReasoningLaunch::Saved => model.reasoning.as_deref(),
+            ReasoningLaunch::Skip => None,
+            ReasoningLaunch::Effort(value) => Some(value.as_str()),
+        };
+        if let Some(effort) = effort {
             pairs.push(format!("model_reasoning_effort={effort}"));
         }
         if model.no_web_search {
@@ -849,6 +873,35 @@ api_key = "sk-legacy-key"
             .unwrap();
         let extra_pos = args.iter().position(|a| a == "foo=bar").unwrap();
         assert!(model_pos < reasoning_pos && reasoning_pos < web_pos && web_pos < extra_pos);
+    }
+
+    #[test]
+    fn launch_reasoning_override_replaces_or_skips_saved_effort() {
+        let mut p = sample("openrouter");
+        p.models = vec![ProviderModel {
+            id: "deepseek/deepseek-r1-0528".into(),
+            reasoning: Some("high".into()),
+            no_web_search: false,
+        }];
+        p.default_model = "deepseek/deepseek-r1-0528".into();
+
+        let forced = p
+            .codex_config_args_with(
+                Some("deepseek/deepseek-r1-0528"),
+                ReasoningLaunch::Effort("low".into()),
+            )
+            .unwrap();
+        assert!(forced.iter().any(|a| a == "model_reasoning_effort=low"));
+        assert!(!forced.iter().any(|a| a == "model_reasoning_effort=high"));
+
+        let skipped = p
+            .codex_config_args_with(Some("deepseek/deepseek-r1-0528"), ReasoningLaunch::Skip)
+            .unwrap();
+        assert!(
+            !skipped
+                .iter()
+                .any(|a| a.starts_with("model_reasoning_effort="))
+        );
     }
 
     #[test]

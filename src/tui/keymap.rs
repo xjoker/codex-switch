@@ -9,6 +9,7 @@ pub enum Section {
     Selection,
     Account,
     Batch,
+    Provider,
     Global,
 }
 
@@ -19,6 +20,7 @@ impl Section {
             Section::Selection => "Selection",
             Section::Account => "Account actions  (open via Enter)",
             Section::Batch => "Batch actions  (open via Enter when accounts marked)",
+            Section::Provider => "Providers tab",
             Section::Global => "Global",
         }
     }
@@ -72,6 +74,12 @@ pub const KEYMAP: &[Binding] = &[
         keys: "r",
         section: Section::Account,
         label: "refresh account details",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "o",
+        section: Section::Account,
+        label: "launch codex",
         in_status_bar: false,
     },
     Binding {
@@ -133,6 +141,37 @@ pub const KEYMAP: &[Binding] = &[
         keys: "d",
         section: Section::Batch,
         label: "delete selected",
+        in_status_bar: false,
+    },
+    // Providers tab
+    Binding {
+        keys: "l",
+        section: Section::Provider,
+        label: "launch: pick model and reasoning",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "e / enter",
+        section: Section::Provider,
+        label: "edit provider",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "n",
+        section: Section::Provider,
+        label: "rename provider",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "a",
+        section: Section::Provider,
+        label: "add provider",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "d",
+        section: Section::Provider,
+        label: "remove selected provider",
         in_status_bar: false,
     },
     // Global

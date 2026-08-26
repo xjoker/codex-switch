@@ -28,7 +28,7 @@ pub(crate) async fn self_update_cmd(
                 .is_some()
         {
             output::user_println(&color::warn(&error.to_string()));
-            return Err(crate::OutputAlreadyReported.into());
+            return Err(crate::output::OutputAlreadyReported.into());
         }
         return Err(error);
     }

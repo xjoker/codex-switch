@@ -12,6 +12,8 @@ mod cache;
 mod cli;
 #[allow(dead_code)]
 mod color;
+#[allow(dead_code)]
+mod commands;
 pub mod config;
 #[allow(dead_code)]
 mod daemon;
@@ -20,6 +22,7 @@ mod error;
 #[allow(dead_code)]
 mod http_retry;
 pub mod jwt;
+pub mod launch;
 #[allow(dead_code)]
 mod logging;
 #[allow(dead_code)]

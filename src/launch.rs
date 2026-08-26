@@ -1,5 +1,5 @@
 use crate::output::{print_json, user_println};
-use crate::provider::{self, ProviderProfile};
+use crate::provider::{self, ProviderProfile, ReasoningLaunch};
 use crate::signals::ShutdownListener;
 use crate::{auth, config, profile};
 use anyhow::{Context, Result};
@@ -30,6 +30,16 @@ async fn wait_for_codex_to_read_auth(
     }
 }
 
+/// Launch Codex for one alias from the TUI. Returns Codex's exit code instead of
+/// terminating the codex-switch process on failure.
+pub(crate) async fn launch_for_tui(
+    alias: &str,
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
+) -> Result<i32> {
+    launch_interactive(Some(alias), vec![], false, false, model, reasoning).await
+}
+
 pub(crate) async fn launch_cmd(
     alias: Option<&str>,
     args: Vec<String>,
@@ -37,6 +47,34 @@ pub(crate) async fn launch_cmd(
     consume_card: bool,
     model: Option<&str>,
 ) -> Result<()> {
+    finish_launch_cli(
+        launch_interactive(
+            alias,
+            args,
+            json,
+            consume_card,
+            model,
+            ReasoningLaunch::Saved,
+        )
+        .await?,
+    )
+}
+
+fn finish_launch_cli(exit_code: i32) -> Result<()> {
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+async fn launch_interactive(
+    alias: Option<&str>,
+    args: Vec<String>,
+    json: bool,
+    consume_card: bool,
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
+) -> Result<i32> {
     use std::io::IsTerminal;
 
     // A custom API provider profile takes a separate, simpler path: it has no
@@ -47,7 +85,7 @@ pub(crate) async fn launch_cmd(
         && provider::exists(alias)
     {
         let profile = provider::load(alias)?;
-        return launch_provider(profile, model, args, json);
+        return launch_provider(profile, model, reasoning, args, json);
     }
 
     let mut forwarded = args;
@@ -66,13 +104,13 @@ pub(crate) async fn launch_cmd(
         }
         None => {
             let card_policy = if consume_card {
-                super::profile::CardPolicy::PreApproved
+                crate::commands::profile::CardPolicy::PreApproved
             } else if !json && std::io::stdin().is_terminal() {
-                super::profile::CardPolicy::Prompt
+                crate::commands::profile::CardPolicy::Prompt
             } else {
-                super::profile::CardPolicy::Deny
+                crate::commands::profile::CardPolicy::Deny
             };
-            let outcome = super::profile::select_best_profile(json, card_policy).await?;
+            let outcome = crate::commands::profile::select_best_profile(json, card_policy).await?;
             revival_hint = outcome.revival_hint;
             outcome.alias
         }
@@ -80,7 +118,7 @@ pub(crate) async fn launch_cmd(
     if let Some(hint) = &revival_hint
         && !json
     {
-        user_println(&super::profile::revival_hint_message(hint));
+        user_println(&crate::commands::profile::revival_hint_message(hint));
     }
 
     ensure_codex_available()?;
@@ -211,19 +249,15 @@ pub(crate) async fn launch_cmd(
             "exit_code": exit_code,
         });
         if let Some(hint) = &revival_hint {
-            payload["hint"] = serde_json::Value::String(super::profile::revival_hint_message(hint));
+            payload["hint"] =
+                serde_json::Value::String(crate::commands::profile::revival_hint_message(hint));
         }
         print_json(&payload);
     } else {
         user_println("codex exited");
     }
 
-    // Propagate codex exit code
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    Ok(exit_code)
 }
 
 /// Verify the `codex` binary is reachable before we stage anything or spawn it.
@@ -264,20 +298,29 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 fn launch_provider(
     profile: ProviderProfile,
     model: Option<&str>,
+    reasoning: ReasoningLaunch,
     args: Vec<String>,
     json: bool,
-) -> Result<()> {
+) -> Result<i32> {
     ensure_codex_available()?;
 
     let selected = profile.resolve_model(model)?;
     let (env_name, env_value) = profile.launch_env();
-    let mut codex_args = profile.codex_config_args(model)?;
+    let mut codex_args = match &reasoning {
+        ReasoningLaunch::Saved => profile.codex_config_args(model)?,
+        other => profile.codex_config_args_with(model, other.clone())?,
+    };
     codex_args.extend(args);
 
     if !json {
+        let reasoning_note = match &reasoning {
+            ReasoningLaunch::Saved => String::new(),
+            ReasoningLaunch::Skip => " reasoning=(skip)".to_string(),
+            ReasoningLaunch::Effort(effort) => format!(" reasoning={effort}"),
+        };
         user_println(&format!(
-            "Launching Codex with provider '{}' ({})...",
-            profile.alias, selected.id
+            "Launching Codex with provider '{}' ({}{})...",
+            profile.alias, selected.id, reasoning_note
         ));
     }
 
@@ -306,10 +349,7 @@ fn launch_provider(
         user_println("codex exited");
     }
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-    Ok(())
+    Ok(exit_code)
 }
 
 /// Snapshot the live auth.json into `backup` before it is overwritten by the
