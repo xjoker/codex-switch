@@ -96,7 +96,7 @@ pub enum ProviderCommand {
     after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, reset-card, rename, delete, login, import, self-update, daemon status, provider add/list/show/rename/remove)
+    /// Output as compact JSON (supported by list, use, launch, reset-card, rename, delete, login, import, self-update, daemon status, provider add/list/show/rename/remove)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -215,7 +215,7 @@ pub enum Commands {
     },
     /// Launch Codex CLI with the best (or specified) profile's auth
     #[command(
-        after_help = "Everything after `--` is forwarded to Codex unchanged and is never parsed as a codex-switch flag or alias.\nUse that separator when the Codex argv starts with a prompt, subcommand (`exec`, `resume`, …), or a flag that also exists on codex-switch (`--json`, `--color`, `--model`).\n\nExamples:\n  codex-switch launch work -- exec --json \"review this\"\n  codex-switch launch openrouter -- -s workspace-write -a never\n  codex-switch launch -- exec --json \"do the thing\"\n\n`--model` before `--` selects a saved provider model, or is forwarded as Codex `--model` for a ChatGPT profile. `--model` after `--` is Codex's own flag."
+        after_help = "Codex argv is everything after `--`, a known Codex subcommand (`exec`, `resume`, …), or a flag that is not a launch/codex-switch option (`-s`, `--sandbox`, …). Tokens on both sides of `--` are kept (so `launch work exec -- --json` still runs `exec`).\nUse `--` when the Codex argv starts with a prompt, or with a flag that also exists on codex-switch (`--json`, `--color`, `--model`).\n\nExamples:\n  codex-switch launch work -- exec --json \"review this\"\n  codex-switch launch work exec -- --json \"review this\"\n  codex-switch launch exec --json \"do the thing\"\n  codex-switch launch openrouter -- -s workspace-write -a never\n\n`--model` before `--` selects a saved provider model, or is forwarded as Codex `--model` for a ChatGPT profile. `--model` after `--` is Codex's own flag.\n`--json launch` prints one JSON envelope after Codex exits (Codex stdout/stderr are captured into that envelope, not mixed onto stdout)."
     )]
     Launch {
         /// Profile alias (omit to auto-select best available)
@@ -245,23 +245,115 @@ pub enum Commands {
     Daemon(DaemonCommand),
 }
 
-/// Split `codex-switch launch … -- <codex argv>` so the Codex side is never
-/// parsed as a codex-switch alias or global flag.
+/// Split `codex-switch launch …` so Codex argv is never parsed as a
+/// codex-switch alias or global flag.
 ///
 /// Clap treats a bare `--` as "stop parsing flags" but still fills the next
-/// positional, so `launch -- work` would otherwise become alias `work`.
+/// positional, so `launch -- work` would otherwise become alias `work`. A
+/// known Codex subcommand (`exec`, `resume`, …) or a non-launch flag (`-s`)
+/// in the alias slot is treated the same way, so `launch exec --json` is not
+/// `Profile 'exec' not found`.
 pub(crate) fn extract_launch_passthrough(argv: &[String]) -> (Vec<String>, Option<Vec<String>>) {
     let Some(launch_at) = first_subcommand(argv).filter(|&i| argv[i] == "launch") else {
         return (argv.to_vec(), None);
     };
-    let Some(dash) = argv[launch_at + 1..]
-        .iter()
-        .position(|arg| arg == "--")
-        .map(|rel| launch_at + 1 + rel)
-    else {
+    let mut i = launch_at + 1;
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        if arg == "--" {
+            return (argv[..i].to_vec(), Some(argv[i + 1..].to_vec()));
+        }
+        if let Some(skip) = skip_launch_or_global_flag(argv, i) {
+            i += skip;
+            continue;
+        }
+        if arg.starts_with('-') || is_codex_subcommand(arg) {
+            return (argv[..i].to_vec(), Some(argv[i..].to_vec()));
+        }
+        if let Some(rel) = argv[i + 1..].iter().position(|next| next == "--") {
+            let dash = i + 1 + rel;
+            return (argv[..dash].to_vec(), Some(argv[dash + 1..].to_vec()));
+        }
         return (argv.to_vec(), None);
+    }
+    (argv.to_vec(), None)
+}
+
+/// Concatenate clap's trailing launch args with argv taken from after `--`
+/// (or from a Codex subcommand / foreign flag). `launch work exec -- --json`
+/// must keep `exec`.
+pub(crate) fn merge_launch_args(
+    clap_args: Vec<String>,
+    passthrough: Option<Vec<String>>,
+) -> Vec<String> {
+    match passthrough {
+        Some(right) => {
+            let mut args = clap_args;
+            args.extend(right);
+            args
+        }
+        None => clap_args,
+    }
+}
+
+fn skip_launch_or_global_flag(argv: &[String], i: usize) -> Option<usize> {
+    let arg = argv[i].as_str();
+    if arg == "-h" || arg == "-V" {
+        return Some(1);
+    }
+    let rest = arg.strip_prefix("--")?;
+    if rest.is_empty() {
+        return None;
+    }
+    let (name, has_eq) = match rest.split_once('=') {
+        Some((name, _)) => (name, true),
+        None => (rest, false),
     };
-    (argv[..dash].to_vec(), Some(argv[dash + 1..].to_vec()))
+    match name {
+        "consume-card" | "json" | "json-pretty" | "debug" | "help" | "version" => Some(1),
+        "model" | "proxy" | "color" => {
+            if has_eq || i + 1 >= argv.len() || argv[i + 1] == "--" || argv[i + 1].starts_with('-')
+            {
+                Some(1)
+            } else {
+                Some(2)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_codex_subcommand(name: &str) -> bool {
+    matches!(
+        name,
+        "agents"
+            | "exec"
+            | "review"
+            | "login"
+            | "logout"
+            | "mcp"
+            | "plugin"
+            | "mcp-server"
+            | "app-server"
+            | "remote-control"
+            | "completion"
+            | "update"
+            | "doctor"
+            | "sandbox"
+            | "debug"
+            | "apply"
+            | "resume"
+            | "queue"
+            | "archive"
+            | "delete"
+            | "migrate-rollouts"
+            | "unarchive"
+            | "fork"
+            | "cloud"
+            | "exec-server"
+            | "features"
+            | "help"
+    )
 }
 
 fn first_subcommand(argv: &[String]) -> Option<usize> {
@@ -338,12 +430,14 @@ mod tests {
         }
     }
 
-    fn parse_launch(argv: &[&str]) -> (bool, Option<String>, Option<String>, Vec<String>) {
-        let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{e}"));
+    fn parse_launch(raw_args: &[&str]) -> (bool, Option<String>, Option<String>, Vec<String>) {
+        let raw = argv(raw_args);
+        let (left, right) = extract_launch_passthrough(&raw);
+        let cli = Cli::try_parse_from(&left).unwrap_or_else(|e| panic!("{e}"));
         match cli.command {
             Commands::Launch {
                 alias, model, args, ..
-            } => (cli.json, alias, model, args),
+            } => (cli.json, alias, model, merge_launch_args(args, right)),
             other => panic!("expected launch, got {other:?}"),
         }
     }
@@ -571,5 +665,74 @@ mod tests {
                 "ship it"
             ]
         );
+    }
+
+    #[test]
+    fn launch_merges_args_on_both_sides_of_double_dash() {
+        let (json, alias, _, args) = parse_launch(&[
+            "codex-switch",
+            "launch",
+            "work",
+            "exec",
+            "--",
+            "--json",
+            "hi",
+        ]);
+        assert!(!json);
+        assert_eq!(alias.as_deref(), Some("work"));
+        assert_eq!(args, ["exec", "--json", "hi"]);
+    }
+
+    #[test]
+    fn launch_exec_without_double_dash_is_codex_not_an_alias() {
+        let (json, alias, _, args) =
+            parse_launch(&["codex-switch", "launch", "exec", "--json", "do the thing"]);
+        assert!(
+            !json,
+            "Codex exec --json must not turn on cs --json when exec is the first token"
+        );
+        assert_eq!(alias, None);
+        assert_eq!(args, ["exec", "--json", "do the thing"]);
+    }
+
+    #[test]
+    fn launch_sandbox_flag_without_double_dash_is_codex_not_a_parse_error() {
+        let (_, alias, _, args) = parse_launch(&[
+            "codex-switch",
+            "launch",
+            "work",
+            "--",
+            "-s",
+            "workspace-write",
+        ]);
+        assert_eq!(alias.as_deref(), Some("work"));
+        assert_eq!(args, ["-s", "workspace-write"]);
+
+        let (_, alias, _, args) = parse_launch(&[
+            "codex-switch",
+            "launch",
+            "-s",
+            "workspace-write",
+            "-a",
+            "never",
+        ]);
+        assert_eq!(alias, None);
+        assert_eq!(args, ["-s", "workspace-write", "-a", "never"]);
+    }
+
+    #[test]
+    fn launch_resume_without_alias_is_codex_subcommand() {
+        let (_, alias, _, args) = parse_launch(&["codex-switch", "launch", "resume", "--last"]);
+        assert_eq!(alias, None);
+        assert_eq!(args, ["resume", "--last"]);
+    }
+
+    #[test]
+    fn merge_launch_args_keeps_left_tokens_then_right() {
+        assert_eq!(
+            merge_launch_args(argv(&["exec"]), Some(argv(&["--json", "hi"]))),
+            argv(&["exec", "--json", "hi"])
+        );
+        assert_eq!(merge_launch_args(argv(&["exec"]), None), argv(&["exec"]));
     }
 }

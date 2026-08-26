@@ -83,7 +83,7 @@ codex-switch launch -- exec --json "do the thing"
 codex-switch launch -- -s workspace-write -a never
 ```
 
-Arguments after `--` are Codex's, not codex-switch's. That separator is required when the Codex argv starts with a subcommand, a prompt that looks like an alias, or a flag that also exists on codex-switch (`--json`, `--color`, `--model`). Current Codex has no `--full-auto`; use `-a never`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox`.
+Arguments after `--` are Codex's, not codex-switch's. A known Codex subcommand (`exec`, `resume`, …) can start the argv without `--` (`codex-switch launch exec --json "…"`). Tokens on both sides of `--` are kept. The separator is still required when the Codex argv starts with a prompt that looks like an alias, or a flag that also exists on codex-switch (`--json`, `--color`, `--model`) immediately after the alias. Current Codex has no `--full-auto`; use `-a never`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox`. `--json launch` prints one JSON object after Codex exits and captures Codex stdout/stderr into that object.
 
 The launch lock serializes overlapping launch sessions. The restore delay is configurable (`launch.restore_delay_secs`) because Codex does not expose an authentication-read handshake.
 

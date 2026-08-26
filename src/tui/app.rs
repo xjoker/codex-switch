@@ -682,7 +682,12 @@ impl App {
     pub fn handle_provider_launch_key(
         &mut self,
         code: KeyCode,
-    ) -> Option<(String, String, crate::provider::ReasoningLaunch)> {
+    ) -> Option<(
+        String,
+        String,
+        crate::provider::ReasoningLaunch,
+        Vec<String>,
+    )> {
         let picker = self.provider_launch.as_mut()?;
         match picker.handle_key(code) {
             super::provider_launch::LaunchPickerOutcome::Continue => None,
@@ -694,9 +699,10 @@ impl App {
                 alias,
                 model,
                 reasoning,
+                extra_args,
             } => {
                 self.provider_launch = None;
-                Some((alias, model, reasoning))
+                Some((alias, model, reasoning, extra_args))
             }
         }
     }
@@ -2090,8 +2096,18 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 continue;
             }
             if app.provider_launch.is_some() {
-                if let Some((alias, model, reasoning)) = app.handle_provider_launch_key(key.code) {
-                    perform_launch(terminal, &mut app, alias, Some(model), reasoning).await;
+                if let Some((alias, model, reasoning, extra_args)) =
+                    app.handle_provider_launch_key(key.code)
+                {
+                    perform_launch(
+                        terminal,
+                        &mut app,
+                        alias,
+                        Some(model),
+                        reasoning,
+                        extra_args,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -2179,6 +2195,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                                     alias,
                                     None,
                                     crate::provider::ReasoningLaunch::Saved,
+                                    Vec::new(),
                                 )
                                 .await;
                             } else {
@@ -2240,6 +2257,7 @@ async fn handle_menu_key(app: &mut App, terminal: &mut DefaultTerminal, code: Ke
                 alias,
                 None,
                 crate::provider::ReasoningLaunch::Saved,
+                Vec::new(),
             )
             .await;
         }
@@ -2328,6 +2346,7 @@ async fn perform_launch(
     alias: String,
     model: Option<String>,
     reasoning: crate::provider::ReasoningLaunch,
+    extra_args: Vec<String>,
 ) {
     suspend_tui_for_plain_output();
     crate::output::set_message_mode(crate::output::MessageMode::Stdout);
@@ -2337,7 +2356,8 @@ async fn perform_launch(
         None => println!("\n=== Launch Codex: {alias} ===\n"),
     }
 
-    let result = crate::launch::launch_for_tui(&alias, model.as_deref(), reasoning).await;
+    let result =
+        crate::launch::launch_for_tui(&alias, model.as_deref(), reasoning, extra_args).await;
 
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
@@ -2744,7 +2764,7 @@ mod tests {
         app.handle_provider_list_key(KeyCode::Char('o'));
         assert!(app.provider_launch.is_some());
         assert!(app.handle_provider_launch_key(KeyCode::Down).is_none());
-        let (alias, model, reasoning) = app
+        let (alias, model, reasoning, extra_args) = app
             .handle_provider_launch_key(KeyCode::Enter)
             .expect("enter launches");
         assert_eq!(alias, "or");
@@ -2753,6 +2773,7 @@ mod tests {
             reasoning,
             crate::provider::ReasoningLaunch::Effort("high".into())
         );
+        assert!(extra_args.is_empty());
         assert!(app.provider_launch.is_none());
         assert_eq!(
             app.providers[0].models[1].reasoning.as_deref(),

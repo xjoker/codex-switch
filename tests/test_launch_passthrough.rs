@@ -80,6 +80,8 @@ data.append({"argv": sys.argv[1:]})
 open(path, "w", encoding="utf-8").write(json.dumps(data))
 if sys.argv[1:] == ["--version"]:
     sys.stdout.write("codex-cli 0.0.0-test\n")
+else:
+    sys.stdout.write("codex-ok\n")
 sys.exit(0)
 "#,
     )
@@ -321,5 +323,93 @@ fn launch_provider_passthrough_model_drops_saved_model_overrides() {
     );
     let exec_at = argv.iter().position(|a| a == "exec").expect("exec");
     assert_eq!(&argv[exec_at - 2..], ["-m", "one-shot", "exec", "hi"]);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_exec_without_separator_is_not_an_alias() {
+    let home = temp_home("exec-not-alias");
+    let (fake_bin, log) = install_fake_codex(&home);
+
+    let output = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "exec", "--json", "review this"],
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "auto-select with no profiles must fail: {combined}"
+    );
+    assert!(
+        combined.contains("no saved profiles"),
+        "launch exec must auto-select, not look up alias exec: {combined}"
+    );
+    assert!(!combined.contains("Profile 'exec' not found"), "{combined}");
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_merges_tokens_on_both_sides_of_double_dash() {
+    let home = temp_home("merge-dash");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+
+    let output = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "work", "exec", "--", "--json", "hi"],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(last_non_version_argv(&log), ["exec", "--json", "hi"]);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_json_reports_passthrough_model_and_captures_codex_stdout() {
+    let home = temp_home("json-model");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+
+    let output = run(
+        &home,
+        &fake_bin,
+        &log,
+        &[
+            "--json",
+            "launch",
+            "openrouter",
+            "--",
+            "-m",
+            "one-shot",
+            "exec",
+            "hi",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["alias"], "openrouter");
+    assert_eq!(payload["model"], "one-shot");
+    assert!(
+        payload["codex_stdout"]
+            .as_str()
+            .is_some_and(|s| s.contains("codex-ok")),
+        "codex stdout must be captured into the JSON envelope: {payload}"
+    );
     let _ = fs::remove_dir_all(home);
 }

@@ -23,7 +23,7 @@ mod workspace;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands, extract_launch_passthrough};
+use cli::{Cli, Commands, extract_launch_passthrough, merge_launch_args};
 use output::{MessageMode, print_error, should_report_error, user_println};
 use tracing_subscriber::EnvFilter;
 
@@ -274,7 +274,7 @@ async fn dispatch(
             model,
             args,
         } => {
-            let args = launch_passthrough.unwrap_or(args);
+            let args = merge_launch_args(args, launch_passthrough);
             commands::launch_cmd(alias.as_deref(), args, json, consume_card, model.as_deref())
                 .await?
         }

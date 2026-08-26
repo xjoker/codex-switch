@@ -57,7 +57,7 @@ codex-switch import ~/auth-backups
 
 - `use` 只切换 ChatGPT 的 `$CODEX_HOME/auth.json`；**不能**用于自定义提供方。
 - 已在跑的 Codex 进程不会自动换号，需重启 Codex，或用 `launch` 开新进程。
-- Codex 参数写在 `--` 后面：`codex-switch launch work -- exec --json "…"`。没有 `--` 时，`launch -- work` 这种写法会把 `work` 当成别名而不是 prompt。
+- Codex 参数写在 `--` 后面：`codex-switch launch work -- exec --json "…"`。`exec` / `resume` 等 Codex 子命令也可以直接跟在 `launch` 后面，不必再写 `--`。`--` 两侧的参数都会保留。prompt 看起来像别名时仍须 `--`。
 - 当前 Codex 没有 `--full-auto`；用 `-a never`、`--sandbox` 或 `--dangerously-bypass-approvals-and-sandbox`。
 - 池子耗尽时，交互式 `use` / `launch` 可提示消耗重置卡；脚本须显式加 `--consume-card`。
 

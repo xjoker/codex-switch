@@ -34,6 +34,9 @@ enum Focus {
     Alias,
     BaseUrl,
     ApiKey,
+    EnvKey,
+    WireApi,
+    Extra,
     Models,
 }
 
@@ -41,7 +44,34 @@ enum Focus {
 struct ModelDraft {
     id: String,
     reasoning_idx: usize,
+    custom_reasoning: Option<String>,
     no_web_search: bool,
+}
+
+fn empty_model_draft() -> ModelDraft {
+    ModelDraft {
+        id: String::new(),
+        reasoning_idx: 0,
+        custom_reasoning: None,
+        no_web_search: false,
+    }
+}
+
+pub(crate) fn reasoning_choice(value: Option<&str>) -> (usize, Option<String>) {
+    let Some(value) = value.filter(|v| !v.is_empty()) else {
+        return (0, None);
+    };
+    match REASONING_CHOICES.iter().position(|choice| *choice == value) {
+        Some(idx) => (idx, None),
+        None => (0, Some(value.to_string())),
+    }
+}
+
+fn draft_reasoning_label(draft: &ModelDraft) -> &str {
+    draft
+        .custom_reasoning
+        .as_deref()
+        .unwrap_or(REASONING_CHOICES[draft.reasoning_idx])
 }
 
 pub struct ProviderFormState {
@@ -52,8 +82,10 @@ pub struct ProviderFormState {
     alias: String,
     base_url: String,
     api_key: String,
-    original_alias: Option<String>,
     original_key: String,
+    env_key: String,
+    wire_api: String,
+    extra_sets: String,
     models: Vec<ModelDraft>,
     model_idx: usize,
     default_idx: usize,
@@ -79,13 +111,11 @@ impl ProviderFormState {
             alias: String::new(),
             base_url: String::new(),
             api_key: String::new(),
-            original_alias: None,
             original_key: String::new(),
-            models: vec![ModelDraft {
-                id: String::new(),
-                reasoning_idx: 0,
-                no_web_search: false,
-            }],
+            env_key: String::new(),
+            wire_api: "responses".to_string(),
+            extra_sets: String::new(),
+            models: vec![empty_model_draft()],
             model_idx: 0,
             default_idx: 0,
             input: String::new(),
@@ -99,10 +129,15 @@ impl ProviderFormState {
         let models: Vec<ModelDraft> = profile
             .models
             .iter()
-            .map(|model| ModelDraft {
-                id: model.id.clone(),
-                reasoning_idx: reasoning_index(model.reasoning.as_deref()),
-                no_web_search: model.no_web_search,
+            .map(|model| {
+                let (reasoning_idx, custom_reasoning) =
+                    reasoning_choice(model.reasoning.as_deref());
+                ModelDraft {
+                    id: model.id.clone(),
+                    reasoning_idx,
+                    custom_reasoning,
+                    no_web_search: model.no_web_search,
+                }
             })
             .collect();
         let default_idx = models
@@ -117,14 +152,12 @@ impl ProviderFormState {
             alias: profile.alias.clone(),
             base_url: profile.base_url.clone(),
             api_key: String::new(),
-            original_alias: Some(profile.alias.clone()),
             original_key: profile.api_key.clone(),
+            env_key: profile.env_key.clone(),
+            wire_api: profile.wire_api.clone(),
+            extra_sets: profile.codex_config.join(", "),
             models: if models.is_empty() {
-                vec![ModelDraft {
-                    id: String::new(),
-                    reasoning_idx: 0,
-                    no_web_search: false,
-                }]
+                vec![empty_model_draft()]
             } else {
                 models
             },
@@ -298,6 +331,9 @@ impl ProviderFormState {
             Focus::Alias => self.alias.clone(),
             Focus::BaseUrl => self.base_url.clone(),
             Focus::ApiKey => self.api_key.clone(),
+            Focus::EnvKey => self.env_key.clone(),
+            Focus::WireApi => self.wire_api.clone(),
+            Focus::Extra => self.extra_sets.clone(),
             Focus::Models => self.models[self.model_idx].id.clone(),
         };
         self.input = value;
@@ -307,11 +343,7 @@ impl ProviderFormState {
 
     fn add_model_and_edit(&mut self) {
         self.focus = Focus::Models;
-        self.models.push(ModelDraft {
-            id: String::new(),
-            reasoning_idx: 0,
-            no_web_search: false,
-        });
+        self.models.push(empty_model_draft());
         self.model_idx = self.models.len() - 1;
         self.input.clear();
         self.cursor = 0;
@@ -387,7 +419,16 @@ impl ProviderFormState {
         if self.focus != Focus::Models || self.is_add_row() {
             return;
         }
-        let idx = &mut self.models[self.model_idx].reasoning_idx;
+        let draft = &mut self.models[self.model_idx];
+        if draft.custom_reasoning.take().is_some() {
+            if delta > 0 {
+                draft.reasoning_idx = 0;
+            } else {
+                draft.reasoning_idx = REASONING_CHOICES.len() - 1;
+            }
+            return;
+        }
+        let idx = &mut draft.reasoning_idx;
         let next = *idx as i32 + delta;
         if next >= 0 && (next as usize) < REASONING_CHOICES.len() {
             *idx = next as usize;
@@ -404,7 +445,12 @@ impl ProviderFormState {
 
     fn auto_edit_if_typing_field(&mut self) {
         match self.focus {
-            Focus::Alias | Focus::BaseUrl | Focus::ApiKey => self.begin_edit(),
+            Focus::Alias
+            | Focus::BaseUrl
+            | Focus::ApiKey
+            | Focus::EnvKey
+            | Focus::WireApi
+            | Focus::Extra => self.begin_edit(),
             Focus::Models => {
                 if self.model_idx < self.models.len() && self.models[self.model_idx].id.is_empty() {
                     self.begin_edit();
@@ -419,6 +465,9 @@ impl ProviderFormState {
             Focus::Alias => self.alias = value,
             Focus::BaseUrl => self.base_url = value,
             Focus::ApiKey => self.api_key = value,
+            Focus::EnvKey => self.env_key = value,
+            Focus::WireApi => self.wire_api = value,
+            Focus::Extra => self.extra_sets = value,
             Focus::Models if self.model_idx < self.models.len() => {
                 self.models[self.model_idx].id = value;
             }
@@ -433,7 +482,11 @@ impl ProviderFormState {
         self.focus = match (self.mode, self.focus) {
             (FormMode::Add, Focus::Alias) => Focus::BaseUrl,
             (_, Focus::BaseUrl) => Focus::ApiKey,
-            (_, Focus::ApiKey) => Focus::Models,
+            (FormMode::Add, Focus::ApiKey) => Focus::Models,
+            (_, Focus::ApiKey) => Focus::EnvKey,
+            (_, Focus::EnvKey) => Focus::WireApi,
+            (_, Focus::WireApi) => Focus::Extra,
+            (_, Focus::Extra) => Focus::Models,
             (_, Focus::Models) if self.mode == FormMode::Add => Focus::Alias,
             (_, Focus::Models) => Focus::BaseUrl,
             (FormMode::Edit, Focus::Alias) => Focus::BaseUrl,
@@ -446,7 +499,11 @@ impl ProviderFormState {
             (_, Focus::BaseUrl) if self.mode == FormMode::Add => Focus::Alias,
             (_, Focus::BaseUrl) => Focus::Models,
             (_, Focus::ApiKey) => Focus::BaseUrl,
-            (_, Focus::Models) => Focus::ApiKey,
+            (_, Focus::EnvKey) => Focus::ApiKey,
+            (_, Focus::WireApi) => Focus::EnvKey,
+            (_, Focus::Extra) => Focus::WireApi,
+            (FormMode::Add, Focus::Models) => Focus::ApiKey,
+            (_, Focus::Models) => Focus::Extra,
             (FormMode::Edit, Focus::Alias) => Focus::Models,
         };
     }
@@ -514,7 +571,9 @@ impl ProviderFormState {
             }
             models.push(ProviderModel {
                 id: id.to_string(),
-                reasoning: if draft.reasoning_idx == 0 {
+                reasoning: if let Some(custom) = &draft.custom_reasoning {
+                    Some(custom.clone())
+                } else if draft.reasoning_idx == 0 {
                     None
                 } else {
                     Some(REASONING_CHOICES[draft.reasoning_idx].to_string())
@@ -528,29 +587,26 @@ impl ProviderFormState {
         let default_idx = self.default_idx.min(models.len() - 1);
         let mut profile = ProviderProfile::build(alias, self.base_url.trim(), models, api_key);
         profile.default_model = profile.models[default_idx].id.clone();
-        if let Some(env_key) = self.original_alias.as_deref().filter(|old| *old == alias) {
-            // Keep a user-overridden env_key when the alias did not change.
-            if let Ok(existing) = crate::provider::load(env_key) {
-                profile.env_key = existing.env_key;
-                profile.wire_api = existing.wire_api;
-                profile.codex_config = existing.codex_config;
-            }
+        let env_key = self.env_key.trim();
+        if !env_key.is_empty() {
+            profile.env_key = env_key.to_string();
         }
+        let wire_api = self.wire_api.trim();
+        if !wire_api.is_empty() {
+            profile.wire_api = wire_api.to_string();
+        }
+        profile.codex_config = self
+            .extra_sets
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect();
         profile
             .validate()
             .map_err(|err| err.to_string())
             .map(|()| profile)
     }
-}
-
-pub(crate) fn reasoning_index(value: Option<&str>) -> usize {
-    let Some(value) = value else {
-        return 0;
-    };
-    REASONING_CHOICES
-        .iter()
-        .position(|choice| *choice == value)
-        .unwrap_or(0)
 }
 
 fn char_to_byte(s: &str, char_pos: usize) -> usize {
@@ -637,6 +693,48 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             key_style,
         ),
     ]));
+    let env_style = if form.focus == Focus::EnvKey {
+        focus_style
+    } else {
+        label
+    };
+    let wire_style = if form.focus == Focus::WireApi {
+        focus_style
+    } else {
+        label
+    };
+    let extra_style = if form.focus == Focus::Extra {
+        focus_style
+    } else {
+        label
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Env key   ", dim()),
+        Span::styled(
+            field_value(form, Focus::EnvKey, &form.env_key, false),
+            env_style,
+        ),
+        if form.env_key.trim().is_empty() {
+            Span::styled("  (default from alias)", dim())
+        } else {
+            Span::styled("", base())
+        },
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Wire API  ", dim()),
+        Span::styled(
+            field_value(form, Focus::WireApi, &form.wire_api, false),
+            wire_style,
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Extra -c  ", dim()),
+        Span::styled(
+            field_value(form, Focus::Extra, &form.extra_sets, false),
+            extra_style,
+        ),
+        Span::styled("  (KEY=VALUE, comma-separated)", dim()),
+    ]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         format!("Models ({})", form.models.len()),
@@ -660,7 +758,7 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
         } else {
             model.id.clone()
         };
-        let reasoning = REASONING_CHOICES[model.reasoning_idx];
+        let reasoning = draft_reasoning_label(model);
         let search = if model.no_web_search {
             "no-search"
         } else {
@@ -919,6 +1017,9 @@ mod tests {
         );
         let mut form = ProviderFormState::edit(&original);
         form.handle_key(KeyCode::Tab); // ApiKey
+        form.handle_key(KeyCode::Tab); // EnvKey
+        form.handle_key(KeyCode::Tab); // WireApi
+        form.handle_key(KeyCode::Tab); // Extra
         form.handle_key(KeyCode::Tab); // Models
         assert_eq!(form.focus, Focus::Models);
         let idx = form.model_idx;
@@ -1091,5 +1192,36 @@ mod tests {
             .join("\n");
         assert!(joined.contains("+ add model"), "{joined}");
         assert!(joined.contains("d/-"), "{joined}");
+    }
+
+    #[test]
+    fn edit_form_keeps_custom_reasoning_and_extra_overrides() {
+        let _home = EnvHome::new();
+        let mut original = ProviderProfile::build(
+            "keep",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel {
+                id: "m".into(),
+                reasoning: Some("custom-effort".into()),
+                no_web_search: false,
+            }],
+            "sk-original",
+        );
+        original.env_key = "MY_CUSTOM_KEY".into();
+        original.wire_api = "responses".into();
+        original.codex_config = vec!["temperature=0".into(), "foo=bar".into()];
+        crate::provider::save(&original).unwrap();
+
+        let mut form = ProviderFormState::edit(&original);
+        let FormOutcome::Saved(profile) = form.handle_key(KeyCode::Char('s')) else {
+            panic!("edit should save; error={:?}", form.error);
+        };
+        assert_eq!(
+            profile.models[0].reasoning.as_deref(),
+            Some("custom-effort")
+        );
+        assert_eq!(profile.env_key, "MY_CUSTOM_KEY");
+        assert_eq!(profile.wire_api, "responses");
+        assert_eq!(profile.codex_config, ["temperature=0", "foo=bar"]);
     }
 }

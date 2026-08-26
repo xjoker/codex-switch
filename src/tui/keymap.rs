@@ -154,7 +154,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "enter / o",
         section: Section::Provider,
-        label: "launch Codex (pick model and reasoning)",
+        label: "launch Codex (pick model, reasoning, extra args)",
         in_status_bar: false,
     },
     Binding {

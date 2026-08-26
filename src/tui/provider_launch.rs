@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use super::popup::{self, PopupState};
-use super::provider_form::{REASONING_CHOICES, reasoning_index};
+use super::provider_form::{REASONING_CHOICES, reasoning_choice};
 use super::theme::{base, dim, header, key};
 use crate::provider::{ProviderProfile, ReasoningLaunch};
 
@@ -27,6 +27,10 @@ pub struct ProviderLaunchState {
     models: Vec<LaunchModel>,
     selected: usize,
     reasoning_idx: usize,
+    custom_reasoning: Option<String>,
+    extra_args: String,
+    extra_editing: bool,
+    extra_cursor: usize,
 }
 
 pub enum LaunchPickerOutcome {
@@ -36,6 +40,7 @@ pub enum LaunchPickerOutcome {
         alias: String,
         model: String,
         reasoning: ReasoningLaunch,
+        extra_args: Vec<String>,
     },
 }
 
@@ -55,16 +60,20 @@ impl ProviderLaunchState {
             .iter()
             .position(|model| model.is_default)
             .unwrap_or(0);
-        let reasoning_idx = models
+        let (reasoning_idx, custom_reasoning) = models
             .get(selected)
-            .map(|model| reasoning_index(model.saved_reasoning.as_deref()))
-            .unwrap_or(0);
+            .map(|model| reasoning_choice(model.saved_reasoning.as_deref()))
+            .unwrap_or((0, None));
         Self {
             popup: PopupState::new(),
             alias: profile.alias.clone(),
             models,
             selected,
             reasoning_idx,
+            custom_reasoning,
+            extra_args: String::new(),
+            extra_editing: false,
+            extra_cursor: 0,
         }
     }
 
@@ -73,10 +82,16 @@ impl ProviderLaunchState {
             return;
         }
         self.selected = idx;
-        self.reasoning_idx = reasoning_index(self.models[idx].saved_reasoning.as_deref());
+        let (reasoning_idx, custom_reasoning) =
+            reasoning_choice(self.models[idx].saved_reasoning.as_deref());
+        self.reasoning_idx = reasoning_idx;
+        self.custom_reasoning = custom_reasoning;
     }
 
     fn reasoning_for_launch(&self) -> ReasoningLaunch {
+        if let Some(custom) = &self.custom_reasoning {
+            return ReasoningLaunch::Effort(custom.clone());
+        }
         if self.reasoning_idx == 0 {
             ReasoningLaunch::Skip
         } else {
@@ -84,9 +99,30 @@ impl ProviderLaunchState {
         }
     }
 
+    fn extra_argv(&self) -> Vec<String> {
+        self.extra_args
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn reasoning_label(&self) -> &str {
+        self.custom_reasoning
+            .as_deref()
+            .unwrap_or(REASONING_CHOICES[self.reasoning_idx])
+    }
+
     pub fn handle_key(&mut self, code: KeyCode) -> LaunchPickerOutcome {
+        if self.extra_editing {
+            return self.handle_extra_edit(code);
+        }
         match code {
             KeyCode::Esc => LaunchPickerOutcome::Cancel,
+            KeyCode::Tab => {
+                self.extra_editing = true;
+                self.extra_cursor = self.extra_args.chars().count();
+                LaunchPickerOutcome::Continue
+            }
             KeyCode::Enter | KeyCode::Char('o') => {
                 let Some(model) = self.models.get(self.selected) else {
                     return LaunchPickerOutcome::Continue;
@@ -95,6 +131,7 @@ impl ProviderLaunchState {
                     alias: self.alias.clone(),
                     model: model.id.clone(),
                     reasoning: self.reasoning_for_launch(),
+                    extra_args: self.extra_argv(),
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -110,15 +147,85 @@ impl ProviderLaunchState {
                 LaunchPickerOutcome::Continue
             }
             KeyCode::Left => {
-                if self.reasoning_idx > 0 {
-                    self.reasoning_idx -= 1;
-                } else {
-                    self.reasoning_idx = REASONING_CHOICES.len() - 1;
-                }
+                self.nudge_reasoning(-1);
                 LaunchPickerOutcome::Continue
             }
             KeyCode::Right => {
-                self.reasoning_idx = (self.reasoning_idx + 1) % REASONING_CHOICES.len();
+                self.nudge_reasoning(1);
+                LaunchPickerOutcome::Continue
+            }
+            _ => LaunchPickerOutcome::Continue,
+        }
+    }
+
+    fn nudge_reasoning(&mut self, delta: i32) {
+        if self.custom_reasoning.take().is_some() {
+            if delta > 0 {
+                self.reasoning_idx = 0;
+            } else {
+                self.reasoning_idx = REASONING_CHOICES.len() - 1;
+            }
+            return;
+        }
+        if delta < 0 {
+            if self.reasoning_idx > 0 {
+                self.reasoning_idx -= 1;
+            } else {
+                self.reasoning_idx = REASONING_CHOICES.len() - 1;
+            }
+        } else {
+            self.reasoning_idx = (self.reasoning_idx + 1) % REASONING_CHOICES.len();
+        }
+    }
+
+    fn handle_extra_edit(&mut self, code: KeyCode) -> LaunchPickerOutcome {
+        match code {
+            KeyCode::Esc | KeyCode::Tab => {
+                self.extra_editing = false;
+                LaunchPickerOutcome::Continue
+            }
+            KeyCode::Enter => {
+                self.extra_editing = false;
+                let Some(model) = self.models.get(self.selected) else {
+                    return LaunchPickerOutcome::Continue;
+                };
+                LaunchPickerOutcome::Launch {
+                    alias: self.alias.clone(),
+                    model: model.id.clone(),
+                    reasoning: self.reasoning_for_launch(),
+                    extra_args: self.extra_argv(),
+                }
+            }
+            KeyCode::Backspace if self.extra_cursor > 0 => {
+                self.extra_cursor -= 1;
+                let mut chars: Vec<char> = self.extra_args.chars().collect();
+                chars.remove(self.extra_cursor);
+                self.extra_args = chars.into_iter().collect();
+                LaunchPickerOutcome::Continue
+            }
+            KeyCode::Delete => {
+                let mut chars: Vec<char> = self.extra_args.chars().collect();
+                if self.extra_cursor < chars.len() {
+                    chars.remove(self.extra_cursor);
+                    self.extra_args = chars.into_iter().collect();
+                }
+                LaunchPickerOutcome::Continue
+            }
+            KeyCode::Left if self.extra_cursor > 0 => {
+                self.extra_cursor -= 1;
+                LaunchPickerOutcome::Continue
+            }
+            KeyCode::Right => {
+                if self.extra_cursor < self.extra_args.chars().count() {
+                    self.extra_cursor += 1;
+                }
+                LaunchPickerOutcome::Continue
+            }
+            KeyCode::Char(c) if !c.is_control() => {
+                let mut chars: Vec<char> = self.extra_args.chars().collect();
+                chars.insert(self.extra_cursor, c);
+                self.extra_args = chars.into_iter().collect();
+                self.extra_cursor += 1;
                 LaunchPickerOutcome::Continue
             }
             _ => LaunchPickerOutcome::Continue,
@@ -158,7 +265,26 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("reasoning  ", dim()),
-        Span::styled(REASONING_CHOICES[state.reasoning_idx].to_string(), header()),
+        Span::styled(state.reasoning_label().to_string(), header()),
+        Span::styled("   (this session)", dim()),
+    ]));
+    let extra_shown = if state.extra_editing {
+        let mut shown = state.extra_args.clone();
+        let byte = shown
+            .char_indices()
+            .nth(state.extra_cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(shown.len());
+        shown.insert(byte, '#');
+        shown
+    } else if state.extra_args.is_empty() {
+        "(none)".to_string()
+    } else {
+        state.extra_args.clone()
+    };
+    lines.push(Line::from(vec![
+        Span::styled("args       ", dim()),
+        Span::styled(extra_shown, header()),
         Span::styled("   (this session)", dim()),
     ]));
     lines.push(Line::from(""));
@@ -167,6 +293,8 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
         Span::styled(" model  ", dim()),
         Span::styled("←/→", key()),
         Span::styled(" reasoning  ", dim()),
+        Span::styled("tab", key()),
+        Span::styled(" args  ", dim()),
         Span::styled("enter/o", key()),
         Span::styled(" launch  ", dim()),
         Span::styled("esc", key()),
@@ -216,6 +344,7 @@ mod tests {
             alias,
             model,
             reasoning,
+            extra_args,
         } = picker.handle_key(KeyCode::Enter)
         else {
             panic!("enter should launch");
@@ -224,6 +353,7 @@ mod tests {
         assert_eq!(model, "liquid/lfm-2.5-2.6b:free");
         // saved high (index of "high") then one Right → xhigh
         assert_eq!(reasoning, ReasoningLaunch::Effort("xhigh".into()));
+        assert!(extra_args.is_empty());
     }
 
     use ratatui::{Terminal, backend::TestBackend};
@@ -276,6 +406,36 @@ mod tests {
             panic!("enter should launch");
         };
         assert_eq!(reasoning, ReasoningLaunch::Skip);
+    }
+
+    #[test]
+    fn picker_keeps_custom_saved_reasoning_until_nudged() {
+        let mut p = profile();
+        p.models[0].reasoning = Some("custom-effort".into());
+        p.default_model = p.models[0].id.clone();
+        let mut picker = ProviderLaunchState::from_profile(&p);
+        let LaunchPickerOutcome::Launch { reasoning, .. } = picker.handle_key(KeyCode::Enter)
+        else {
+            panic!("enter should launch");
+        };
+        assert_eq!(reasoning, ReasoningLaunch::Effort("custom-effort".into()));
+    }
+
+    #[test]
+    fn picker_tab_edits_extra_args_for_this_launch() {
+        let mut picker = ProviderLaunchState::from_profile(&profile());
+        assert!(matches!(
+            picker.handle_key(KeyCode::Tab),
+            LaunchPickerOutcome::Continue
+        ));
+        for c in "exec --json hi".chars() {
+            picker.handle_key(KeyCode::Char(c));
+        }
+        let LaunchPickerOutcome::Launch { extra_args, .. } = picker.handle_key(KeyCode::Enter)
+        else {
+            panic!("enter should launch");
+        };
+        assert_eq!(extra_args, ["exec", "--json", "hi"]);
     }
 
     #[test]
