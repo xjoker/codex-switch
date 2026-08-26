@@ -1014,8 +1014,10 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             key("a"),
             dim(" add \u{2502} "),
             key("e"),
+            dim("/"),
+            key("enter"),
             dim(" edit \u{2502} "),
-            key("l"),
+            key("o"),
             dim(" launch \u{2502} "),
             key("n"),
             dim(" rename \u{2502} "),
@@ -1344,11 +1346,12 @@ fn short_label(label: &str) -> &str {
     match label {
         "move selection" => "nav",
         "search" => "search",
-        "open menu (account or batch)" => "menu",
+        "open selected (Accounts: menu, Providers: edit)" => "menu",
         "refresh visible accounts" => "refresh",
         "show / hide account detail panel" => "quota",
         "show this help" => "help",
         "quit" => "quit",
+        "launch Codex" => "launch",
         other => other,
     }
 }
@@ -1449,6 +1452,18 @@ mod tests {
         assert!(
             !joined.contains("sk-secret-1234"),
             "the API key must never render in the panel"
+        );
+        assert!(
+            joined.contains("o launch"),
+            "status bar must show o launch:\n{joined}"
+        );
+        assert!(
+            joined.contains("e/") && joined.contains("edit"),
+            "status bar must show e/enter edit:\n{joined}"
+        );
+        assert!(
+            !joined.contains("l launch"),
+            "l must not mean launch on Providers:\n{joined}"
         );
     }
 

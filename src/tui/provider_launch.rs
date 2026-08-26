@@ -92,7 +92,7 @@ impl ProviderLaunchState {
     pub fn handle_key(&mut self, code: KeyCode) -> LaunchPickerOutcome {
         match code {
             KeyCode::Esc => LaunchPickerOutcome::Cancel,
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('o') => {
                 let Some(model) = self.models.get(self.selected) else {
                     return LaunchPickerOutcome::Continue;
                 };
@@ -176,7 +176,7 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
         Span::styled(" model  ", dim),
         Span::styled("←/→", key),
         Span::styled(" reasoning  ", dim),
-        Span::styled("enter", key),
+        Span::styled("enter/o", key),
         Span::styled(" launch  ", dim),
         Span::styled("esc", key),
         Span::styled(" cancel", dim),
@@ -268,6 +268,7 @@ mod tests {
         assert!(joined.contains("liquid/lfm-2.5-2.6b:free"));
         assert!(joined.contains("high"));
         assert!(joined.contains("this session"));
+        assert!(joined.contains("enter/o"));
         assert!(!joined.contains("sk-test"));
     }
 
@@ -284,5 +285,17 @@ mod tests {
             panic!("enter should launch");
         };
         assert_eq!(reasoning, ReasoningLaunch::Skip);
+    }
+
+    #[test]
+    fn picker_o_confirms_launch_like_enter() {
+        let mut picker = ProviderLaunchState::from_profile(&profile());
+        let LaunchPickerOutcome::Launch { alias, model, .. } =
+            picker.handle_key(KeyCode::Char('o'))
+        else {
+            panic!("o should launch from the picker");
+        };
+        assert_eq!(alias, "or");
+        assert_eq!(model, "minimax/minimax-m3:free");
     }
 }

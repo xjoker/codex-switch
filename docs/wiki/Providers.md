@@ -129,7 +129,7 @@ On the Providers tab:
 | `j` / `k` or `↑` / `↓` | Navigate |
 | `a` | Add a provider (form dialog) |
 | `e` / Enter | Edit the selected provider |
-| `l` | Launch: pick a saved model and reasoning for this session |
+| `o` | Launch: pick a saved model and reasoning for this session |
 | `n` | Rename |
 | `d` | Remove (confirmation required) |
 | `Tab` | Return to Accounts |
@@ -138,7 +138,7 @@ On the Providers tab:
 
 Add and edit use the same form. Tab moves between alias, base URL, API key, and the model list. On the model list: `+` / `-` add or remove a model, `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, Enter edits the model id, `s` saves, Esc cancels. The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field.
 
-The stored key is never rendered in the table. On the Providers tab, `l` opens a launch picker for the selected provider's saved models; `←`/`→` change reasoning for this session only (the saved profile is unchanged). Enter still edits. On the Accounts tab, press `o` to launch the selected ChatGPT profile, or open the account menu with `Enter` and press `o` there. Codex runs in the foreground; the TUI resumes when Codex exits.
+The stored key is never rendered in the table. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, then Enter (or `o` again) starts Codex. `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). Enter on the Providers list still edits. `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
 
 ## Storage and security
 

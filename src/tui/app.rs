@@ -197,7 +197,7 @@ pub struct App {
     pub provider_selected: usize,
     /// Active add/edit provider form.
     pub provider_form: Option<super::provider_form::ProviderFormState>,
-    /// Active launch picker (Providers tab, `l`).
+    /// Active launch picker (Providers tab, `o`).
     pub provider_launch: Option<super::provider_launch::ProviderLaunchState>,
     /// Active top-level tab.
     pub active_tab: Tab,
@@ -634,6 +634,7 @@ impl App {
     }
 
     /// Open the edit-provider form (Providers tab, `e` / Enter).
+    /// Enter opens the row; it does not launch Codex.
     pub fn open_provider_edit(&mut self) {
         match self.providers.get(self.provider_selected) {
             Some(p) => {
@@ -648,6 +649,24 @@ impl App {
         match self.providers.get(self.provider_selected) {
             Some(p) => self.confirm = Some(ConfirmAction::RemoveProvider(p.alias.clone())),
             None => self.set_status_error("No provider selected".to_string(), 3),
+        }
+    }
+
+    /// Providers list keys. Launch is `o` (same as Accounts). `l` is re-login
+    /// on Accounts, so it never launches from this tab.
+    pub fn handle_provider_list_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => self.provider_select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.provider_select_prev(),
+            KeyCode::Char('a') => self.open_provider_add(),
+            KeyCode::Enter | KeyCode::Char('e') => self.open_provider_edit(),
+            KeyCode::Char('n') => self.start_provider_rename(),
+            KeyCode::Char('d') => self.request_remove_provider(),
+            KeyCode::Char('o') => self.open_provider_launch(),
+            KeyCode::Char('l') => {
+                self.set_status("o launches Codex; l is re-login on Accounts".to_string(), 4)
+            }
+            _ => {}
         }
     }
 
@@ -2181,16 +2200,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                         }
                         _ => {}
                     },
-                    Tab::Providers => match code {
-                        KeyCode::Down | KeyCode::Char('j') => app.provider_select_next(),
-                        KeyCode::Up | KeyCode::Char('k') => app.provider_select_prev(),
-                        KeyCode::Char('a') => app.open_provider_add(),
-                        KeyCode::Enter | KeyCode::Char('e') => app.open_provider_edit(),
-                        KeyCode::Char('n') => app.start_provider_rename(),
-                        KeyCode::Char('d') => app.request_remove_provider(),
-                        KeyCode::Char('l') => app.open_provider_launch(),
-                        _ => {}
-                    },
+                    Tab::Providers => app.handle_provider_list_key(code),
                 },
             }
         }
@@ -2734,7 +2744,7 @@ mod tests {
             ],
             "sk-test",
         ));
-        app.open_provider_launch();
+        app.handle_provider_list_key(KeyCode::Char('o'));
         assert!(app.provider_launch.is_some());
         assert!(app.handle_provider_launch_key(KeyCode::Down).is_none());
         let (alias, model, reasoning) = app
@@ -2763,9 +2773,34 @@ mod tests {
             vec![crate::provider::ProviderModel::from_id("m")],
             "k",
         ));
-        app.open_provider_edit();
+        app.handle_provider_list_key(KeyCode::Enter);
         assert!(app.provider_form.is_some());
         assert!(app.provider_launch.is_none());
+    }
+
+    #[test]
+    fn provider_o_opens_launch_picker_and_l_does_not() {
+        let mut app = App::new();
+        app.providers.push(crate::provider::ProviderProfile::build(
+            "or",
+            "https://openrouter.ai/api/v1",
+            vec![crate::provider::ProviderModel::from_id("m")],
+            "k",
+        ));
+        app.handle_provider_list_key(KeyCode::Char('l'));
+        assert!(app.provider_launch.is_none());
+        assert!(app.provider_form.is_none());
+        let hint = app
+            .status_msg
+            .clone()
+            .expect("l should explain the launch key");
+        assert!(hint.contains("o launches Codex"), "{hint}");
+        assert!(hint.contains("re-login"), "{hint}");
+
+        app.status_msg = None;
+        app.handle_provider_list_key(KeyCode::Char('o'));
+        assert!(app.provider_launch.is_some());
+        assert!(app.provider_form.is_none());
     }
 
     #[test]

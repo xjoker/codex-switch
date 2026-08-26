@@ -88,7 +88,7 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 | `s` | Cycle sort order (name / quota / status) |
 | `Space` | Mark or unmark an account |
 | `u` (account menu) | Switch to the selected account |
-| `o` (account menu) | Launch Codex with the selected account |
+| `o` | Launch Codex with the selected account (also `o` in the account menu) |
 | `c` (account menu) | Confirm and consume the earliest-expiring reset card |
 | `w` (account menu) | Warm up the selected account |
 | `l` (account menu) | Re-login the selected account |
@@ -106,14 +106,14 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 | `j` / `k` or `↑` / `↓` | Navigate |
 | `a` | Add a provider (form dialog) |
 | `e` / Enter | Edit the selected provider |
-| `l` | Launch Codex: pick a saved model and reasoning for this session |
+| `o` | Launch Codex: pick a saved model and reasoning for this session |
 | `n` | Rename the selected provider |
 | `d` | Remove the selected provider (confirmation required) |
 | `Tab` | Switch to Accounts |
 | `h` | Show help |
 | `q` | Quit |
 
-The Providers table never renders the stored key. Press `l` to pick a saved model (and optionally change reasoning for this session) then launch, or run `codex-switch launch <alias>` from the shell. Enter still opens the edit form.
+The Providers table never renders the stored key. Press `o` to pick a saved model (and optionally change reasoning for this session) then launch, or run `codex-switch launch <alias>` from the shell. Enter still opens the edit form. `l` is re-login on the Accounts tab, not launch.
 
 Destructive or consumptive actions always require confirmation.
 
