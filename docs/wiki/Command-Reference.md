@@ -7,7 +7,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | Command | Purpose |
 |---|---|
 | `login [--device] [alias]` | Add or reauthorize a profile through browser PKCE or device-code login. If the alias already exists, it is reauthorized; otherwise a new profile is created. |
-| `import <path> [alias]` | Validate and import one `auth.json`, or recursively scan a directory for JSON files. The alias applies to single-file imports only; directories auto-assign aliases. |
+| `import <path> [alias]` | Validate and import one `auth.json`, or recursively scan a directory for JSON files. The alias applies to single-file imports only; directories auto-assign aliases. An account that is already saved (same file, or same `account_id` and email) is skipped instead of duplicated, so its single-use refresh token is not spent. |
 | `list [-f]` | Show profiles, usage, and availability; `-f` / `--force` bypasses the cache. |
 | `use [alias] [--consume-card]` | Switch explicitly, or omit the alias to auto-select with the unified scoring algorithm. When the pool is exhausted, `--consume-card` consumes the earliest-expiring reset card to revive an account (auto-select only; ignored when an alias is given). |
 | `launch [alias] [--consume-card] -- [args]` | Start Codex with the best (or specified) ChatGPT profile's auth, or with a custom API provider when `alias` names one. Everything after `--` is passed through to Codex. Auto-select (no alias) is ChatGPT-only. |

@@ -495,6 +495,24 @@ impl MenuState {
                 for item in &info.usage_meta {
                     left_lines.push(Line::from(Span::styled(item.clone(), dim)));
                 }
+                let credits_text = match info.usage.as_deref() {
+                    Some(u) if u.unlimited_credits == Some(true) => "unlimited".to_string(),
+                    Some(u) => match u.credits_balance {
+                        Some(balance) => format!("${balance:.2}"),
+                        None => "not available".to_string(),
+                    },
+                    None => "not available".to_string(),
+                };
+                let credits_color = info
+                    .usage
+                    .as_deref()
+                    .map(super::ui::credits_table_color)
+                    .unwrap_or(DIM);
+                let credits_style = Style::default().fg(credits_color);
+                left_lines.push(Line::from(vec![
+                    Span::styled("Credits  ", credits_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(credits_text, credits_style),
+                ]));
                 let cards = info
                     .reset_cards
                     .map(|count| format!("{count} available"))
@@ -763,6 +781,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn account_menu_with_usage(usage: UsageInfo) -> MenuState {
+        MenuState::account(AccountMenuInfo {
+            alias: "account".into(),
+            email: None,
+            account_id: None,
+            user_id: None,
+            workspace_name: None,
+            is_fedramp: false,
+            plan_label: "Pro".into(),
+            plan_type: Some("pro".into()),
+            is_current: true,
+            organizations: Vec::new(),
+            auth_expiries: Vec::new(),
+            usage: Some(Box::new(usage)),
+            usage_meta: Vec::new(),
+            models: Vec::new(),
+            reset_cards: Some(0),
+            reset_card_expiries: Vec::new(),
+            can_consume_reset_card: false,
+        })
+    }
+
+    #[test]
+    fn account_details_show_a_dedicated_credits_field() {
+        // A pay-per-use balance renders as a dollar amount with the healthy color.
+        let mut menu = account_menu_with_usage(UsageInfo {
+            credits_balance: Some(15.5),
+            unlimited_credits: Some(false),
+            ..Default::default()
+        });
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| menu.render(frame, frame.area()))
+            .unwrap();
+        assert!(
+            find_text(terminal.backend(), "Credits").is_some(),
+            "the detail popup must have a dedicated Credits field"
+        );
+        let pos = find_text(terminal.backend(), "$15.50").expect("credits balance rendered");
+        assert_eq!(terminal.backend().buffer().cell(pos).unwrap().fg, C_GREEN);
+
+        // Accounts without the credits system still get an explicit slot rather
+        // than silently omitting it (the bug this fixes).
+        let mut menu = account_menu_with_usage(UsageInfo {
+            unlimited_credits: Some(false),
+            ..Default::default()
+        });
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| menu.render(frame, frame.area()))
+            .unwrap();
+        assert!(find_text(terminal.backend(), "Credits").is_some());
+        assert!(
+            find_text(terminal.backend(), "not available").is_some(),
+            "a no-credits account must show an explicit placeholder"
+        );
     }
 
     #[test]
