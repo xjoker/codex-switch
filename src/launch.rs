@@ -271,13 +271,13 @@ pub(crate) fn chatgpt_codex_argv(model: Option<&str>, passthrough: Vec<String>) 
 
 /// Codex argv for a provider `launch`: our `-c` overrides are root-level
 /// options and must stay in front of a Codex subcommand. If the caller already
-/// passed `--model` / `-m`, drop our `-c model=…` pair so the two do not fight.
+/// passed `--model` / `-m`, drop our per-model `-c` pairs (`model`,
+/// `model_reasoning_effort`, `web_search`) so they do not fight the one-shot
+/// model; provider definition overrides stay.
 pub(crate) fn provider_codex_argv(overrides: Vec<String>, passthrough: Vec<String>) -> Vec<String> {
     let mut argv = overrides;
     if passthrough_sets_model(&passthrough) {
-        strip_c_pair(&mut argv, |value| {
-            value.split_once('=').is_some_and(|(key, _)| key == "model")
-        });
+        strip_c_pair(&mut argv, is_per_model_override);
     }
     argv.extend(passthrough);
     argv
@@ -293,12 +293,15 @@ fn passthrough_sets_model(args: &[String]) -> bool {
         if arg == "--model" || arg == "-m" || arg.starts_with("--model=") {
             return true;
         }
-        if arg.starts_with("-m") && arg != "-m" && !arg.starts_with("--") {
-            return true;
-        }
         i += 1;
     }
     false
+}
+
+fn is_per_model_override(value: &str) -> bool {
+    value
+        .split_once('=')
+        .is_some_and(|(key, _)| matches!(key, "model" | "model_reasoning_effort" | "web_search"))
 }
 
 fn strip_c_pair(argv: &mut Vec<String>, value_matches: impl Fn(&str) -> bool) {
@@ -628,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_argv_drops_c_model_when_passthrough_sets_model() {
+    fn provider_argv_drops_per_model_overrides_when_passthrough_sets_model() {
         let argv = provider_codex_argv(
             vec![
                 "-c".into(),
@@ -637,8 +640,12 @@ mod tests {
                 r#"model="saved""#.into(),
                 "-c".into(),
                 "model_reasoning_effort=high".into(),
+                "-c".into(),
+                "web_search=disabled".into(),
+                "-c".into(),
+                r#"model_providers.p.base_url="https://example.test""#.into(),
             ],
-            vec!["--model".into(), "one-shot".into(), "exec".into()],
+            vec!["exec".into(), "--model".into(), "one-shot".into()],
         );
         assert_eq!(
             argv,
@@ -646,15 +653,11 @@ mod tests {
                 "-c",
                 r#"model_provider="p""#,
                 "-c",
-                "model_reasoning_effort=high",
+                r#"model_providers.p.base_url="https://example.test""#,
+                "exec",
                 "--model",
                 "one-shot",
-                "exec"
             ]
-        );
-        assert!(
-            !argv.iter().any(|a| a.starts_with("model=")),
-            "passthrough --model must be the only model selector"
         );
     }
 

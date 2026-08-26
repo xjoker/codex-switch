@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **`launch` argv passthrough** — A bare `--` after `launch` now starts the Codex argv, so `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile instead of treating `exec` as an alias, and Codex flags such as `exec --json` / `--color` are not parsed by codex-switch. Provider `-c` overrides stay in front of a Codex subcommand; a passthrough `--model` / `-m` suppresses the competing `-c model=` pair. `--full-auto` is not a current Codex flag.
+- **`launch` argv passthrough** — A bare `--` after `launch` now starts the Codex argv, so `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile instead of treating `exec` as an alias, and Codex flags such as `exec --json` / `--color` are not parsed by codex-switch. Provider `-c` overrides stay in front of a Codex subcommand; a passthrough `--model` / `-m` drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`). `--full-auto` is not a current Codex flag.
 
 ## v20260826.2.0 — 2026-08-26
 
