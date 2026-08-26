@@ -698,6 +698,12 @@ impl App {
         }
     }
 
+    pub fn selected_provider_alias(&self) -> Option<String> {
+        self.providers
+            .get(self.provider_selected)
+            .map(|provider| provider.alias.clone())
+    }
+
     /// Editing keys for the add-provider wizard (raw, case-sensitive input).
     pub fn handle_provider_add_key(&mut self, code: KeyCode) {
         match code {
@@ -2292,6 +2298,17 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                             }
                         }
                         KeyCode::Char('a') => app.open_add_menu(),
+                        KeyCode::Char('o') if app.marked.is_empty() => {
+                            if let Some(alias) = app
+                                .selected_account_idx()
+                                .and_then(|idx| app.accounts.get(idx))
+                                .map(|entry| entry.alias.clone())
+                            {
+                                perform_launch(terminal, &mut app, alias).await;
+                            } else {
+                                app.set_status_error("No account selected".to_string(), 3);
+                            }
+                        }
                         KeyCode::Char('r') => app.refresh(Refresh::Forced),
                         KeyCode::Char('t') => app.toggle_auto_refresh(),
                         KeyCode::Char('i') => app.toggle_detail_panel(),
@@ -2316,6 +2333,13 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                         KeyCode::Up | KeyCode::Char('k') => app.provider_select_prev(),
                         KeyCode::Char('a') => app.open_provider_add(),
                         KeyCode::Char('d') => app.request_remove_provider(),
+                        KeyCode::Char('l') | KeyCode::Enter => {
+                            if let Some(alias) = app.selected_provider_alias() {
+                                perform_launch(terminal, &mut app, alias).await;
+                            } else {
+                                app.set_status_error("No provider selected".to_string(), 3);
+                            }
+                        }
                         _ => {}
                     },
                 },
@@ -2344,6 +2368,10 @@ async fn handle_menu_key(app: &mut App, terminal: &mut DefaultTerminal, code: Ke
                 app.selected = view_idx;
             }
             app.switch_selected();
+        }
+        MenuAction::Launch(alias) => {
+            app.close_menu();
+            perform_launch(terminal, app, alias).await;
         }
         MenuAction::ReloginRequest(alias, email) => {
             app.open_relogin_flow_menu(alias, email);
@@ -2422,6 +2450,45 @@ fn resume_tui_after_plain_output(terminal: &mut DefaultTerminal) {
     reset_plain_terminal_view();
     *terminal = ratatui::init();
     let _ = terminal.clear();
+}
+
+async fn perform_launch(terminal: &mut DefaultTerminal, app: &mut App, alias: String) {
+    suspend_tui_for_plain_output();
+    crate::output::set_message_mode(crate::output::MessageMode::Stdout);
+
+    println!("\n=== Launch Codex: {alias} ===\n");
+
+    let result = crate::launch::launch_for_tui(&alias).await;
+
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    match &result {
+        Ok(exit_code) if *exit_code == 0 => println!("\nCodex exited successfully."),
+        Ok(exit_code) => println!("\nCodex exited with code {exit_code}."),
+        Err(e) => eprintln!("\nError: {e}"),
+    }
+    println!("\nReturning to TUI...");
+    if result.is_err() || result.as_ref().is_ok_and(|code| *code != 0) {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+    }
+
+    crate::output::set_message_mode(crate::output::MessageMode::Silent);
+    resume_tui_after_plain_output(terminal);
+
+    match result {
+        Ok(0) => {
+            app.set_status(format!("Codex session ended ({alias})"), 4);
+            app.load_profiles_preserving_selection();
+            app.refresh(Refresh::Cached);
+            if app.auto_refresh_enabled {
+                app.next_auto_refresh = Some(Instant::now() + app.auto_refresh_interval);
+            }
+        }
+        Ok(exit_code) => {
+            app.set_status_error(format!("Codex exited with code {exit_code}"), 5);
+        }
+        Err(e) => app.set_status_error(format!("Launch failed: {e}"), 6),
+    }
 }
 
 /// Suspend the TUI, run OAuth (browser PKCE or device code), persist the

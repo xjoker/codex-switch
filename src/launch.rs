@@ -30,12 +30,34 @@ async fn wait_for_codex_to_read_auth(
     }
 }
 
+/// Launch Codex for one alias from the TUI. Returns Codex's exit code instead of
+/// terminating the codex-switch process on failure.
+pub(crate) async fn launch_for_tui(alias: &str) -> Result<i32> {
+    launch_interactive(Some(alias), vec![], false, false).await
+}
+
 pub(crate) async fn launch_cmd(
     alias: Option<&str>,
     args: Vec<String>,
     json: bool,
     consume_card: bool,
 ) -> Result<()> {
+    finish_launch_cli(launch_interactive(alias, args, json, consume_card).await?)
+}
+
+fn finish_launch_cli(exit_code: i32) -> Result<()> {
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+async fn launch_interactive(
+    alias: Option<&str>,
+    args: Vec<String>,
+    json: bool,
+    consume_card: bool,
+) -> Result<i32> {
     use std::io::IsTerminal;
 
     // A custom API provider profile takes a separate, simpler path: it has no
@@ -60,13 +82,13 @@ pub(crate) async fn launch_cmd(
         }
         None => {
             let card_policy = if consume_card {
-                super::profile::CardPolicy::PreApproved
+                crate::commands::profile::CardPolicy::PreApproved
             } else if !json && std::io::stdin().is_terminal() {
-                super::profile::CardPolicy::Prompt
+                crate::commands::profile::CardPolicy::Prompt
             } else {
-                super::profile::CardPolicy::Deny
+                crate::commands::profile::CardPolicy::Deny
             };
-            let outcome = super::profile::select_best_profile(json, card_policy).await?;
+            let outcome = crate::commands::profile::select_best_profile(json, card_policy).await?;
             revival_hint = outcome.revival_hint;
             outcome.alias
         }
@@ -74,7 +96,7 @@ pub(crate) async fn launch_cmd(
     if let Some(hint) = &revival_hint
         && !json
     {
-        user_println(&super::profile::revival_hint_message(hint));
+        user_println(&crate::commands::profile::revival_hint_message(hint));
     }
 
     ensure_codex_available()?;
@@ -205,19 +227,15 @@ pub(crate) async fn launch_cmd(
             "exit_code": exit_code,
         });
         if let Some(hint) = &revival_hint {
-            payload["hint"] = serde_json::Value::String(super::profile::revival_hint_message(hint));
+            payload["hint"] =
+                serde_json::Value::String(crate::commands::profile::revival_hint_message(hint));
         }
         print_json(&payload);
     } else {
         user_println("codex exited");
     }
 
-    // Propagate codex exit code
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    Ok(exit_code)
 }
 
 /// Verify the `codex` binary is reachable before we stage anything or spawn it.
@@ -255,7 +273,7 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// MCP servers and everything else) and the API key is injected into the child
 /// process environment under the profile's `env_key`. Nothing is written to
 /// `~/.codex`, so there is no backup/restore window to guard.
-fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<()> {
+fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<i32> {
     ensure_codex_available()?;
 
     let (env_name, env_value) = profile.launch_env();
@@ -294,10 +312,7 @@ fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> R
         user_println("codex exited");
     }
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-    Ok(())
+    Ok(exit_code)
 }
 
 /// Snapshot the live auth.json into `backup` before it is overwritten by the

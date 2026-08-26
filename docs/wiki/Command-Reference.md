@@ -87,6 +87,7 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 | `s` | Cycle sort order (name / quota / status) |
 | `Space` | Mark or unmark an account |
 | `u` (account menu) | Switch to the selected account |
+| `o` (account menu) | Launch Codex with the selected account |
 | `c` (account menu) | Confirm and consume the earliest-expiring reset card |
 | `w` (account menu) | Warm up the selected account |
 | `l` (account menu) | Re-login the selected account |
@@ -103,12 +104,13 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
 | `a` | Add a provider (alias → base URL → model → API key; the key is masked) |
+| `l` / `Enter` | Launch Codex with the selected provider |
 | `d` | Remove the selected provider (confirmation required) |
 | `Tab` | Switch to Accounts |
 | `h` | Show help |
 | `q` | Quit |
 
-The Providers table never renders the stored key. Launching a provider is CLI-only (`codex-switch launch <alias>`).
+The Providers table never renders the stored key. Select a provider and press `l` or `Enter` to launch Codex, or run `codex-switch launch <alias>` from the shell.
 
 Destructive or consumptive actions always require confirmation.
 

@@ -191,7 +191,7 @@ pub(crate) async fn import_cmd(path: &str, alias: Option<&str>, json: bool) -> R
                 .collect(),
         });
         if all_skipped {
-            return Err(super::super::OutputAlreadyReported.into());
+            return Err(crate::output::OutputAlreadyReported.into());
         }
     } else {
         println!(
