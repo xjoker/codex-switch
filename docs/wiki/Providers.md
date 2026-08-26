@@ -64,10 +64,13 @@ Name the provider alias. Auto-select (`launch` with no alias) stays ChatGPT-only
 ```bash
 codex-switch launch openrouter
 codex-switch launch openrouter --model deepseek/deepseek-r1-0528
-codex-switch launch openrouter -- --full-auto
+codex-switch launch openrouter -- exec --json "review this"
+codex-switch launch openrouter -- -s workspace-write -a never
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), and injects the API key into the child process environment under `env_key`. Extra arguments after `--` are appended as Codex CLI flags. `--model` must name a model saved on that provider.
+`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), and injects the API key into the child process environment under `env_key`. Those `-c` flags are global Codex options, so they are placed **in front of** a Codex subcommand such as `exec`. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and suppresses the competing `-c model=` override.
+
+Put `--` before any Codex argv that could be mistaken for a codex-switch alias or flag (`exec`, `--json`, `--color`, a prompt that looks like a name). `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile; it cannot target a provider.
 
 Because `-c` layers on top of `$CODEX_HOME/config.toml`, MCP servers, skills, and other Codex settings in that file stay in effect for the session.
 

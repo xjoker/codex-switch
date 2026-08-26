@@ -127,7 +127,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Switch to a profile; omit alias to auto-select using the unified scoring algorithm
     Use {
@@ -213,7 +213,10 @@ pub enum Commands {
         /// Profile alias to warm up (omit to warm up all profiles)
         alias: Option<String>,
     },
-    /// Launch codex CLI with the best (or specified) profile's auth
+    /// Launch Codex CLI with the best (or specified) profile's auth
+    #[command(
+        after_help = "Everything after `--` is forwarded to Codex unchanged and is never parsed as a codex-switch flag or alias.\nUse that separator when the Codex argv starts with a prompt, subcommand (`exec`, `resume`, …), or a flag that also exists on codex-switch (`--json`, `--color`, `--model`).\n\nExamples:\n  codex-switch launch work -- exec --json \"review this\"\n  codex-switch launch openrouter -- -s workspace-write -a never\n  codex-switch launch -- exec --json \"do the thing\"\n\n`--model` before `--` selects a saved provider model, or is forwarded as Codex `--model` for a ChatGPT profile. `--model` after `--` is Codex's own flag."
+    )]
     Launch {
         /// Profile alias (omit to auto-select best available)
         alias: Option<String>,
@@ -226,7 +229,7 @@ pub enum Commands {
         /// For a ChatGPT profile, forwarded to Codex as `--model`.
         #[arg(long)]
         model: Option<String>,
-        /// All remaining arguments passed through to Codex
+        /// Codex argv; prefer `--` before this so flags are not parsed by codex-switch
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -242,10 +245,64 @@ pub enum Commands {
     Daemon(DaemonCommand),
 }
 
+/// Split `codex-switch launch … -- <codex argv>` so the Codex side is never
+/// parsed as a codex-switch alias or global flag.
+///
+/// Clap treats a bare `--` as "stop parsing flags" but still fills the next
+/// positional, so `launch -- work` would otherwise become alias `work`.
+pub(crate) fn extract_launch_passthrough(argv: &[String]) -> (Vec<String>, Option<Vec<String>>) {
+    let Some(launch_at) = first_subcommand(argv).filter(|&i| argv[i] == "launch") else {
+        return (argv.to_vec(), None);
+    };
+    let Some(dash) = argv[launch_at + 1..]
+        .iter()
+        .position(|arg| arg == "--")
+        .map(|rel| launch_at + 1 + rel)
+    else {
+        return (argv.to_vec(), None);
+    };
+    (argv[..dash].to_vec(), Some(argv[dash + 1..].to_vec()))
+}
+
+fn first_subcommand(argv: &[String]) -> Option<usize> {
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        if arg == "--" {
+            return None;
+        }
+        if let Some(rest) = arg.strip_prefix("--") {
+            if rest.is_empty() {
+                return None;
+            }
+            i += if rest.contains('=') || !global_value_flag(rest) {
+                1
+            } else {
+                2
+            };
+            continue;
+        }
+        if arg.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        return Some(i);
+    }
+    None
+}
+
+fn global_value_flag(name: &str) -> bool {
+    matches!(name, "proxy" | "color")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| (*s).to_string()).collect()
+    }
 
     #[test]
     fn provider_add_allows_no_web_search_on_each_model() {
@@ -279,5 +336,240 @@ mod tests {
             }
             _ => panic!("expected provider add"),
         }
+    }
+
+    fn parse_launch(argv: &[&str]) -> (bool, Option<String>, Option<String>, Vec<String>) {
+        let cli = Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{e}"));
+        match cli.command {
+            Commands::Launch {
+                alias, model, args, ..
+            } => (cli.json, alias, model, args),
+            other => panic!("expected launch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn launch_passthrough_after_double_dash_keeps_codex_exec_json_and_color() {
+        let (json, alias, model, args) = parse_launch(&[
+            "codex-switch",
+            "launch",
+            "work",
+            "--",
+            "exec",
+            "--json",
+            "--color",
+            "never",
+            "do the thing",
+        ]);
+        assert!(!json, "Codex --json after -- must not turn on cs --json");
+        assert_eq!(alias.as_deref(), Some("work"));
+        assert_eq!(model, None);
+        assert_eq!(args, ["exec", "--json", "--color", "never", "do the thing"]);
+    }
+
+    #[test]
+    fn launch_without_double_dash_must_not_steal_codex_exec_json() {
+        let (json, alias, model, args) = parse_launch(&[
+            "codex-switch",
+            "launch",
+            "work",
+            "exec",
+            "--json",
+            "do the thing",
+        ]);
+        assert!(
+            !json,
+            "cs --json is global and currently steals Codex exec --json; this test names the contract"
+        );
+        assert_eq!(alias.as_deref(), Some("work"));
+        assert_eq!(model, None);
+        assert_eq!(args, ["exec", "--json", "do the thing"]);
+    }
+
+    #[test]
+    fn launch_cs_json_before_double_dash_still_applies_to_codex_switch() {
+        let (json, alias, _, args) = parse_launch(&[
+            "codex-switch",
+            "--json",
+            "launch",
+            "work",
+            "--",
+            "exec",
+            "--json",
+        ]);
+        assert!(json);
+        assert_eq!(alias.as_deref(), Some("work"));
+        assert_eq!(args, ["exec", "--json"]);
+    }
+
+    #[test]
+    fn launch_model_after_double_dash_is_codex_model_not_cs_model() {
+        let (_, alias, model, args) = parse_launch(&[
+            "codex-switch",
+            "launch",
+            "openrouter",
+            "--",
+            "--model",
+            "openai/gpt-5.3-codex",
+        ]);
+        assert_eq!(alias.as_deref(), Some("openrouter"));
+        assert_eq!(model, None);
+        assert_eq!(args, ["--model", "openai/gpt-5.3-codex"]);
+    }
+
+    #[test]
+    fn launch_cs_model_before_double_dash_is_kept_separate_from_passthrough() {
+        let (_, alias, model, args) = parse_launch(&[
+            "codex-switch",
+            "launch",
+            "work",
+            "--model",
+            "gpt-5.4",
+            "--",
+            "exec",
+            "hi",
+        ]);
+        assert_eq!(alias.as_deref(), Some("work"));
+        assert_eq!(model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(args, ["exec", "hi"]);
+    }
+
+    #[test]
+    fn launch_double_dash_then_alias_shaped_prompt_is_passthrough_not_alias() {
+        let raw = argv(&["codex-switch", "launch", "--", "work"]);
+        let (left, right) = extract_launch_passthrough(&raw);
+        let cli = Cli::try_parse_from(&left).unwrap_or_else(|e| panic!("{e}"));
+        match cli.command {
+            Commands::Launch { alias, args, .. } => {
+                assert_eq!(alias, None);
+                assert!(args.is_empty(), "clap argv stops before --");
+            }
+            other => panic!("expected launch, got {other:?}"),
+        }
+        assert_eq!(right, Some(argv(&["work"])));
+    }
+
+    #[test]
+    fn extract_launch_passthrough_keeps_exec_json_after_separator() {
+        let raw = argv(&[
+            "codex-switch",
+            "--json",
+            "launch",
+            "work",
+            "--",
+            "exec",
+            "--json",
+            "do the thing",
+        ]);
+        let (left, right) = extract_launch_passthrough(&raw);
+        let cli = Cli::try_parse_from(&left).unwrap_or_else(|e| panic!("{e}"));
+        assert!(cli.json);
+        match cli.command {
+            Commands::Launch {
+                alias, model, args, ..
+            } => {
+                assert_eq!(alias.as_deref(), Some("work"));
+                assert_eq!(model, None);
+                assert!(args.is_empty());
+            }
+            other => panic!("expected launch, got {other:?}"),
+        }
+        assert_eq!(right, Some(argv(&["exec", "--json", "do the thing"])));
+    }
+
+    #[test]
+    fn extract_launch_passthrough_ignores_provider_alias_named_launch() {
+        let raw = argv(&[
+            "codex-switch",
+            "provider",
+            "add",
+            "launch",
+            "--base-url",
+            "https://example.test",
+            "--model",
+            "m",
+        ]);
+        let (left, right) = extract_launch_passthrough(&raw);
+        assert_eq!(left, raw);
+        assert_eq!(right, None);
+    }
+
+    #[test]
+    fn extract_launch_passthrough_preserves_codex_double_dash() {
+        let raw = argv(&[
+            "codex-switch",
+            "launch",
+            "work",
+            "--",
+            "exec",
+            "--",
+            "--looks-like-flag",
+        ]);
+        let (_, right) = extract_launch_passthrough(&raw);
+        assert_eq!(right, Some(argv(&["exec", "--", "--looks-like-flag"])));
+    }
+
+    #[test]
+    fn launch_cs_json_flag_on_the_subcommand_is_for_codex_switch() {
+        let (json, alias, _, args) = parse_launch(&["codex-switch", "launch", "work", "--json"]);
+        assert!(json);
+        assert_eq!(alias.as_deref(), Some("work"));
+        assert_eq!(args, [] as [&str; 0]);
+    }
+
+    #[test]
+    fn launch_without_double_dash_must_not_steal_codex_exec_color() {
+        let cli = Cli::try_parse_from([
+            "codex-switch",
+            "launch",
+            "work",
+            "exec",
+            "--color",
+            "never",
+            "do",
+        ])
+        .unwrap_or_else(|e| panic!("{e}"));
+        match cli.command {
+            Commands::Launch { alias, args, .. } => {
+                assert_eq!(alias.as_deref(), Some("work"));
+                assert_eq!(
+                    cli.color,
+                    ColorMode::Auto,
+                    "Codex exec --color must not change cs --color"
+                );
+                assert_eq!(args, ["exec", "--color", "never", "do"]);
+            }
+            other => panic!("expected launch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn launch_passthrough_keeps_sandbox_and_cd_flags() {
+        let (_, alias, _, args) = parse_launch(&[
+            "codex-switch",
+            "launch",
+            "work",
+            "--",
+            "-s",
+            "workspace-write",
+            "-C",
+            "/tmp/proj",
+            "-a",
+            "never",
+            "ship it",
+        ]);
+        assert_eq!(alias.as_deref(), Some("work"));
+        assert_eq!(
+            args,
+            [
+                "-s",
+                "workspace-write",
+                "-C",
+                "/tmp/proj",
+                "-a",
+                "never",
+                "ship it"
+            ]
+        );
     }
 }

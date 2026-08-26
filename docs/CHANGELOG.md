@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`launch` argv passthrough** — A bare `--` after `launch` now starts the Codex argv, so `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile instead of treating `exec` as an alias, and Codex flags such as `exec --json` / `--color` are not parsed by codex-switch. Provider `-c` overrides stay in front of a Codex subcommand; a passthrough `--model` / `-m` suppresses the competing `-c model=` pair. `--full-auto` is not a current Codex flag.
+
 ## v20260826.2.0 — 2026-08-26
 
 - **TUI launch** — Launch Codex from the TUI with `o` on both tabs: Accounts starts the selected ChatGPT profile (list or account menu); Providers opens a picker for a saved model and a one-shot reasoning override, then Enter (or `o`) starts Codex. On the Providers list, Enter also opens that picker; `e` edits. `l` remains re-login on Accounts. Codex runs in the foreground and the TUI resumes when it exits.

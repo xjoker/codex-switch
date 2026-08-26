@@ -78,8 +78,12 @@ Switching replaces the live `$CODEX_HOME/auth.json` atomically while holding a p
 
 ```bash
 codex-switch launch work -- --model gpt-5.4
-codex-switch launch -- --full-auto
+codex-switch launch work -- exec --json "review this"
+codex-switch launch -- exec --json "do the thing"
+codex-switch launch -- -s workspace-write -a never
 ```
+
+Arguments after `--` are Codex's, not codex-switch's. That separator is required when the Codex argv starts with a subcommand, a prompt that looks like an alias, or a flag that also exists on codex-switch (`--json`, `--color`, `--model`). Current Codex has no `--full-auto`; use `-a never`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox`.
 
 The launch lock serializes overlapping launch sessions. The restore delay is configurable (`launch.restore_delay_secs`) because Codex does not expose an authentication-read handshake.
 

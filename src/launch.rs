@@ -88,10 +88,7 @@ async fn launch_interactive(
         return launch_provider(profile, model, reasoning, args, json);
     }
 
-    let mut forwarded = args;
-    if let Some(model) = model {
-        forwarded.splice(0..0, ["--model".to_string(), model.to_string()]);
-    }
+    let forwarded = chatgpt_codex_argv(model, args);
 
     let mut revival_hint = None;
     let target_alias = match alias {
@@ -260,6 +257,61 @@ async fn launch_interactive(
     Ok(exit_code)
 }
 
+/// Codex argv for a ChatGPT `launch`: optional `--model` is a global Codex
+/// flag, so it is placed before any subcommand in `passthrough`.
+pub(crate) fn chatgpt_codex_argv(model: Option<&str>, passthrough: Vec<String>) -> Vec<String> {
+    let mut argv = Vec::with_capacity(passthrough.len() + 2);
+    if let Some(model) = model.filter(|model| !model.is_empty()) {
+        argv.push("--model".to_string());
+        argv.push(model.to_string());
+    }
+    argv.extend(passthrough);
+    argv
+}
+
+/// Codex argv for a provider `launch`: our `-c` overrides are root-level
+/// options and must stay in front of a Codex subcommand. If the caller already
+/// passed `--model` / `-m`, drop our `-c model=…` pair so the two do not fight.
+pub(crate) fn provider_codex_argv(overrides: Vec<String>, passthrough: Vec<String>) -> Vec<String> {
+    let mut argv = overrides;
+    if passthrough_sets_model(&passthrough) {
+        strip_c_pair(&mut argv, |value| {
+            value.split_once('=').is_some_and(|(key, _)| key == "model")
+        });
+    }
+    argv.extend(passthrough);
+    argv
+}
+
+fn passthrough_sets_model(args: &[String]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            return false;
+        }
+        if arg == "--model" || arg == "-m" || arg.starts_with("--model=") {
+            return true;
+        }
+        if arg.starts_with("-m") && arg != "-m" && !arg.starts_with("--") {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn strip_c_pair(argv: &mut Vec<String>, value_matches: impl Fn(&str) -> bool) {
+    let mut i = 0;
+    while i + 1 < argv.len() {
+        if argv[i] == "-c" && value_matches(&argv[i + 1]) {
+            argv.drain(i..=i + 1);
+            continue;
+        }
+        i += 1;
+    }
+}
+
 /// Verify the `codex` binary is reachable before we stage anything or spawn it.
 fn ensure_codex_available() -> Result<()> {
     match std::process::Command::new("codex")
@@ -306,11 +358,11 @@ fn launch_provider(
 
     let selected = profile.resolve_model(model)?;
     let (env_name, env_value) = profile.launch_env();
-    let mut codex_args = match &reasoning {
+    let overrides = match &reasoning {
         ReasoningLaunch::Saved => profile.codex_config_args(model)?,
         other => profile.codex_config_args_with(model, other.clone())?,
     };
-    codex_args.extend(args);
+    let codex_args = provider_codex_argv(overrides, args);
 
     if !json {
         let reasoning_note = match &reasoning {
@@ -525,11 +577,98 @@ mod tests {
     use std::ffi::OsString;
     use std::sync::MutexGuard;
 
-    use super::restore_launch_auth;
+    use super::{chatgpt_codex_argv, provider_codex_argv, restore_launch_auth};
     // Only the permission assertions call this, and those are unix-only, so an
     // unconditional import is dead on Windows and fails `-D warnings` there.
     #[cfg(unix)]
     use super::backup_launch_auth;
+
+    #[test]
+    fn chatgpt_argv_puts_model_before_a_codex_subcommand() {
+        assert_eq!(
+            chatgpt_codex_argv(
+                Some("gpt-5.4"),
+                vec!["exec".into(), "--json".into(), "hi".into()]
+            ),
+            ["--model", "gpt-5.4", "exec", "--json", "hi"]
+        );
+    }
+
+    #[test]
+    fn chatgpt_argv_without_model_is_passthrough_only() {
+        assert_eq!(
+            chatgpt_codex_argv(None, vec!["resume".into(), "--last".into()]),
+            ["resume", "--last"]
+        );
+    }
+
+    #[test]
+    fn provider_argv_keeps_overrides_in_front_of_exec() {
+        let argv = provider_codex_argv(
+            vec![
+                "-c".into(),
+                r#"model="saved""#.into(),
+                "-c".into(),
+                r#"model_provider="p""#.into(),
+            ],
+            vec!["exec".into(), "--json".into(), "do".into()],
+        );
+        assert_eq!(
+            argv,
+            [
+                "-c",
+                r#"model="saved""#,
+                "-c",
+                r#"model_provider="p""#,
+                "exec",
+                "--json",
+                "do"
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_argv_drops_c_model_when_passthrough_sets_model() {
+        let argv = provider_codex_argv(
+            vec![
+                "-c".into(),
+                r#"model_provider="p""#.into(),
+                "-c".into(),
+                r#"model="saved""#.into(),
+                "-c".into(),
+                "model_reasoning_effort=high".into(),
+            ],
+            vec!["--model".into(), "one-shot".into(), "exec".into()],
+        );
+        assert_eq!(
+            argv,
+            [
+                "-c",
+                r#"model_provider="p""#,
+                "-c",
+                "model_reasoning_effort=high",
+                "--model",
+                "one-shot",
+                "exec"
+            ]
+        );
+        assert!(
+            !argv.iter().any(|a| a.starts_with("model=")),
+            "passthrough --model must be the only model selector"
+        );
+    }
+
+    #[test]
+    fn provider_argv_keeps_c_model_when_double_dash_makes_model_a_prompt() {
+        let argv = provider_codex_argv(
+            vec!["-c".into(), r#"model="saved""#.into()],
+            vec!["--".into(), "--model".into(), "not-a-flag".into()],
+        );
+        assert_eq!(
+            argv,
+            ["-c", r#"model="saved""#, "--", "--model", "not-a-flag"]
+        );
+    }
 
     /// Staging moves the user's live `auth.json` aside and puts a profile's
     /// credentials in its place; the restore that undoes it only runs once the
