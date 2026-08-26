@@ -65,7 +65,9 @@ codex-switch launch       # 用最佳账号启动 Codex
 
 ## 文档
 
-**[GitHub Wiki](https://github.com/xjoker/codex-switch/wiki)** 是完整文档：开始使用、功能指南、自定义 API 提供方、命令参考、配置、更新与通道、故障排查、FAQ 以及贡献者指南。中文读者从 [中文指南](https://github.com/xjoker/codex-switch/wiki/Chinese-Guide) 开始；行为细节以英文页面为准。
+**[GitHub Wiki](https://github.com/xjoker/codex-switch/wiki)** 是完整文档：开始使用、功能指南、自定义 API 提供方、命令参考、配置、更新与通道、故障排查、FAQ 以及贡献者指南。
+
+中文读者建议从 **[中文指南](https://github.com/xjoker/codex-switch/wiki/Chinese-Guide)** 入手：内含 ChatGPT 日常命令、自定义提供方 CLI、TUI 两页快捷键与表单操作摘要。行为细节与边界条件仍以英文 Wiki 为准。
 
 维护者文档：[发布流程](docs/RELEASE.md) · [更新日志](docs/CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)。
 

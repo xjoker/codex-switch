@@ -95,11 +95,13 @@ When the uninstaller asks whether to remove the data directory, answer `N` to pr
 
 ## 中文摘要
 
-`dev` 是下一正式版发布前的滚动测试通道，可能继续变化。直装用户可运行 `codex-switch self-update --dev`；macOS/Linux 新装使用安装脚本的 `--dev` 参数，Windows PowerShell 设置 `$env:CS_DEV="1"` 后运行安装脚本。安装后用 `codex-switch --version` 确认版本以 `-dev` 结尾，并用 `codex-switch self-update --check --dev` 检查通道。测试结束后运行 `codex-switch self-update --stable` 回到直装正式版。
+`dev` 是下一正式版发布前的滚动测试通道，可能继续变化。直装用户可运行 `codex-switch self-update --dev`；macOS/Linux 新装使用安装脚本的 `--dev` 参数，Windows PowerShell 设置 `$env:CS_DEV="1"` 后运行安装脚本。安装后用 `codex-switch --version` 确认版本以 `-dev` 结尾（例如 `20260826.2.0-dev`），并用 `codex-switch self-update --check --dev` 检查通道。测试结束后运行 `codex-switch self-update --stable` 回到直装正式版。
 
 Homebrew 只提供正式版。切换开发版前先运行 `brew uninstall codex-switch`，再使用带 `--dev` 的直装脚本。若测试后希望恢复 Homebrew 管理，运行直装卸载脚本、在删除数据目录的询问中选择 `N`，然后执行 `brew install xjoker/tap/codex-switch`。
 
-提交问题前请删除 Token、profile 内容、邮箱、account ID、工作区名称、可识别身份的路径和代理凭据。更多中文入口见[中文指南](Chinese-Guide)。
+测试自定义提供方或多模型 TUI 时，可先阅读[中文指南](Chinese-Guide)中的操作摘要，再对照英文 [Providers](Providers) 核对边界行为。
+
+提交问题前请删除 Token、profile 内容、提供方密钥、邮箱、account ID、工作区名称、可识别身份的路径和代理凭据。更多中文入口见[中文指南](Chinese-Guide)。
 
 ## Next steps
 
