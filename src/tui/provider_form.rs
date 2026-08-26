@@ -60,6 +60,7 @@ pub struct ProviderFormState {
     input: String,
     cursor: usize,
     error: Option<String>,
+    confirm_remove: bool,
 }
 
 pub enum FormOutcome {
@@ -90,6 +91,7 @@ impl ProviderFormState {
             input: String::new(),
             cursor: 0,
             error: None,
+            confirm_remove: false,
         }
     }
 
@@ -131,6 +133,7 @@ impl ProviderFormState {
             input: String::new(),
             cursor: 0,
             error: None,
+            confirm_remove: false,
         }
     }
 
@@ -142,6 +145,9 @@ impl ProviderFormState {
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> FormOutcome {
+        if self.confirm_remove {
+            return self.handle_remove_confirm(code);
+        }
         self.error = None;
         if self.editing {
             return self.handle_edit_key(code);
@@ -190,7 +196,7 @@ impl ProviderFormState {
             }
             KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('d') | KeyCode::Delete => {
                 if self.focus == Focus::Models {
-                    self.remove_selected_model();
+                    self.request_remove_model();
                 }
                 FormOutcome::Continue
             }
@@ -314,6 +320,41 @@ impl ProviderFormState {
 
     fn is_add_row(&self) -> bool {
         self.focus == Focus::Models && self.model_idx >= self.models.len()
+    }
+
+    fn request_remove_model(&mut self) {
+        if self.is_add_row() {
+            return;
+        }
+        if self.models.len() <= 1 {
+            self.error = Some("A provider needs at least one model".into());
+            return;
+        }
+        self.confirm_remove = true;
+    }
+
+    fn handle_remove_confirm(&mut self, code: KeyCode) -> FormOutcome {
+        match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.confirm_remove = false;
+                self.remove_selected_model();
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.confirm_remove = false;
+            }
+            _ => {}
+        }
+        FormOutcome::Continue
+    }
+
+    fn remove_label(&self) -> String {
+        let id = self
+            .models
+            .get(self.model_idx)
+            .map(|m| m.id.trim())
+            .filter(|id| !id.is_empty())
+            .unwrap_or("this model");
+        format!("Remove model '{id}'?")
     }
 
     fn remove_selected_model(&mut self) {
@@ -701,6 +742,25 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
         ]));
     }
     popup::render_popup(f, form.title(), &lines, &mut form.popup, area);
+    if form.confirm_remove {
+        let confirm_lines = vec![
+            Line::from(Span::styled(
+                form.remove_label(),
+                base()
+                    .fg(C_RED)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("y", key()),
+                Span::styled(" remove  ", dim()),
+                Span::styled("n/esc", key()),
+                Span::styled(" keep it", dim()),
+            ]),
+        ];
+        let mut confirm_popup = PopupState::new();
+        popup::render_popup(f, "Confirm", &confirm_lines, &mut confirm_popup, area);
+    }
 }
 
 #[cfg(test)]
@@ -900,9 +960,106 @@ mod tests {
         form.handle_key(KeyCode::Enter);
         form.model_idx = 1;
         form.handle_key(KeyCode::Char('d'));
+        assert_eq!(form.models.len(), 3, "d must wait for confirmation");
+        form.handle_key(KeyCode::Char('y'));
         assert_eq!(form.models.len(), 2);
         assert_eq!(form.models[0].id, "a");
         assert_eq!(form.models[1].id, "c");
+    }
+
+    #[test]
+    fn removing_a_model_asks_before_deleting() {
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("keep"), ProviderModel::from_id("drop")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Models;
+        form.model_idx = 1;
+        form.handle_key(KeyCode::Char('d'));
+        assert!(form.confirm_remove);
+        assert_eq!(form.models.len(), 2);
+
+        form.handle_key(KeyCode::Char('n'));
+        assert!(!form.confirm_remove);
+        assert_eq!(form.models.len(), 2);
+        assert_eq!(form.models[1].id, "drop");
+
+        form.handle_key(KeyCode::Char('d'));
+        form.handle_key(KeyCode::Esc);
+        assert!(!form.confirm_remove);
+        assert_eq!(form.models.len(), 2);
+
+        form.handle_key(KeyCode::Char('-'));
+        form.handle_key(KeyCode::Char('y'));
+        assert_eq!(form.models.len(), 1);
+        assert_eq!(form.models[0].id, "keep");
+        assert!(!form.confirm_remove);
+    }
+
+    #[test]
+    fn last_model_cannot_be_removed_even_with_confirm() {
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("only")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Models;
+        form.handle_key(KeyCode::Char('d'));
+        assert!(!form.confirm_remove);
+        assert_eq!(form.models.len(), 1);
+        assert!(
+            form.error
+                .as_deref()
+                .is_some_and(|e| e.contains("at least one model")),
+            "error was {:?}",
+            form.error
+        );
+    }
+
+    #[test]
+    fn confirm_remove_popup_names_the_model() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("keep"), ProviderModel::from_id("drop")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Models;
+        form.model_idx = 1;
+        form.handle_key(KeyCode::Char('d'));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_provider_form(frame, &mut form, frame.area()))
+            .unwrap();
+        let area = terminal.backend().buffer().area;
+        let joined = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        terminal
+                            .backend()
+                            .buffer()
+                            .cell((x, y))
+                            .expect("cell")
+                            .symbol()
+                            .to_string()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Confirm"), "{joined}");
+        assert!(joined.contains("Remove model 'drop'?"), "{joined}");
+        assert!(joined.contains("y") && joined.contains("n/esc"), "{joined}");
     }
 
     #[test]
