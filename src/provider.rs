@@ -51,6 +51,13 @@ pub struct ProviderProfile {
     pub model: String,
     #[serde(default = "default_wire_api")]
     pub wire_api: String,
+    /// Extra `codex -c key=value` overrides applied at launch, stored verbatim as
+    /// `"key=value"` strings. Lets a provider carry model-specific Codex settings
+    /// (e.g. `web_search=disabled`, `model_reasoning_effort=medium`) so the user
+    /// need not retype them. Values pass through untouched; Codex — not
+    /// codex-switch — is the source of truth for which keys and values are valid.
+    #[serde(default)]
+    pub codex_config: Vec<String>,
     /// Bearer API key. Secret: stored `0600`, injected as an env var at launch,
     /// and never printed or placed on the command line.
     pub api_key: String,
@@ -155,6 +162,14 @@ impl ProviderProfile {
         if self.wire_api.trim().is_empty() {
             anyhow::bail!("wire_api cannot be empty");
         }
+        for entry in &self.codex_config {
+            match entry.split_once('=') {
+                Some((key, _)) if !key.trim().is_empty() => {}
+                _ => anyhow::bail!(
+                    "codex config override '{entry}' must be in KEY=VALUE form with a non-empty key"
+                ),
+            }
+        }
         if self.api_key.is_empty() {
             anyhow::bail!("api_key cannot be empty");
         }
@@ -176,7 +191,7 @@ impl ProviderProfile {
     /// in argv or the process table.
     pub fn codex_config_args(&self) -> Vec<String> {
         let id = &self.provider_id;
-        [
+        let mut pairs = vec![
             format!("model_providers.{id}.name={}", toml_string(&self.name)),
             format!(
                 "model_providers.{id}.base_url={}",
@@ -192,10 +207,14 @@ impl ProviderProfile {
             ),
             format!("model_provider={}", toml_string(id)),
             format!("model={}", toml_string(&self.model)),
-        ]
-        .into_iter()
-        .flat_map(|kv| ["-c".to_string(), kv])
-        .collect()
+        ];
+        // Provider-saved overrides layer on top, after the model is selected, and
+        // pass through verbatim (the user is responsible for their TOML form).
+        pairs.extend(self.codex_config.iter().cloned());
+        pairs
+            .into_iter()
+            .flat_map(|kv| ["-c".to_string(), kv])
+            .collect()
     }
 
     /// The single environment override that hands Codex the API key under the
@@ -347,6 +366,7 @@ mod tests {
             env_key: derive_env_key(alias),
             model: "openai/gpt-5.3-codex".to_string(),
             wire_api: default_wire_api(),
+            codex_config: Vec::new(),
             api_key: "sk-secret-1234".to_string(),
         }
     }
@@ -447,6 +467,79 @@ mod tests {
         assert!(
             !args.iter().any(|a| a.contains("sk-secret-1234")),
             "the API key must never appear in argv"
+        );
+    }
+
+    #[test]
+    fn codex_config_overrides_are_appended_after_the_model_selection() {
+        let mut p = sample("openrouter");
+        p.codex_config = vec![
+            "web_search=disabled".to_string(),
+            "model_reasoning_effort=medium".to_string(),
+        ];
+        let args = p.codex_config_args();
+
+        // Two extra `-c` overrides beyond the six that define/select the provider.
+        assert_eq!(args.iter().filter(|a| a.as_str() == "-c").count(), 8);
+
+        let model_pos = args.iter().position(|a| a.starts_with("model=")).unwrap();
+        let web_pos = args
+            .iter()
+            .position(|a| a == "web_search=disabled")
+            .unwrap();
+        let reasoning_pos = args
+            .iter()
+            .position(|a| a == "model_reasoning_effort=medium")
+            .unwrap();
+        assert!(
+            model_pos < web_pos && model_pos < reasoning_pos,
+            "overrides must layer on top of the model selection"
+        );
+        // Passed through verbatim, not re-quoted as TOML strings.
+        assert!(args.iter().any(|a| a == "web_search=disabled"));
+    }
+
+    #[test]
+    fn validate_rejects_a_codex_override_without_a_key() {
+        let mut missing_eq = sample("p");
+        missing_eq.codex_config = vec!["web_search".to_string()];
+        assert!(
+            missing_eq.validate().is_err(),
+            "an override without '=' must be rejected"
+        );
+
+        let mut empty_key = sample("p");
+        empty_key.codex_config = vec!["=disabled".to_string()];
+        assert!(
+            empty_key.validate().is_err(),
+            "an override with an empty key must be rejected"
+        );
+
+        let mut ok = sample("p");
+        ok.codex_config = vec!["web_search=disabled".to_string()];
+        assert!(
+            ok.validate().is_ok(),
+            "a KEY=VALUE override must be accepted"
+        );
+    }
+
+    #[test]
+    fn codex_config_survives_a_save_load_round_trip() {
+        let _home = TestHome::new();
+        let mut profile = sample("openrouter");
+        profile.codex_config = vec![
+            "web_search=disabled".to_string(),
+            "model_reasoning_effort=medium".to_string(),
+        ];
+        save(&profile).unwrap();
+
+        let loaded = load("openrouter").unwrap();
+        assert_eq!(
+            loaded.codex_config,
+            vec![
+                "web_search=disabled".to_string(),
+                "model_reasoning_effort=medium".to_string(),
+            ]
         );
     }
 

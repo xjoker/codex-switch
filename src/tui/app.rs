@@ -805,6 +805,7 @@ impl App {
                     env_key: crate::provider::derive_env_key(&state.alias),
                     model: state.model,
                     wire_api: "responses".to_string(),
+                    codex_config: Vec::new(),
                     api_key: value,
                     alias: state.alias.clone(),
                 };
@@ -2737,6 +2738,7 @@ mod tests {
             env_key: "CODEX_SWITCH_GONE_KEY".into(),
             model: "m".into(),
             wire_api: "responses".into(),
+            codex_config: Vec::new(),
             api_key: "k".into(),
         };
         crate::provider::save(&profile).unwrap();
