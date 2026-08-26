@@ -30,7 +30,10 @@ Optional flags:
 | `--name` | the alias | Human-readable name Codex shows |
 | `--env-key` | `CODEX_SWITCH_<ALIAS>_KEY` | Environment variable Codex reads the key from at launch |
 | `--wire-api` | `responses` | Codex wire protocol; current Codex only accepts `responses` |
+| `--set KEY=VALUE` | none | Extra `codex -c` override saved with the provider and applied at launch (repeatable) |
 | `--api-key-stdin` | off | Read the key from stdin instead of a hidden prompt |
+
+`--set` saves a `codex -c KEY=VALUE` override with the provider, so a model-specific Codex setting is applied on every launch without retyping it after `--` (see [Model-specific request settings](#model-specific-request-settings)). Repeat it for several overrides. The value is passed to Codex verbatim — Codex, not codex-switch, decides which keys and values are valid — so only the `KEY=VALUE` shape is checked.
 
 The alias follows the same rules as a ChatGPT profile (ASCII letters, digits, `_`, `-`, `.`; at most 64 characters) and must not collide with an existing profile, an existing provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`.
 
@@ -90,10 +93,19 @@ Codex enables its built-in `web_search` server tool by default. Some models acce
 web_search = "disabled"
 ```
 
-or per launch, since `launch` passes everything after `--` to Codex:
+per launch, since `launch` passes everything after `--` to Codex:
 
 ```bash
 codex-switch launch openrouter -- -c web_search=disabled
+```
+
+or saved once with the provider so every launch applies it:
+
+```bash
+codex-switch provider add openrouter \
+  --base-url https://openrouter.ai/api/v1 \
+  --model openai/gpt-oss-20b \
+  --set web_search=disabled
 ```
 
 ### Reasoning ("thinking") models
@@ -104,7 +116,16 @@ Codex defaults an unknown model to `reasoning effort: none`, which reads as reas
 codex-switch launch openrouter -- -c model_reasoning_effort=medium
 ```
 
-Plain chat models (`deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `openai/gpt-4o-mini`) need no reasoning flag. Combine both overrides when a model needs them.
+or save it with the provider so it is always applied:
+
+```bash
+codex-switch provider add r1 \
+  --base-url https://openrouter.ai/api/v1 \
+  --model deepseek/deepseek-r1-0528 \
+  --set model_reasoning_effort=medium
+```
+
+Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex also accepts `ultra`) come from the Codex version in use, so codex-switch does not restrict them — an unknown value is passed through and Codex reports if it is invalid. Plain chat models (`deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `openai/gpt-4o-mini`) need no reasoning flag. Repeat `--set` to combine both overrides when a model needs them.
 
 ## TUI
 
