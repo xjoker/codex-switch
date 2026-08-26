@@ -516,8 +516,10 @@ pub fn remove(alias: &str) -> Result<()> {
         .with_context(|| format!("removing provider profile {}", dir.display()))
 }
 
-/// Rename a provider directory and re-derive `provider_id` / `env_key` from the
-/// new alias. Display name follows the alias.
+/// Rename a provider directory and re-derive `provider_id` from the new alias.
+/// `env_key` is re-derived only when it still matches the old default; a
+/// custom key name is kept so launch still injects into the variable the
+/// user configured. Display name follows the alias.
 pub fn rename(old: &str, new: &str) -> Result<()> {
     crate::profile::validate_alias(new)?;
     if old == new {
@@ -544,7 +546,9 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     })?;
     profile.alias = new.to_string();
     profile.provider_id = sanitize_provider_id(new);
-    profile.env_key = derive_env_key(new);
+    if profile.env_key == derive_env_key(old) {
+        profile.env_key = derive_env_key(new);
+    }
     profile.name = new.to_string();
     if let Err(err) = save(&profile) {
         let _ = std::fs::rename(&new_dir, &old_dir);
@@ -812,6 +816,18 @@ api_key = "sk-legacy-key"
         assert_eq!(loaded.provider_id, "new_router");
         assert_eq!(loaded.env_key, "CODEX_SWITCH_NEW_ROUTER_KEY");
         assert_eq!(loaded.api_key, "sk-secret-1234");
+    }
+
+    #[test]
+    fn rename_keeps_a_custom_env_key() {
+        let _home = TestHome::new();
+        let mut profile = sample("old");
+        profile.env_key = "OPENROUTER_API_KEY".into();
+        save(&profile).unwrap();
+        rename("old", "new-router").unwrap();
+        let loaded = load("new-router").unwrap();
+        assert_eq!(loaded.env_key, "OPENROUTER_API_KEY");
+        assert_eq!(loaded.provider_id, "new_router");
     }
 
     #[test]

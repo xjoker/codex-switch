@@ -108,7 +108,7 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
 | `a` | Add a provider (form dialog) |
-| `Enter` / `o` | Launch Codex: pick a saved model and reasoning for this session |
+| `Enter` / `o` | Launch Codex: pick a saved model, reasoning, and optional extra argv |
 | `e` | Edit the selected provider |
 | `n` | Rename the selected provider |
 | `d` | Remove the selected provider (confirmation required) |
@@ -116,7 +116,7 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 | `h` | Show help |
 | `q` | Quit |
 
-The Providers table never renders the stored key. `Enter` or `o` picks a saved model (and optionally changes reasoning for this session) then launches, or run `codex-switch launch <alias>` from the shell. `e` opens the edit form. `l` is re-login on the Accounts tab, not launch.
+The Providers table never renders the stored key. `Enter` or `o` picks a saved model (and optionally changes reasoning or extra Codex argv for this session) then launches, or run `codex-switch launch <alias>` from the shell. `e` opens the edit form (including env key, wire API, and extra `-c`). `l` is re-login on the Accounts tab, not launch.
 
 Destructive or consumptive actions always require confirmation.
 

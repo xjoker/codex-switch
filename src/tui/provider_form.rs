@@ -1,8 +1,9 @@
 //! Single-dialog add/edit form for custom API providers.
 //!
 //! Add starts typing the alias immediately. Enter commits the field and
-//! continues into the next one. Tab always moves between fields; `j`/`k`
-//! move inside Models, which includes a visible `+ add model` row.
+//! continues into the next one (Alias → URL → Key → Models). Tab always
+//! moves between every field, including env key, wire API, and extra `-c`.
+//! `j`/`k` move inside Models, which includes a visible `+ add model` row.
 //! `+` adds and `d`/`-` remove from navigation mode. Edit starts on Base URL
 //! so `s` is save, not a character.
 
@@ -264,15 +265,19 @@ impl ProviderFormState {
             KeyCode::Enter | KeyCode::Tab => {
                 let from_models = self.focus == Focus::Models;
                 self.commit_edit();
-                // Add: Enter walks to the next field so you keep typing.
-                // Edit: Enter only commits, so `s` is save rather than a character.
+                // Add Enter: Alias → URL → Key → Models, skipping env/wire/extra.
+                // Tab (and Edit) visit every field, including those extras.
                 // Models: after an id is committed, stay in nav for +/- / ←→ / w / * / s.
                 let enter_stays =
                     matches!(code, KeyCode::Enter) && (from_models || self.mode == FormMode::Edit);
                 if enter_stays {
                     return FormOutcome::Continue;
                 }
-                self.focus_next();
+                if matches!(code, KeyCode::Enter) && self.mode == FormMode::Add {
+                    self.focus_next_add_enter();
+                } else {
+                    self.focus_next();
+                }
                 self.auto_edit_if_typing_field();
                 FormOutcome::Continue
             }
@@ -482,7 +487,6 @@ impl ProviderFormState {
         self.focus = match (self.mode, self.focus) {
             (FormMode::Add, Focus::Alias) => Focus::BaseUrl,
             (_, Focus::BaseUrl) => Focus::ApiKey,
-            (FormMode::Add, Focus::ApiKey) => Focus::Models,
             (_, Focus::ApiKey) => Focus::EnvKey,
             (_, Focus::EnvKey) => Focus::WireApi,
             (_, Focus::WireApi) => Focus::Extra,
@@ -491,6 +495,16 @@ impl ProviderFormState {
             (_, Focus::Models) => Focus::BaseUrl,
             (FormMode::Edit, Focus::Alias) => Focus::BaseUrl,
         };
+    }
+
+    /// Add's Enter path keeps Alias → URL → Key → Models. Tab still visits
+    /// env key / wire API / extra `-c`.
+    fn focus_next_add_enter(&mut self) {
+        if self.focus == Focus::ApiKey {
+            self.focus = Focus::Models;
+        } else {
+            self.focus_next();
+        }
     }
 
     fn focus_prev(&mut self) {
@@ -502,7 +516,6 @@ impl ProviderFormState {
             (_, Focus::EnvKey) => Focus::ApiKey,
             (_, Focus::WireApi) => Focus::EnvKey,
             (_, Focus::Extra) => Focus::WireApi,
-            (FormMode::Add, Focus::Models) => Focus::ApiKey,
             (_, Focus::Models) => Focus::Extra,
             (FormMode::Edit, Focus::Alias) => Focus::Models,
         };
@@ -595,18 +608,49 @@ impl ProviderFormState {
         if !wire_api.is_empty() {
             profile.wire_api = wire_api.to_string();
         }
-        profile.codex_config = self
-            .extra_sets
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_string)
-            .collect();
+        profile.codex_config = parse_extra_sets(&self.extra_sets);
         profile
             .validate()
             .map_err(|err| err.to_string())
             .map(|()| profile)
     }
+}
+
+fn parse_extra_sets(raw: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut current = String::new();
+    for part in raw.split(',') {
+        let trimmed = part.trim();
+        if current.is_empty() {
+            if !trimmed.is_empty() {
+                current = trimmed.to_string();
+            }
+            continue;
+        }
+        if looks_like_override_start(trimmed) {
+            entries.push(std::mem::take(&mut current));
+            current = trimmed.to_string();
+        } else {
+            current.push(',');
+            current.push_str(part);
+        }
+    }
+    if !current.is_empty() {
+        entries.push(current);
+    }
+    entries
+}
+
+fn looks_like_override_start(s: &str) -> bool {
+    let Some((key, _)) = s.split_once('=') else {
+        return false;
+    };
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
 }
 
 fn char_to_byte(s: &str, char_pos: usize) -> usize {
@@ -1027,6 +1071,67 @@ mod tests {
         assert_eq!(form.focus, Focus::BaseUrl);
         assert_eq!(form.model_idx, idx);
         assert!(!form.editing);
+    }
+
+    #[test]
+    fn add_form_enter_skips_optional_fields_and_tab_visits_them() {
+        let _home = EnvHome::new();
+        let mut form = ProviderFormState::add();
+        type_into(&mut form, "or");
+        form.handle_key(KeyCode::Enter);
+        type_into(&mut form, "https://example.com/v1");
+        form.handle_key(KeyCode::Enter);
+        type_into(&mut form, "sk");
+        form.handle_key(KeyCode::Enter);
+        assert_eq!(
+            form.focus,
+            Focus::Models,
+            "Enter after API key must land on Models"
+        );
+
+        let mut tab = ProviderFormState::add();
+        type_into(&mut tab, "or");
+        tab.handle_key(KeyCode::Enter);
+        type_into(&mut tab, "https://example.com/v1");
+        tab.handle_key(KeyCode::Enter);
+        type_into(&mut tab, "sk");
+        tab.handle_key(KeyCode::Tab);
+        assert_eq!(
+            tab.focus,
+            Focus::EnvKey,
+            "Tab after API key must visit Env key"
+        );
+        tab.handle_key(KeyCode::Tab);
+        assert_eq!(tab.focus, Focus::WireApi);
+        tab.handle_key(KeyCode::Tab);
+        assert_eq!(tab.focus, Focus::Extra);
+        type_into(&mut tab, "temperature=0, foo=a, b");
+        tab.handle_key(KeyCode::Tab);
+        assert_eq!(tab.focus, Focus::Models);
+        type_into(&mut tab, "m");
+        tab.handle_key(KeyCode::Enter);
+        let FormOutcome::Saved(profile) = tab.handle_key(KeyCode::Char('s')) else {
+            panic!("add should save; error={:?}", tab.error);
+        };
+        assert_eq!(profile.env_key, "CODEX_SWITCH_OR_KEY");
+        assert_eq!(profile.wire_api, "responses");
+        assert_eq!(
+            profile.codex_config,
+            ["temperature=0".to_string(), "foo=a, b".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_extra_sets_keeps_commas_inside_a_value() {
+        assert_eq!(
+            super::parse_extra_sets("temperature=0, foo=a, b, bar=1"),
+            ["temperature=0", "foo=a, b", "bar=1"]
+        );
+        assert_eq!(super::parse_extra_sets("  "), Vec::<String>::new());
+        assert_eq!(
+            super::parse_extra_sets("sandbox_permissions=[\"a\",\"b\"]"),
+            [r#"sandbox_permissions=["a","b"]"#]
+        );
     }
 
     #[test]

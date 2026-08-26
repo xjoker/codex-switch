@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **TUI provider form** — Add still uses Enter for Alias → URL → Key → Models. Tab now visits env key, wire API, and extra `-c` on Add as well as Edit. Extra `-c` values may contain commas. Renaming a provider keeps a custom `env_key`; only the default `CODEX_SWITCH_<ALIAS>_KEY` is re-derived.
 - **`launch` argv passthrough** — A known Codex subcommand (`exec`, `resume`, …) or a non-launch flag in the alias slot starts the Codex argv, so `codex-switch launch exec --json "…"` auto-selects instead of looking up alias `exec`. Tokens on both sides of `--` are kept (`launch work exec -- --json` still runs `exec`). Provider `-c` overrides stay in front of a Codex subcommand; a passthrough `--model` / `-m` drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`), and the launch banner / `--json` envelope report that one-shot model. `--json launch` captures Codex stdout/stderr into the envelope. `--full-auto` is not a current Codex flag.
 
 ## v20260826.2.0 — 2026-08-26
