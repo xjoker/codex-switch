@@ -44,6 +44,14 @@ codex-switch launch       # 用最佳账号启动 Codex
 ## 功能一览
 
 - 保存、导入、重命名、切换和可恢复地删除 Codex 账号。
+- 保存自定义 API 提供方（OpenRouter 等兼容 Responses 协议的接口），并通过 `launch` 启动 Codex，不写入 `~/.codex`：
+
+  ```bash
+  codex-switch provider add openrouter \
+    --base-url https://openrouter.ai/api/v1 \
+    --model openai/gpt-5.3-codex
+  codex-switch launch openrouter
+  ```
 - CLI 与 TUI 展示主额度池和每个模型的独立额度池。
 - 自适应配速感知评分自动选号，并可直接用它启动 Codex。
 - 支持重置卡、配额预热、JSON 输出、代理，以及 Beta 后台守护进程（macOS LaunchAgent / Linux systemd / Windows 任务计划程序 Task Scheduler；可调 `cache_refresh_interval_secs` 与 `auto_warmup`）。
@@ -55,7 +63,7 @@ codex-switch launch       # 用最佳账号启动 Codex
 
 ## 文档
 
-**[GitHub Wiki](https://github.com/xjoker/codex-switch/wiki)** 是完整文档：开始使用、功能指南、命令参考、配置、更新与通道、故障排查、FAQ 以及贡献者指南。中文读者从 [中文指南](https://github.com/xjoker/codex-switch/wiki/Chinese-Guide) 开始；行为细节以英文页面为准。
+**[GitHub Wiki](https://github.com/xjoker/codex-switch/wiki)** 是完整文档：开始使用、功能指南、自定义 API 提供方、命令参考、配置、更新与通道、故障排查、FAQ 以及贡献者指南。中文读者从 [中文指南](https://github.com/xjoker/codex-switch/wiki/Chinese-Guide) 开始；行为细节以英文页面为准。
 
 维护者文档：[发布流程](docs/RELEASE.md) · [更新日志](docs/CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)。
 

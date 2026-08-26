@@ -16,6 +16,9 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
             name,
             env_key,
             wire_api,
+            reasoning,
+            no_web_search,
+            set,
             api_key_stdin,
         } => add(
             alias,
@@ -24,6 +27,7 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
             name,
             env_key,
             wire_api,
+            merge_codex_config(reasoning, no_web_search, set),
             api_key_stdin,
             json,
         ),
@@ -41,6 +45,7 @@ fn add(
     name: Option<String>,
     env_key: Option<String>,
     wire_api: String,
+    codex_config: Vec<String>,
     api_key_stdin: bool,
     json: bool,
 ) -> Result<()> {
@@ -61,6 +66,7 @@ fn add(
         env_key: env_key.unwrap_or_else(|| provider::derive_env_key(&alias)),
         model,
         wire_api,
+        codex_config,
         api_key,
         alias: alias.clone(),
     };
@@ -84,6 +90,28 @@ fn add(
         ));
     }
     Ok(())
+}
+
+/// Translate the convenience `--reasoning` / `--no-web-search` flags into
+/// `codex -c KEY=VALUE` overrides, then append the raw `--set` overrides last so
+/// an explicit `--set` wins over a convenience flag for the same key (Codex
+/// takes the last `-c` when a key repeats). The convenience flags are just
+/// shortcuts; any value is passed through, and `--set` remains the escape hatch
+/// for arbitrary keys.
+fn merge_codex_config(
+    reasoning: Option<String>,
+    no_web_search: bool,
+    set: Vec<String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(effort) = reasoning {
+        out.push(format!("model_reasoning_effort={effort}"));
+    }
+    if no_web_search {
+        out.push("web_search=disabled".to_string());
+    }
+    out.extend(set);
+    out
 }
 
 /// Read the API key without exposing it on the command line: from stdin in
@@ -127,6 +155,7 @@ fn list(json: bool) -> Result<()> {
                     "model": p.model,
                     "wire_api": p.wire_api,
                     "env_key": p.env_key,
+                    "codex_config": p.codex_config,
                     "has_key": !p.api_key.is_empty(),
                 })
             })
@@ -161,6 +190,7 @@ fn show(alias: &str, json: bool) -> Result<()> {
             "model": p.model,
             "wire_api": p.wire_api,
             "env_key": p.env_key,
+            "codex_config": p.codex_config,
             "key": p.redacted_key(),
         }));
         return Ok(());
@@ -172,6 +202,13 @@ fn show(alias: &str, json: bool) -> Result<()> {
     user_println(&format!("model       {}", p.model));
     user_println(&format!("wire_api    {}", p.wire_api));
     user_println(&format!("env_key     {}", p.env_key));
+    if p.codex_config.is_empty() {
+        user_println("codex_config (none)");
+    } else {
+        for entry in &p.codex_config {
+            user_println(&format!("codex_config {entry}"));
+        }
+    }
     user_println(&format!("key         {}", p.redacted_key()));
     Ok(())
 }
@@ -200,4 +237,52 @@ fn remove(alias: &str, yes: bool, json: bool) -> Result<()> {
         user_println(&format!("Removed provider '{alias}'"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_codex_config;
+
+    #[test]
+    fn convenience_flags_translate_to_codex_overrides() {
+        let out = merge_codex_config(Some("medium".to_string()), true, vec![]);
+        assert_eq!(
+            out,
+            vec![
+                "model_reasoning_effort=medium".to_string(),
+                "web_search=disabled".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_flags_yield_no_overrides() {
+        assert!(merge_codex_config(None, false, vec![]).is_empty());
+    }
+
+    #[test]
+    fn explicit_set_is_appended_last_so_it_wins_over_a_convenience_flag() {
+        let out = merge_codex_config(
+            Some("high".to_string()),
+            false,
+            vec!["model_reasoning_effort=low".to_string()],
+        );
+        // Both survive; Codex takes the last `-c` for a repeated key, so the
+        // explicit --set (last) wins.
+        assert_eq!(
+            out,
+            vec![
+                "model_reasoning_effort=high".to_string(),
+                "model_reasoning_effort=low".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_reasoning_value_is_passed_through_unchecked() {
+        // The effort set is Codex's to define; codex-switch must not reject a
+        // value it does not recognize.
+        let out = merge_codex_config(Some("ultra".to_string()), false, vec![]);
+        assert_eq!(out, vec!["model_reasoning_effort=ultra".to_string()]);
+    }
 }

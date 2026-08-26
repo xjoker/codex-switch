@@ -51,6 +51,13 @@ pub struct ProviderProfile {
     pub model: String,
     #[serde(default = "default_wire_api")]
     pub wire_api: String,
+    /// Extra `codex -c key=value` overrides applied at launch, stored verbatim as
+    /// `"key=value"` strings. Lets a provider carry model-specific Codex settings
+    /// (e.g. `web_search=disabled`, `model_reasoning_effort=medium`) so the user
+    /// need not retype them. Values pass through untouched; Codex — not
+    /// codex-switch — is the source of truth for which keys and values are valid.
+    #[serde(default)]
+    pub codex_config: Vec<String>,
     /// Bearer API key. Secret: stored `0600`, injected as an env var at launch,
     /// and never printed or placed on the command line.
     pub api_key: String,
@@ -155,6 +162,14 @@ impl ProviderProfile {
         if self.wire_api.trim().is_empty() {
             anyhow::bail!("wire_api cannot be empty");
         }
+        for entry in &self.codex_config {
+            match entry.split_once('=') {
+                Some((key, _)) if !key.trim().is_empty() => {}
+                _ => anyhow::bail!(
+                    "codex config override '{entry}' must be in KEY=VALUE form with a non-empty key"
+                ),
+            }
+        }
         if self.api_key.is_empty() {
             anyhow::bail!("api_key cannot be empty");
         }
@@ -165,6 +180,68 @@ impl ProviderProfile {
     pub fn redacted_key(&self) -> String {
         redact_key(&self.api_key)
     }
+
+    /// The `codex -c …` override arguments that define and select this provider
+    /// for a single launch. These layer on top of the user's base
+    /// `~/.codex/config.toml` (so MCP servers and other settings are preserved)
+    /// and nothing is written to disk.
+    ///
+    /// The API key is intentionally **not** here — it is handed to Codex through
+    /// the environment (see [`launch_env`](Self::launch_env)) so it never appears
+    /// in argv or the process table.
+    pub fn codex_config_args(&self) -> Vec<String> {
+        let id = &self.provider_id;
+        let mut pairs = vec![
+            format!("model_providers.{id}.name={}", toml_string(&self.name)),
+            format!(
+                "model_providers.{id}.base_url={}",
+                toml_string(&self.base_url)
+            ),
+            format!(
+                "model_providers.{id}.env_key={}",
+                toml_string(&self.env_key)
+            ),
+            format!(
+                "model_providers.{id}.wire_api={}",
+                toml_string(&self.wire_api)
+            ),
+            format!("model_provider={}", toml_string(id)),
+            format!("model={}", toml_string(&self.model)),
+        ];
+        // Provider-saved overrides layer on top, after the model is selected, and
+        // pass through verbatim (the user is responsible for their TOML form).
+        pairs.extend(self.codex_config.iter().cloned());
+        pairs
+            .into_iter()
+            .flat_map(|kv| ["-c".to_string(), kv])
+            .collect()
+    }
+
+    /// The single environment override that hands Codex the API key under the
+    /// profile's `env_key`. Injected into the child process only.
+    pub fn launch_env(&self) -> (String, String) {
+        (self.env_key.clone(), self.api_key.clone())
+    }
+}
+
+/// Render a string as a TOML basic (quoted) string for a `codex -c key=value`
+/// override, escaping the characters TOML requires. Codex parses the value part
+/// as TOML, so a plain unquoted string would be misread (or rejected).
+fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Mask a secret for display: keep the last 4 characters when long enough,
@@ -289,6 +366,7 @@ mod tests {
             env_key: derive_env_key(alias),
             model: "openai/gpt-5.3-codex".to_string(),
             wire_api: default_wire_api(),
+            codex_config: Vec::new(),
             api_key: "sk-secret-1234".to_string(),
         }
     }
@@ -363,6 +441,124 @@ mod tests {
         assert!(!exists("openrouter"));
         assert!(list_providers().unwrap().is_empty());
         assert!(remove("openrouter").is_err(), "removing twice must error");
+    }
+
+    #[test]
+    fn codex_config_args_define_and_select_the_provider_without_the_key() {
+        let p = sample("openrouter");
+        let args = p.codex_config_args();
+        let joined = args.join(" ");
+
+        // Every override is introduced by its own `-c`.
+        assert_eq!(args.iter().filter(|a| a.as_str() == "-c").count(), 6);
+        assert!(joined.contains(r#"model_providers.openrouter.name="OpenRouter""#));
+        assert!(
+            joined
+                .contains(r#"model_providers.openrouter.base_url="https://openrouter.ai/api/v1""#)
+        );
+        assert!(
+            joined.contains(r#"model_providers.openrouter.env_key="CODEX_SWITCH_OPENROUTER_KEY""#)
+        );
+        assert!(joined.contains(r#"model_providers.openrouter.wire_api="responses""#));
+        assert!(joined.contains(r#"model_provider="openrouter""#));
+        assert!(joined.contains(r#"model="openai/gpt-5.3-codex""#));
+
+        // The secret must never travel on the command line.
+        assert!(
+            !args.iter().any(|a| a.contains("sk-secret-1234")),
+            "the API key must never appear in argv"
+        );
+    }
+
+    #[test]
+    fn codex_config_overrides_are_appended_after_the_model_selection() {
+        let mut p = sample("openrouter");
+        p.codex_config = vec![
+            "web_search=disabled".to_string(),
+            "model_reasoning_effort=medium".to_string(),
+        ];
+        let args = p.codex_config_args();
+
+        // Two extra `-c` overrides beyond the six that define/select the provider.
+        assert_eq!(args.iter().filter(|a| a.as_str() == "-c").count(), 8);
+
+        let model_pos = args.iter().position(|a| a.starts_with("model=")).unwrap();
+        let web_pos = args
+            .iter()
+            .position(|a| a == "web_search=disabled")
+            .unwrap();
+        let reasoning_pos = args
+            .iter()
+            .position(|a| a == "model_reasoning_effort=medium")
+            .unwrap();
+        assert!(
+            model_pos < web_pos && model_pos < reasoning_pos,
+            "overrides must layer on top of the model selection"
+        );
+        // Passed through verbatim, not re-quoted as TOML strings.
+        assert!(args.iter().any(|a| a == "web_search=disabled"));
+    }
+
+    #[test]
+    fn validate_rejects_a_codex_override_without_a_key() {
+        let mut missing_eq = sample("p");
+        missing_eq.codex_config = vec!["web_search".to_string()];
+        assert!(
+            missing_eq.validate().is_err(),
+            "an override without '=' must be rejected"
+        );
+
+        let mut empty_key = sample("p");
+        empty_key.codex_config = vec!["=disabled".to_string()];
+        assert!(
+            empty_key.validate().is_err(),
+            "an override with an empty key must be rejected"
+        );
+
+        let mut ok = sample("p");
+        ok.codex_config = vec!["web_search=disabled".to_string()];
+        assert!(
+            ok.validate().is_ok(),
+            "a KEY=VALUE override must be accepted"
+        );
+    }
+
+    #[test]
+    fn codex_config_survives_a_save_load_round_trip() {
+        let _home = TestHome::new();
+        let mut profile = sample("openrouter");
+        profile.codex_config = vec![
+            "web_search=disabled".to_string(),
+            "model_reasoning_effort=medium".to_string(),
+        ];
+        save(&profile).unwrap();
+
+        let loaded = load("openrouter").unwrap();
+        assert_eq!(
+            loaded.codex_config,
+            vec![
+                "web_search=disabled".to_string(),
+                "model_reasoning_effort=medium".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_env_carries_the_key_under_the_derived_var() {
+        let p = sample("openrouter");
+        assert_eq!(
+            p.launch_env(),
+            (
+                "CODEX_SWITCH_OPENROUTER_KEY".to_string(),
+                "sk-secret-1234".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn toml_string_quotes_and_escapes() {
+        assert_eq!(toml_string("OpenRouter"), r#""OpenRouter""#);
+        assert_eq!(toml_string(r#"a"b\c"#), r#""a\"b\\c""#);
     }
 
     #[cfg(unix)]

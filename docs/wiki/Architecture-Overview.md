@@ -1,6 +1,6 @@
 # Architecture overview
 
-`codex-switch` is a single Rust binary. It owns saved profile state under `CODEX_SWITCH_HOME` and coordinates access to the live Codex authentication file under `CODEX_HOME`.
+`codex-switch` is a single Rust binary. It owns saved profile and custom-provider state under `CODEX_SWITCH_HOME` and coordinates access to the live Codex authentication file under `CODEX_HOME`.
 
 ## System boundaries
 
@@ -9,17 +9,21 @@ flowchart LR
     User[CLI or TUI user] --> Dispatch[Command dispatch]
     Service[Platform service manager] --> Daemon[Background daemon]
     Dispatch --> Profiles[Profile and lock layer]
+    Dispatch --> Providers[Custom API providers]
     Dispatch --> Usage[Usage, refresh, models, reset cards]
     Dispatch --> Login[OAuth login]
     Dispatch --> Update[Self-update]
     Daemon --> Profiles
     Daemon --> Usage
     Profiles <--> CSHome[CODEX_SWITCH_HOME]
+    Providers --> CSHome
+    Providers --> CodexLaunch[Codex CLI -c overlay]
     Profiles <--> CodexAuth[CODEX_HOME/auth.json]
     Usage --> OpenAI[Authenticated OpenAI services]
     Login --> OpenAI
     Update --> Releases[GitHub Releases]
     Codex[Codex CLI] --> CodexAuth
+    CodexLaunch --> Codex
 ```
 
 The application treats local files, command-line input, environment variables, OAuth callbacks, HTTP responses, and release assets as trust boundaries. Internal module calls rely on Rust types and established invariants.
@@ -41,6 +45,14 @@ Configuration is loaded once from `config.toml`. An existing unreadable or inval
 
 Profile identity prefers `account_id` and falls back to email when required for locally authenticated operations. Imports are intentionally create-only: Usage API access proves workspace membership, but a Team workspace ID can belong to several users and cannot authorize overwriting an existing profile. Tokens refreshed while a profile is active are written to both the saved profile and the live auth file under the same switching discipline. A rotated import that loses verifiable identity is written under `recovery/`, outside the selectable profile tree.
 
+## Custom API providers
+
+[`src/provider.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/provider.rs) owns third-party API provider profiles (OpenRouter and other Responses-compatible endpoints). Each profile is a TOML file under `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` (directory `0700`, file `0600`). It carries a Codex `model_providers.<id>` definition plus a bearer key; it has no `auth.json`.
+
+[`src/commands/launch.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/commands/launch.rs) takes a separate path when the named alias is a provider: it does not stage `$CODEX_HOME/auth.json`. The profile is translated into `codex -c …` overrides that define and select the provider, and the key is injected into the child process environment under `env_key` — never onto the command line. Because `-c` layers on the user's base `$CODEX_HOME/config.toml`, MCP servers and other Codex settings survive. Auto-select (`launch` with no alias) and `use` stay ChatGPT-only.
+
+The TUI isolates the two kinds of profile on separate tabs so quota/scoring bindings never mix with provider add/remove. See [Custom API providers](Providers).
+
 ## Usage, refresh, and selection
 
 The [`src/usage/`](https://github.com/xjoker/codex-switch/tree/dev/src/usage) module is split by responsibility:
@@ -59,7 +71,7 @@ Selection has two phases. Eligibility excludes candidates with missing authorita
 
 ## TUI and output contracts
 
-[`src/tui/`](https://github.com/xjoker/codex-switch/tree/dev/src/tui) separates application state, key bindings, menus, popups, and rendering. Network or filesystem actions suspend or update the terminal deliberately rather than running inside rendering functions.
+[`src/tui/`](https://github.com/xjoker/codex-switch/tree/dev/src/tui) separates application state, key bindings, menus, popups, and rendering. Network or filesystem actions suspend or update the terminal deliberately rather than running inside rendering functions. Accounts and custom providers occupy separate tabs so quota/scoring keys never mix with provider add/remove.
 
 [`src/output.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/output.rs) owns JSON response types and human formatting. In JSON mode stdout must contain only structured output; human diagnostics and progress are routed to stderr. This separation is part of the automation contract and is covered by integration tests.
 
@@ -86,6 +98,7 @@ PID-file cleanup verifies lock ownership before removal. Removing a path while a
 | `$CODEX_HOME/auth.json` | Live authentication read by Codex CLI |
 | `$CODEX_HOME/config.toml` | Codex configuration, including file-store requirement |
 | `$CODEX_SWITCH_HOME/profiles/<alias>/auth.json` | Saved account credentials |
+| `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Custom API provider definition and key |
 | `$CODEX_SWITCH_HOME/current` | Current alias marker |
 | `$CODEX_SWITCH_HOME/deleted-profiles/` | Recoverable profile archives |
 | `$CODEX_SWITCH_HOME/cache.json` | Usage, workspace metadata, and rejected-credential cache |
@@ -106,3 +119,4 @@ Release artifacts are built only by GitHub Actions for six platform/architecture
 
 - Set up the repository with [Developer onboarding](Developer-Onboarding).
 - Review test and pull-request requirements in [Contributing](Contributing).
+- Custom API provider storage and launch overlay: [Custom API providers](Providers).

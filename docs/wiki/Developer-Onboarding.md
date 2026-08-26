@@ -26,6 +26,7 @@ Development and pull requests normally target `dev`. The `master` branch represe
 |---|---|---|
 | CLI shape | `src/cli.rs`, `src/commands/` | CLI integration tests and `--help` smoke test |
 | Authentication or storage | `src/auth.rs`, `src/profile.rs` | Unit tests plus isolated-home integration tests |
+| Custom API providers | `src/provider.rs`, `src/commands/provider.rs`, launch provider path in `src/commands/launch.rs`, TUI tabs in `src/tui/` | Isolated-home unit tests; the key must never appear in argv |
 | Usage parsing/API | `src/usage/api.rs`, `src/usage/parse.rs` | Mock HTTP and parser tests |
 | Account selection | `src/usage/scoring.rs`, `src/commands/profile.rs` | Pure scoring tests and end-to-end scoring tests |
 | TUI behavior | `src/tui/` | State/render unit tests and terminal smoke test |
@@ -95,7 +96,7 @@ GitHub Actions repeats the core checks on Linux, macOS, and Windows. A local pas
 
 Behavior changes must update the closest reader-facing document in the same pull request:
 
-- User-visible commands or behavior: the relevant `docs/wiki/` page ([Feature guide](Feature-Guide), [Command reference](Command-Reference), [Configuration](Configuration), [Updating](Updating), [Troubleshooting](Troubleshooting)) and `README.md` when the quick start is affected
+- User-visible commands or behavior: the relevant `docs/wiki/` page ([Feature guide](Feature-Guide), [Custom API providers](Providers), [Command reference](Command-Reference), [Configuration](Configuration), [Updating](Updating), [Troubleshooting](Troubleshooting)) and `README.md` when the quick start is affected
 - Module boundaries or data flow: [Architecture overview](Architecture-Overview) (`docs/wiki/Architecture-Overview.md`)
 - Contributor workflow: [`CONTRIBUTING.md`](https://github.com/xjoker/codex-switch/blob/dev/CONTRIBUTING.md) or this page
 - Release behavior: [`docs/RELEASE.md`](https://github.com/xjoker/codex-switch/blob/dev/docs/RELEASE.md)

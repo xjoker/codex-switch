@@ -52,6 +52,19 @@ pub enum ProviderCommand {
         /// Codex wire protocol (current Codex only supports "responses")
         #[arg(long, default_value = "responses")]
         wire_api: String,
+        /// Reasoning effort for thinking models, saved as
+        /// `model_reasoning_effort=<VALUE>` (common: none, minimal, low, medium,
+        /// high, xhigh, max; Codex also accepts ultra). Passed to Codex verbatim
+        #[arg(long, value_name = "EFFORT")]
+        reasoning: Option<String>,
+        /// Disable Codex's built-in web_search server tool for models that reject
+        /// it (saved as `web_search=disabled`)
+        #[arg(long)]
+        no_web_search: bool,
+        /// Extra `codex -c KEY=VALUE` override to apply at launch (repeatable);
+        /// passed through verbatim, so any value Codex accepts works
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
         /// Read the API key from stdin instead of an interactive hidden prompt
         #[arg(long)]
         api_key_stdin: bool,

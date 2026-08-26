@@ -10,7 +10,19 @@ No. Codex reads authentication at startup. Restart Codex, or use `codex-switch l
 
 ## Where is account data stored?
 
-Saved profiles and application state default to `~/.codex-switch`; the live Codex file defaults to `~/.codex/auth.json`. `CODEX_SWITCH_HOME` and `CODEX_HOME` relocate them independently.
+Saved profiles and application state default to `~/.codex-switch`; the live Codex file defaults to `~/.codex/auth.json`. Custom API providers live under `~/.codex-switch/providers/<alias>/provider.toml`. `CODEX_SWITCH_HOME` and `CODEX_HOME` relocate them independently.
+
+## Can I point Codex at DeepSeek (or another Chat Completions API) directly?
+
+No. Current Codex only accepts `wire_api = "responses"`. DeepSeek's official API is Chat Completions. Save an OpenRouter (or other Responses-capable gateway) provider and set `--model` to that gateway's slug. See [Custom API providers](Providers).
+
+## Does `codex-switch use` switch a custom API provider?
+
+No. `use` only stages a ChatGPT `auth.json` for the next Codex process. A provider is applied only by `codex-switch launch <alias>`, for that one Codex invocation. A later bare `codex` run is unchanged.
+
+## Is a custom provider's API key put on the command line?
+
+No. `provider add` reads it from a hidden prompt or `--api-key-stdin`. Launch injects it into the Codex child environment under a codex-switch-owned variable. `list`, `show`, JSON, and the TUI print a redacted form only.
 
 ## Is profile deletion permanent?
 
@@ -40,4 +52,5 @@ These Wiki pages are generated from [`docs/wiki/` on the `dev` branch](https://g
 
 - New installation: [Getting started](Getting-Started).
 - Daily workflows: [Feature guide](Feature-Guide).
+- Custom API providers: [Custom API providers](Providers).
 - Errors and recovery: [Troubleshooting](Troubleshooting).
