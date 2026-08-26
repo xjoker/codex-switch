@@ -12,6 +12,7 @@ mod logging;
 mod login;
 mod output;
 mod profile;
+mod provider;
 mod signals;
 mod tui;
 mod update;
@@ -281,6 +282,7 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         } => commands::launch_cmd(alias.as_deref(), args, json, consume_card).await?,
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => commands::open_cmd()?,
+        Commands::Provider(sub) => commands::provider_cmd(sub, json)?,
         Commands::Daemon(sub) => daemon::dispatch(sub, json).await?,
     }
 

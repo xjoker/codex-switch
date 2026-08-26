@@ -28,6 +28,8 @@ mod login;
 mod output;
 pub mod profile;
 #[allow(dead_code)]
+mod provider;
+#[allow(dead_code)]
 mod signals;
 #[allow(dead_code)]
 mod tui;

@@ -28,6 +28,51 @@ pub enum DaemonCommand {
     Uninstall,
 }
 
+#[derive(Debug, Clone, Subcommand)]
+pub enum ProviderCommand {
+    /// Add a custom API provider (e.g. OpenRouter) for launching Codex with a third-party model
+    #[command(
+        after_help = "The API key is read from a hidden prompt (or stdin with --api-key-stdin), never from the command line.\n\nExample:\n  codex-switch provider add openrouter \\\n    --base-url https://openrouter.ai/api/v1 \\\n    --model openai/gpt-5.3-codex"
+    )]
+    Add {
+        /// Provider alias (codex-switch name)
+        alias: String,
+        /// API base URL, e.g. https://openrouter.ai/api/v1
+        #[arg(long)]
+        base_url: String,
+        /// Default model id (for OpenRouter, the full slug incl. provider prefix)
+        #[arg(long)]
+        model: String,
+        /// Human-readable provider name (defaults to the alias)
+        #[arg(long)]
+        name: Option<String>,
+        /// Environment variable Codex reads the key from (defaults to a codex-switch-owned name)
+        #[arg(long)]
+        env_key: Option<String>,
+        /// Codex wire protocol (current Codex only supports "responses")
+        #[arg(long, default_value = "responses")]
+        wire_api: String,
+        /// Read the API key from stdin instead of an interactive hidden prompt
+        #[arg(long)]
+        api_key_stdin: bool,
+    },
+    /// List saved custom providers
+    List,
+    /// Show one provider's details (API key redacted)
+    Show {
+        /// Provider alias
+        alias: String,
+    },
+    /// Remove a custom provider and its stored key
+    Remove {
+        /// Provider alias
+        alias: String,
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(
     name = "codex-switch",
@@ -171,6 +216,9 @@ pub enum Commands {
     Tui,
     /// Open the ~/.codex-switch directory in the system file manager
     Open,
+    /// Manage custom API providers (OpenRouter, etc.) for launching Codex with a third-party model
+    #[command(subcommand)]
+    Provider(ProviderCommand),
     /// Background daemon (Beta) for automatic account switching
     #[command(subcommand)]
     Daemon(DaemonCommand),
