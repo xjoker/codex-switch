@@ -17,6 +17,7 @@ pub enum Section {
     Account,
     Batch,
     Provider,
+    Settings,
     Global,
 }
 
@@ -28,6 +29,7 @@ impl Section {
             Section::Account => "Account actions  (open via Enter)",
             Section::Batch => "Batch actions  (open via Enter when accounts marked)",
             Section::Provider => "Providers tab",
+            Section::Settings => "Settings tab",
             Section::Global => "Global",
         }
     }
@@ -56,6 +58,12 @@ pub const KEYMAP: &[Binding] = &[
         section: Section::Navigation,
         label: "search",
         in_status_bar: true,
+    },
+    Binding {
+        keys: "tab",
+        section: Section::Navigation,
+        label: "next tab (Accounts / Providers / Settings)",
+        in_status_bar: false,
     },
     Binding {
         keys: "s",
@@ -181,6 +189,43 @@ pub const KEYMAP: &[Binding] = &[
         label: "remove selected provider",
         in_status_bar: false,
     },
+    // Settings tab
+    Binding {
+        keys: "j / k / ↑ ↓",
+        section: Section::Settings,
+        label: "move field",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "enter / space",
+        section: Section::Settings,
+        label: "edit or toggle the focused field",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "← / →",
+        section: Section::Settings,
+        label: "cycle log level / booleans",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "+ / a",
+        section: Section::Settings,
+        label: "add a warmup HH:MM slot",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "d / -",
+        section: Section::Settings,
+        label: "remove the selected warmup slot",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "s",
+        section: Section::Settings,
+        label: "save config.toml",
+        in_status_bar: false,
+    },
     // Global
     Binding {
         keys: "enter",
@@ -294,6 +339,12 @@ mod tests {
         );
         assert!(launch.iter().any(|b| b.section == super::Section::Account));
         assert!(launch.iter().any(|b| b.section == super::Section::Provider));
+
+        let settings_save = super::KEYMAP
+            .iter()
+            .find(|b| b.section == super::Section::Settings && b.keys == "s")
+            .expect("Settings s is save");
+        assert!(settings_save.label.contains("save"));
 
         let ell: Vec<_> = super::KEYMAP.iter().filter(|b| b.keys == "l").collect();
         assert!(

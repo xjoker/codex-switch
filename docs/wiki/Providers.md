@@ -123,7 +123,7 @@ Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex
 
 ## TUI
 
-`codex-switch tui` has two tabs: **Accounts** (ChatGPT OAuth, quota, scoring) and **Providers** (alias, models, base URL). Switch with `Tab` / `Shift+Tab`.
+`codex-switch tui` has three tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (alias, models, base URL), and **Settings** (`config.toml`). Switch with `Tab` / `Shift+Tab`.
 
 On the Providers tab:
 
@@ -135,7 +135,7 @@ On the Providers tab:
 | `e` | Edit the selected provider |
 | `n` | Rename |
 | `d` | Remove (confirmation required) |
-| `Tab` | Return to Accounts |
+| `Tab` | Next tab (Settings) |
 | `h` | Help |
 | `q` | Quit |
 

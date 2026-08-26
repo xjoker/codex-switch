@@ -4,6 +4,7 @@ pub mod menu;
 pub mod popup;
 pub mod provider_form;
 pub mod provider_launch;
+pub mod settings;
 pub mod theme;
 pub mod ui;
 

@@ -17,7 +17,7 @@ Security vulnerabilities should not be posted with live credentials or exploit d
 - Add a failing regression or behavior test before implementation when the change has a testable contract.
 - Prefer existing modules and dependencies. Do not add a dependency when the standard library or an installed crate already solves the problem.
 - Preserve JSON stdout, atomic file writes, cross-process locks, recoverable deletion, and the file-backed Codex credential-store requirement.
-- Write code comments only when the reason is not clear from the code.
+- Write code comments only when the reason is not clear from the code. Comments, rustdoc, commit messages, and in-repo explanations are English. User-facing Chinese translations live only in `README_CN.md` and `docs/wiki/Chinese-Guide.md`.
 - Write user-facing text and documentation in English.
 
 ## Verify locally

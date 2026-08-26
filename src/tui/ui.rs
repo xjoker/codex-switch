@@ -62,6 +62,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             }
         }
         Tab::Providers => render_providers_tab(f, app, vertical[1]),
+        Tab::Settings => super::settings::render_settings_tab(f, &app.settings, vertical[1]),
     }
 
     render_status_bar(f, app, vertical[2]);
@@ -771,24 +772,29 @@ pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
     }
 }
 
-/// Top tab bar: Accounts (ChatGPT OAuth) vs Providers (third-party API+key).
+/// Top tab bar: Accounts, Providers, Settings.
 fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     let active = base().fg(BG).bg(C_CYAN).add_modifier(Modifier::BOLD);
     let inactive = base().fg(C_GRAY);
-    let (accounts_style, providers_style) = match app.active_tab {
-        Tab::Accounts => (active, inactive),
-        Tab::Providers => (inactive, active),
+    let style = |tab: Tab| {
+        if app.active_tab == tab {
+            active
+        } else {
+            inactive
+        }
     };
     let line = Line::from(vec![
         Span::styled(
             format!(" Accounts ({}) ", app.accounts.len()),
-            accounts_style,
+            style(Tab::Accounts),
         ),
         Span::styled("  ", base()),
         Span::styled(
             format!(" Providers ({}) ", app.providers.len()),
-            providers_style,
+            style(Tab::Providers),
         ),
+        Span::styled("  ", base()),
+        Span::styled(" Settings ", style(Tab::Settings)),
         Span::styled("   Tab to switch", base().fg(DIM)),
     ]);
     f.render_widget(Paragraph::new(line).style(base()), area);
@@ -988,6 +994,26 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             dim(" rename \u{2502} "),
             key("d"),
             dim(" remove \u{2502} "),
+            key("h"),
+            dim(" help \u{2502} "),
+            key("q"),
+            dim(" quit"),
+        ]);
+        f.render_widget(Paragraph::new(line).style(base()), area);
+    } else if app.active_tab == Tab::Settings {
+        let key =
+            |k: &'static str| Span::styled(k, base().fg(C_YELLOW).add_modifier(Modifier::BOLD));
+        let dim = |t: &'static str| Span::styled(t, base().fg(DIM));
+        let line = Line::from(vec![
+            dim(" "),
+            key("j/k"),
+            dim(" field \u{2502} "),
+            key("enter"),
+            dim(" edit \u{2502} "),
+            key("s"),
+            dim(" save \u{2502} "),
+            key("+/-"),
+            dim(" warmup time \u{2502} "),
             key("h"),
             dim(" help \u{2502} "),
             key("q"),
@@ -1346,7 +1372,7 @@ fn status_bar_height(app: &App, width: u16) -> usize {
     {
         return 1;
     }
-    if app.active_tab == Tab::Providers {
+    if app.active_tab == Tab::Providers || app.active_tab == Tab::Settings {
         return 1;
     }
     build_help_lines(width as usize).len()
@@ -1427,6 +1453,34 @@ mod tests {
         assert!(
             !joined.contains("l launch"),
             "l must not mean launch on Providers:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn settings_tab_renders_config_fields_and_save_hint() {
+        let mut app = App::new();
+        app.active_tab = crate::tui::app::Tab::Settings;
+        app.settings.draft.daemon.auto_warmup = true;
+        app.settings.draft.daemon.warmup_times = vec!["08:00".into()];
+
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+
+        let joined = (0..36)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Settings"), "tab bar or panel:\n{joined}");
+        assert!(joined.contains("auto_warmup"), "daemon field:\n{joined}");
+        assert!(joined.contains("08:00"), "warmup slot:\n{joined}");
+        assert!(
+            joined.contains("s save"),
+            "status bar must show save:\n{joined}"
+        );
+        assert!(
+            !joined.contains("enter/o launch"),
+            "Settings must not reuse the Providers status bar:\n{joined}"
         );
     }
 

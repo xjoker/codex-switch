@@ -178,14 +178,15 @@ type ResetCardRefreshResult = (
     Result<(Option<u64>, Vec<crate::usage::ResetCredit>), String>,
 );
 
-/// Which top-level TUI tab is active. Accounts (ChatGPT OAuth) and Providers
-/// (third-party API + key) are isolated so their very different semantics
-/// (quota/scoring vs base_url/key) and key bindings never mix.
+/// Which top-level TUI tab is active. Accounts (ChatGPT OAuth), Providers
+/// (third-party API + key), and Settings (`config.toml`) stay isolated so
+/// their key bindings never mix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
     #[default]
     Accounts,
     Providers,
+    Settings,
 }
 
 pub struct App {
@@ -199,6 +200,8 @@ pub struct App {
     pub provider_form: Option<super::provider_form::ProviderFormState>,
     /// Active launch picker (Providers tab, `o`).
     pub provider_launch: Option<super::provider_launch::ProviderLaunchState>,
+    /// Live editor for `config.toml` (Settings tab).
+    pub settings: super::settings::SettingsState,
     /// Active top-level tab.
     pub active_tab: Tab,
     pub selected: usize,
@@ -269,6 +272,7 @@ impl App {
             provider_selected: 0,
             provider_form: None,
             provider_launch: None,
+            settings: super::settings::SettingsState::from_config(cfg.clone()),
             active_tab: Tab::default(),
             selected: 0,
             search: None,
@@ -608,12 +612,43 @@ impl App {
         self.menu = Some(super::menu::MenuState::add());
     }
 
-    /// Switch between the Accounts and Providers tabs.
-    pub fn toggle_tab(&mut self) {
-        self.active_tab = match self.active_tab {
-            Tab::Accounts => Tab::Providers,
-            Tab::Providers => Tab::Accounts,
+    /// Cycle Accounts → Providers → Settings → Accounts (`Tab`), or reverse (`BackTab`).
+    /// Entering Settings reloads `config.toml` from disk.
+    pub fn cycle_tab(&mut self, forward: bool) {
+        self.active_tab = if forward {
+            match self.active_tab {
+                Tab::Accounts => Tab::Providers,
+                Tab::Providers => Tab::Settings,
+                Tab::Settings => Tab::Accounts,
+            }
+        } else {
+            match self.active_tab {
+                Tab::Accounts => Tab::Settings,
+                Tab::Providers => Tab::Accounts,
+                Tab::Settings => Tab::Providers,
+            }
         };
+        self.status_msg = None;
+        if self.active_tab == Tab::Settings {
+            let cfg = crate::config::load_current().unwrap_or_else(|_| crate::config::get());
+            self.settings = super::settings::SettingsState::from_config(cfg);
+        }
+    }
+
+    pub fn handle_settings_key(&mut self, code: KeyCode) {
+        match self.settings.handle_key(code) {
+            super::settings::SettingsOutcome::Continue => {}
+            super::settings::SettingsOutcome::Saved { message } => {
+                self.apply_saved_settings();
+                self.set_status(message, 8);
+            }
+        }
+    }
+
+    fn apply_saved_settings(&mut self) {
+        let cfg = crate::config::get();
+        self.auto_refresh_interval = Duration::from_secs(cfg.tui.auto_refresh_interval_secs.max(1));
+        self.usage_limiter = Arc::new(Semaphore::new(cfg.network.max_concurrent.max(1)));
     }
 
     pub fn provider_select_next(&mut self) {
@@ -1785,6 +1820,7 @@ impl App {
                         }
                         Err(e) => self.set_status_error(format!("Rename failed: {e}"), 5),
                     },
+                    Tab::Settings => {}
                 }
                 return false;
             }
@@ -2095,6 +2131,13 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 app.handle_provider_form_key(key.code);
                 continue;
             }
+            if app.active_tab == Tab::Settings
+                && app.settings.is_editing()
+                && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+            {
+                app.handle_settings_key(key.code);
+                continue;
+            }
             if app.provider_launch.is_some() {
                 if let Some((alias, model, reasoning, extra_args)) =
                     app.handle_provider_launch_key(key.code)
@@ -2156,7 +2199,8 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
             match code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('h') => app.open_help(),
-                KeyCode::Tab | KeyCode::BackTab => app.toggle_tab(),
+                KeyCode::Tab => app.cycle_tab(true),
+                KeyCode::BackTab => app.cycle_tab(false),
                 _ => match app.active_tab {
                     Tab::Accounts => match code {
                         KeyCode::Esc => {
@@ -2222,6 +2266,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                         _ => {}
                     },
                     Tab::Providers => app.handle_provider_list_key(code),
+                    Tab::Settings => app.handle_settings_key(code),
                 },
             }
         }
@@ -3298,5 +3343,43 @@ mod tests {
         // the accurate error rather than the unknown-outcome safe message.
         assert!(!failure.invalidate_cache);
         assert_eq!(failure.message, "Reset card failed (account): HTTP 400");
+    }
+
+    #[test]
+    fn tab_cycles_accounts_providers_settings() {
+        let mut app = App::new();
+        assert_eq!(app.active_tab, Tab::Accounts);
+        app.cycle_tab(true);
+        assert_eq!(app.active_tab, Tab::Providers);
+        app.cycle_tab(true);
+        assert_eq!(app.active_tab, Tab::Settings);
+        app.cycle_tab(true);
+        assert_eq!(app.active_tab, Tab::Accounts);
+        app.cycle_tab(false);
+        assert_eq!(app.active_tab, Tab::Settings);
+        app.cycle_tab(false);
+        assert_eq!(app.active_tab, Tab::Providers);
+    }
+
+    #[test]
+    fn settings_s_saves_and_accounts_s_still_sorts() {
+        let _home = EnvHome::new();
+        let mut app = App::new();
+        app.settings.draft.daemon.auto_warmup = true;
+        app.settings.draft.daemon.warmup_times = vec!["18:20".into()];
+        app.handle_settings_key(KeyCode::Char('s'));
+        let loaded = crate::config::load_current().expect("saved config");
+        assert!(loaded.daemon.auto_warmup);
+        assert_eq!(loaded.daemon.warmup_times, vec!["18:20".to_string()]);
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|m| m.contains("Saved config.toml"))
+        );
+
+        app.active_tab = Tab::Accounts;
+        let before = app.sort_mode;
+        app.cycle_sort();
+        assert_ne!(app.sort_mode, before);
     }
 }

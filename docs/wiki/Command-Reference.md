@@ -72,7 +72,7 @@ See [Custom API providers](Providers) for OpenRouter, DeepSeek-via-gateway, stor
 
 ## TUI shortcuts
 
-Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between them. `q` and `h` are global.
+Three tabs: **Accounts**, **Providers**, and **Settings**. `Tab` / `Shift+Tab` cycles them. `q` and `h` are global.
 
 ### Accounts tab
 
@@ -112,11 +112,27 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 | `e` | Edit the selected provider |
 | `n` | Rename the selected provider |
 | `d` | Remove the selected provider (confirmation required) |
-| `Tab` | Switch to Accounts |
+| `Tab` | Next tab (Settings) |
 | `h` | Show help |
 | `q` | Quit |
 
 The Providers table never renders the stored key. `Enter` or `o` picks a saved model (and optionally changes reasoning or extra Codex argv for this session) then launches, or run `codex-switch launch <alias>` from the shell. `e` opens the edit form (including env key, wire API, and extra `-c`). `l` is re-login on the Accounts tab, not launch.
+
+### Settings tab
+
+Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and unknown keys are not kept). Daemon poll/token/cache intervals need a restart; `auto_warmup` and `warmup_times` are re-read about once a minute.
+
+| Key | Action |
+|---|---|
+| `j` / `k` or `↑` / `↓` | Move field (`j`/`k` inside `warmup_times` move among slots) |
+| `Enter` / `Space` | Edit the focused value, or toggle a boolean |
+| `←` / `→` | Cycle `log_level` or booleans |
+| `+` / `a` | Add a local `HH:MM` warmup slot |
+| `d` / `-` | Remove the selected warmup slot |
+| `s` | Save `config.toml` |
+| `Tab` | Next tab (Accounts) |
+| `h` | Show help |
+| `q` | Quit |
 
 Destructive or consumptive actions always require confirmation.
 

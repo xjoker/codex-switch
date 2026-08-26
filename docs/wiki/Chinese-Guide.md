@@ -107,7 +107,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 ## TUI 操作说明
 
-运行 `codex-switch tui`。两页：**Accounts**（ChatGPT 额度与选号）与 **Providers**（自定义提供方）。`Tab` / `Shift+Tab` 切换；`h` 帮助；`q` 退出。TUI 内按 `h` 看到的快捷键表与代码同源，以当前版本为准。
+运行 `codex-switch tui`。三页：**Accounts**（ChatGPT 额度与选号）、**Providers**（自定义提供方）与 **Settings**（编辑 `config.toml`）。`Tab` / `Shift+Tab` 循环切换；`h` 帮助；`q` 退出。TUI 内按 `h` 看到的快捷键表与代码同源，以当前版本为准。
 
 设置 `NO_COLOR` 时，**CLI** 仍遵守无颜色；**TUI** 仍使用设计好的深色配色，避免浅色终端把按键提示洗成黑字。
 
@@ -140,11 +140,15 @@ codex-switch launch openrouter -- -s workspace-write -a never
 | `e` | 编辑选中提供方 |
 | `n` | 改名 |
 | `d` | 删除（需确认） |
-| `Tab` | 回到 Accounts |
+| `Tab` | 下一页（Settings） |
 
 **`l` 在 Providers 页不是启动**；启动用 `o` 或 `Enter`。`l` 只在 Accounts 页表示重新登录。
 
 列表不显示完整密钥。
+
+### Settings 页
+
+编辑 `$CODEX_SWITCH_HOME/config.toml`（含 `daemon.auto_warmup` 与 `warmup_times`）。`j` / `k` 移动字段，`Enter` 编辑或开关，`s` 保存。Accounts 页的 `s` 仍是排序。TUI 的 `W` 只是本次会话开关，不写 `auto_warmup`。保存会重写整个配置文件，不保留注释。守护进程的轮询/Token/缓存间隔需重启后生效；`warmup_times` 约每分钟重读一次。详情以英文 [Configuration](Configuration) 为准。
 
 ### 提供方表单（新增 / 编辑）
 

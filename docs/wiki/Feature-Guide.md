@@ -45,7 +45,7 @@ The usage model includes the main 5-hour and 7-day windows, additional model-spe
 
 Normal reads refresh only stale entries. Use `list -f` or the TUI refresh action when a fresh network read is required.
 
-The TUI has two tabs: **Accounts** (ChatGPT OAuth, quota, scoring) and **Providers** (custom API endpoints). `Tab` / `Shift+Tab` switches between them. `o` launches Codex on both tabs. Account-only keys (`W`, mark, filter) stay on Accounts.
+The TUI has three tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (custom API endpoints), and **Settings** (`config.toml`). `Tab` / `Shift+Tab` cycles them. `o` launches Codex on Accounts and Providers. Account-only keys (`W`, mark, filter) stay on Accounts. Settings uses `j`/`k` for fields and `s` to save; `s` on Accounts still cycles sort.
 
 The TUI account detail page is a single scrollable column with identity and organization labels, token expiry times in the local timezone, every quota pool with a pace marker, available reset cards, and the models the account may use. Model names and reasoning-effort capabilities are discovered from the authenticated service at runtime, not hardcoded. The full shortcut list is in the [command reference](Command-Reference#tui-shortcuts) and under `h` inside the TUI.
 
@@ -122,7 +122,7 @@ codex-switch warmup
 codex-switch warmup work
 ```
 
-Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Already-active or unavailable pools are skipped. Inside the TUI, `W` toggles automatic warmup for accounts whose 5-hour window has expired; the daemon has a separate `auto_warmup` setting.
+Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Already-active or unavailable pools are skipped. Inside the TUI, `W` toggles automatic warmup for accounts whose 5-hour window has expired; that session toggle is separate from `daemon.auto_warmup`. When `auto_warmup` is on and `warmup_times` is empty, the daemon warms during cache refresh. When slots are set, warmup runs only at those local `HH:MM` times (see [Configuration](Configuration#timed-warmup)).
 
 ## Run the background daemon
 
@@ -135,7 +135,7 @@ codex-switch daemon status
 
 Service integration is platform-native: LaunchAgent on macOS, a systemd user service on Linux, and Task Scheduler on Windows. Windows installation requires elevated PowerShell.
 
-The daemon runs three independent timers: account polling (`poll_interval_secs`), full cache refresh with optional warmup (`cache_refresh_interval_secs`, `auto_warmup`), and proactive token refresh (`token_check_interval_secs`). A switch happens only when at least two profiles exist and the current profile's 5-hour usage reaches `switch_threshold`.
+The daemon runs four independent timers: account polling (`poll_interval_secs`), full cache refresh (`cache_refresh_interval_secs`, with warmup only when `auto_warmup` is on and `warmup_times` is empty), scheduled warmup (~60s, when `auto_warmup` is on and `warmup_times` is set), and proactive token refresh (`token_check_interval_secs`). A switch happens only when at least two profiles exist and the current profile's 5-hour usage reaches `switch_threshold`.
 
 By default, a switch is deferred while an interactive Codex process (`codex`, `codex resume`, `codex exec`) is running; the daemon records the pending switch and retries on the next poll. Long-lived MCP or app-server processes do not block a switch. Operational state lives in `daemon-state.json` and is shown by `daemon status`. Daemon switches cannot ask for confirmation: an untracked live `auth.json` is replaced after the normal backup rotation, so save or import an account first if you want to keep it selectable.
 
