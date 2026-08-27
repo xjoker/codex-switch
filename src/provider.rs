@@ -395,21 +395,13 @@ fn is_none_fallback(source: &str) -> bool {
     source.trim().eq_ignore_ascii_case("none")
 }
 
-fn same_http_host(left: &str, right: &str) -> bool {
-    match (host_from_url(left), host_from_url(right)) {
-        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-        _ => false,
-    }
-}
-
-fn host_from_url(url: &str) -> Option<&str> {
-    let rest = url.split_once("://")?.1;
-    let hostport = rest.split(['/', '?', '#']).next()?;
-    let host = hostport.rsplit('@').next()?;
-    if host.starts_with('[') {
-        return None;
-    }
-    host.split(':').next()
+/// Skip a second GET when the fallback is already the gateway `/models` URL.
+fn same_models_endpoint(base_url: &str, fallback_source: &str) -> bool {
+    let gateway = format!("{}/models", base_url.trim_end_matches('/'));
+    let norm = |s: &str| s.trim().trim_end_matches('/').to_ascii_lowercase();
+    let left = norm(&gateway);
+    let right = norm(fallback_source);
+    !left.is_empty() && left == right
 }
 
 /// `GET {base_url}/models` with the provider key. Failure is the caller's to
@@ -502,7 +494,7 @@ fn needs_metadata_fallback(
     if is_none_fallback(fallback_source) {
         return false;
     }
-    if same_http_host(base_url, fallback_source) {
+    if same_models_endpoint(base_url, fallback_source) {
         return false;
     }
     select_catalog_slugs(saved, primary).iter().any(|slug| {
@@ -1672,6 +1664,13 @@ mod tests {
             &[remote("glm-5.3-flash", "Flash", 1_048_576, &["text"])],
             "https://api.z.ai/api/v1",
             OPENROUTER_MODELS_URL
+        ));
+        // Same host, different path: still fetch the configured fallback.
+        assert!(needs_metadata_fallback(
+            &["glm-5.3-flash".to_string()],
+            &[],
+            "http://127.0.0.1:9/v1",
+            "http://127.0.0.1:9/api/v1/models"
         ));
     }
 

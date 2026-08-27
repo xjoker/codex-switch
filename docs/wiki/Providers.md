@@ -106,7 +106,7 @@ At launch, `GET {base_url}/models` (Bearer key, 8s timeout) fills `context_windo
   - Default: public OpenRouter `GET https://openrouter.ai/api/v1/models` (no login).
   - Override per provider with `--metadata-fallback URL|PATH|none`, or globally with `CODEX_SWITCH_METADATA_FALLBACK` / `CODEX_SWITCH_OPENROUTER_MODELS_URL`.
   - Matching is exact id, then a unique `vendor/{slug}` (a `:variant` suffix such as `:free` is ignored). Two vendors with the same model name are not guessed. The catalog `slug` stays the provider's id.
-  - OpenRouter's full list is never injected into `/model`. A fallback whose host is already the provider `base_url` is skipped. `none` disables the fallback.
+  - OpenRouter's full list is never injected into `/model`. A fallback that is already the gateway `/models` URL is skipped. `none` disables the fallback.
 - Fetch failure (401, timeout, unrecognized JSON, or fallback unreachable) does not block launch: remaining gaps use the generated defaults.
 - An explicit `--set model_catalog_json=/path/to/models.json` is left alone — that file must then include every slug you want in `/model`.
 
