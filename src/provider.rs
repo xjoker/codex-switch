@@ -504,9 +504,10 @@ impl ProviderProfile {
 /// by "degrade performance".
 const DEFAULT_PROVIDER_CONTEXT_WINDOW: i64 = 1_048_576;
 
-/// Gateways at or under this size can be imported with `--fetch-models` / TUI
-/// `f`. Larger catalogs (OpenRouter is hundreds) must be picked with `--model`.
-const SMALL_REMOTE_CATALOG_LIMIT: usize = 48;
+/// Gateways at or under this size can be imported wholesale with
+/// `--fetch-models` / TUI `f`. Larger catalogs (OpenRouter is hundreds) must
+/// be picked with `--model` or the TUI picker.
+pub(crate) const SMALL_REMOTE_CATALOG_LIMIT: usize = 48;
 
 const GATEWAY_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -917,17 +918,11 @@ pub(crate) fn is_vector_model_slug(slug: &str) -> bool {
 }
 
 /// Chat slugs a user can import from a gateway `/models` body.
-/// Embedding and reranker ids are dropped. Catalogs larger than
-/// [`SMALL_REMOTE_CATALOG_LIMIT`] must be picked with `--model`.
+/// Embedding and reranker ids are dropped. Size is not a fetch error:
+/// wholesale import vs pick is decided by [`apply_fetched_models`].
 pub(crate) fn chat_slugs_from_gateway(remote: &[RemoteModel]) -> Result<Vec<String>> {
     if remote.is_empty() {
         anyhow::bail!("gateway /models returned no models");
-    }
-    if remote.len() > SMALL_REMOTE_CATALOG_LIMIT {
-        anyhow::bail!(
-            "gateway listed {} models; pass --model to pick slugs",
-            remote.len()
-        );
     }
     let mut out = Vec::new();
     for model in remote {
@@ -944,6 +939,61 @@ pub(crate) fn chat_slugs_from_gateway(remote: &[RemoteModel]) -> Result<Vec<Stri
         );
     }
     Ok(out)
+}
+
+fn large_catalog_pick_message(slugs: &[String]) -> String {
+    let preview: Vec<&str> = slugs.iter().take(3).map(String::as_str).collect();
+    format!(
+        "gateway listed {} chat models; pass --model to pick slugs (e.g. {})",
+        slugs.len(),
+        preview.join(", ")
+    )
+}
+
+fn overlay_pick(existing: &[ProviderModel], pick: &ProviderModel) -> ProviderModel {
+    let mut row = settings_for(existing, &pick.id);
+    if pick.reasoning.is_some() {
+        row.reasoning = pick.reasoning.clone();
+    }
+    if pick.no_web_search {
+        row.no_web_search = true;
+    }
+    row
+}
+
+/// Keep only `picks` that exist on the gateway chat list. Used when the
+/// catalog is too large to import wholesale.
+pub(crate) fn apply_picked_models(
+    existing: &[ProviderModel],
+    current_default: Option<&str>,
+    allowed: &[String],
+    picks: &[ProviderModel],
+) -> Result<(Vec<ProviderModel>, String)> {
+    let mut models: Vec<ProviderModel> = Vec::new();
+    for pick in picks {
+        if pick.id.is_empty() {
+            continue;
+        }
+        if !allowed.iter().any(|slug| slug == &pick.id) {
+            anyhow::bail!("'{}' is not in gateway /models", pick.id);
+        }
+        if !models.iter().any(|row| row.id == pick.id) {
+            models.push(overlay_pick(existing, pick));
+        }
+    }
+    finish_model_list(models, current_default)
+}
+
+fn finish_model_list(
+    models: Vec<ProviderModel>,
+    current_default: Option<&str>,
+) -> Result<(Vec<ProviderModel>, String)> {
+    let default = current_default
+        .filter(|id| models.iter().any(|model| model.id == *id))
+        .map(str::to_string)
+        .or_else(|| models.first().map(|model| model.id.clone()))
+        .ok_or_else(|| anyhow::anyhow!("pass --model ID or --fetch-models"))?;
+    Ok((models, default))
 }
 
 fn settings_for(existing: &[ProviderModel], slug: &str) -> ProviderModel {
@@ -967,13 +1017,19 @@ pub(crate) fn apply_fetched_models(
     prepend: &[ProviderModel],
 ) -> Result<(Vec<ProviderModel>, String)> {
     let fetched = chat_slugs_from_gateway(remote)?;
+    if fetched.len() > SMALL_REMOTE_CATALOG_LIMIT {
+        if prepend.is_empty() {
+            anyhow::bail!("{}", large_catalog_pick_message(&fetched));
+        }
+        return apply_picked_models(existing, current_default, &fetched, prepend);
+    }
     let mut models: Vec<ProviderModel> = Vec::new();
     for model in prepend {
         if model.id.is_empty() {
             continue;
         }
         if !models.iter().any(|row| row.id == model.id) {
-            models.push(model.clone());
+            models.push(overlay_pick(existing, model));
         }
     }
     for slug in &fetched {
@@ -981,23 +1037,21 @@ pub(crate) fn apply_fetched_models(
             models.push(settings_for(existing, slug));
         }
     }
-    let default = current_default
-        .filter(|id| models.iter().any(|model| model.id == *id))
-        .map(str::to_string)
-        .or_else(|| models.first().map(|model| model.id.clone()))
-        .ok_or_else(|| anyhow::anyhow!("pass --model ID or --fetch-models"))?;
-    Ok((models, default))
+    finish_model_list(models, current_default)
 }
 
 /// Replace `profile.models` with chat slugs from the gateway. Matching ids keep
 /// their reasoning / `no_web_search`. The default stays if it is still listed.
-pub(crate) async fn fetch_and_apply_models(profile: &mut ProviderProfile) -> Result<usize> {
+pub(crate) async fn fetch_and_apply_models(
+    profile: &mut ProviderProfile,
+    picks: &[ProviderModel],
+) -> Result<usize> {
     let remote = fetch_gateway_models(profile).await?;
     let (models, default) = apply_fetched_models(
         &profile.models,
         Some(profile.default_model.as_str()),
         &remote,
-        &[],
+        picks,
     )?;
     let n = models.len();
     profile.models = models;
@@ -1857,14 +1911,78 @@ api_key = "sk-legacy-key"
     }
 
     #[test]
-    fn fetch_refuses_an_openrouter_sized_catalog() {
+    fn fetch_lists_chat_slugs_even_when_the_catalog_is_large() {
         let remote: Vec<RemoteModel> = (0..SMALL_REMOTE_CATALOG_LIMIT + 1)
-            .map(|i| remote(&format!("model-{i}")))
+            .map(|i| remote(&format!("vendor/model-{i}")))
             .collect();
-        let err = chat_slugs_from_gateway(&remote).unwrap_err().to_string();
+        let slugs = chat_slugs_from_gateway(&remote).unwrap();
+        assert_eq!(slugs.len(), SMALL_REMOTE_CATALOG_LIMIT + 1);
+        assert_eq!(slugs[0], "vendor/model-0");
+    }
+
+    #[test]
+    fn fetch_large_catalog_without_picks_is_refused() {
+        let remote: Vec<RemoteModel> = (0..SMALL_REMOTE_CATALOG_LIMIT + 1)
+            .map(|i| remote(&format!("vendor/model-{i}")))
+            .collect();
+        let err = apply_fetched_models(&[], None, &remote, &[])
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.contains("pass --model"),
+            err.contains("pass --model") && err.contains("vendor/model-0"),
             "large catalogs must be picked by hand: {err}"
+        );
+    }
+
+    #[test]
+    fn fetch_large_catalog_keeps_only_cli_picks() {
+        let remote: Vec<RemoteModel> = (0..SMALL_REMOTE_CATALOG_LIMIT + 1)
+            .map(|i| remote(&format!("vendor/model-{i}")))
+            .collect();
+        let existing = vec![ProviderModel {
+            id: "vendor/model-0".into(),
+            reasoning: Some("high".into()),
+            no_web_search: true,
+        }];
+        let picks = vec![
+            ProviderModel::from_id("vendor/model-0"),
+            ProviderModel {
+                id: "vendor/model-2".into(),
+                reasoning: Some("low".into()),
+                no_web_search: false,
+            },
+        ];
+        let (models, default) =
+            apply_fetched_models(&existing, Some("vendor/model-0"), &remote, &picks).unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vendor/model-0", "vendor/model-2"]
+        );
+        assert_eq!(default, "vendor/model-0");
+        assert_eq!(models[0].reasoning.as_deref(), Some("high"));
+        assert!(models[0].no_web_search);
+        assert_eq!(models[1].reasoning.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn fetch_large_catalog_rejects_a_pick_not_on_the_gateway() {
+        let remote: Vec<RemoteModel> = (0..SMALL_REMOTE_CATALOG_LIMIT + 1)
+            .map(|i| remote(&format!("vendor/model-{i}")))
+            .collect();
+        let err = apply_fetched_models(
+            &[],
+            None,
+            &remote,
+            &[ProviderModel::from_id("missing/slug")],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("missing/slug") && err.contains("not in gateway"),
+            "{err}"
         );
     }
 

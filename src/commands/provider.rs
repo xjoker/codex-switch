@@ -39,7 +39,7 @@ pub(crate) async fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()>
         ProviderCommand::Show { alias } => show(&alias, json),
         ProviderCommand::Rename { old, new } => rename(&old, &new, json),
         ProviderCommand::Remove { alias, yes } => remove(&alias, yes, json),
-        ProviderCommand::FetchModels { alias } => refresh_models(&alias, json).await,
+        ProviderCommand::FetchModels { alias, model } => refresh_models(&alias, model, json).await,
     }
 }
 
@@ -126,9 +126,13 @@ fn print_added(profile: &ProviderProfile, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn refresh_models(alias: &str, json: bool) -> Result<()> {
+async fn refresh_models(alias: &str, picks: Vec<String>, json: bool) -> Result<()> {
     let mut profile = provider::load(alias)?;
-    let count = provider::fetch_and_apply_models(&mut profile).await?;
+    let picks: Vec<provider::ProviderModel> = picks
+        .into_iter()
+        .map(provider::ProviderModel::from_id)
+        .collect();
+    let count = provider::fetch_and_apply_models(&mut profile, &picks).await?;
     profile.validate()?;
     provider::save(&profile)?;
     if json {

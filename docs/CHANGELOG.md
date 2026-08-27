@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Pick models from a large gateway catalog** — OpenRouter-sized `GET /models` lists are not imported wholesale. `provider add --fetch-models --model …` and `provider fetch-models <alias> --model …` keep only those slugs (and must exist on the gateway). TUI `f` opens a filterable picker (`space` toggle, `/` filter, Enter apply). Small catalogs still import every chat slug.
+
 ## v20260827.3.0 — 2026-08-27
 
 - **Provider models from the gateway or by hand** — Codex `/model` lists only the models saved on the provider. Fill them with `--model`, or import chat slugs from `GET {base_url}/models` (`provider add --fetch-models`, `provider fetch-models <alias>`, TUI `f`). Embedding and reranker ids are omitted. Catalogs larger than 48 models (OpenRouter-sized) are not imported wholesale.
