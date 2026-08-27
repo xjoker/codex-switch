@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v20260827.2.0 — 2026-08-27
+
 - **Custom provider model catalog** — Launching a custom API provider writes `$CODEX_SWITCH_HOME/providers/<alias>/models.json` and passes it as `model_catalog_json`, so Codex `/model` lists the provider's slugs and has metadata instead of warning and falling back to a 272k window. Launch `GET`s `{base_url}/models` first; when that omits a window (or the call fails), metadata is filled from a fallback (default: public OpenRouter `/models`, no login; override with `--metadata-fallback` or `CODEX_SWITCH_METADATA_FALLBACK`). The Codex child uses `$CODEX_SWITCH_HOME/providers/<alias>/codex-home` as `CODEX_HOME`; the user's `~/.codex` is not read or written.
 
 ## v20260827.1.0 — 2026-08-27
