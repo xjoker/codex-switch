@@ -289,17 +289,15 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// Launch Codex against a custom API provider profile.
 ///
 /// Unlike the ChatGPT path this stages nothing: the provider is applied as
-/// `codex -c …` overrides (which layer over a snapshot of the user's
-/// `config.toml`, preserving MCP servers) and the API key is injected into the
-/// child process environment under the profile's `env_key`. A generated model
-/// catalog is written under the provider directory so Codex `/model` lists the
-/// provider's slugs and has metadata for them; the gateway `GET /models` list
-/// fills context windows and display names when it is reachable, then a
-/// configurable metadata fallback (default: public OpenRouter, no login).
-/// The child `CODEX_HOME` is `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`
-/// so Codex session files, sqlite, and project trust do not land in the
-/// user's `~/.codex`. `auth.json` is not copied and the live Codex home is
-/// not written.
+/// `codex -c …` overrides and the API key is injected into the child process
+/// environment under the profile's `env_key`. A generated model catalog is
+/// written under the provider directory so Codex `/model` lists the provider's
+/// slugs and has metadata for them; the gateway `GET /models` list fills
+/// context windows and display names when it is reachable, then a configurable
+/// metadata fallback (default: public OpenRouter, no login). The child
+/// `CODEX_HOME` is `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, so Codex
+/// session files, sqlite, and project trust stay in our tree. The user's
+/// `~/.codex` is not read or written.
 async fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<i32> {
     ensure_codex_available()?;
 

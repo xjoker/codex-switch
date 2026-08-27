@@ -2,7 +2,7 @@
 
 A custom API provider is a saved third-party endpoint that `codex-switch launch` can hand to Codex CLI for one session. Typical case: OpenRouter, or another gateway that speaks Codex's Responses protocol.
 
-Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores a model-provider definition plus a bearer API key under `$CODEX_SWITCH_HOME`, then at launch injects that definition as `codex -c …` overrides. The Codex process is given its own `CODEX_HOME` under `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, so sessions, sqlite, and project trust do not land in `~/.codex`. `auth.json` is not copied.
+Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores a model-provider definition plus a bearer API key under `$CODEX_SWITCH_HOME`, then at launch injects that definition as `codex -c …` overrides. The Codex process is given its own `CODEX_HOME` under `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. Catalog, sessions, sqlite, and project trust all stay in that tree. The user's `~/.codex` is not read or written.
 
 > Never put an API key on the command line. `provider add` reads it from a hidden prompt, or from stdin with `--api-key-stdin`. The key is stored mode `0600` and never printed, listed, or placed in argv.
 
@@ -64,7 +64,7 @@ codex-switch launch openrouter -- --full-auto
 
 Some models need extra Codex request settings (disabling `web_search`, or setting a reasoning effort for thinking models) — see [Model-specific request settings](#model-specific-request-settings).
 
-On first launch, `config.toml` is copied from the user's `$CODEX_HOME` into that isolated home so MCP servers and other settings still apply. Later launches keep the isolated copy (delete `codex-home/config.toml` to pick up a newer user config). `auth.json` is never copied. Codex session files, sqlite, and project trust stay in the isolated home.
+On first launch Codex creates its runtime files in that isolated home. Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are stored on the provider and passed as `-c`; they are not written into the user's `$CODEX_HOME/config.toml`.
 
 `codex-switch use` does not accept a provider alias. A provider is applied only for the launched Codex process; a later bare `codex` invocation is unchanged.
 
@@ -122,13 +122,7 @@ Omit `--metadata-fallback` to use public OpenRouter. Pass an HTTP(S) URL or a lo
 
 ### web_search server tool
 
-Codex enables its built-in `web_search` server tool by default. Some models accept or ignore it (verified: `deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `minimax/minimax-m3:free` all return HTTP 200), while others reject it (verified: `openai/gpt-oss-20b` returns HTTP 400 `Server tool request failed`). If a model rejects it, turn it off at the top level of `$CODEX_HOME/config.toml`:
-
-```toml
-web_search = "disabled"
-```
-
-per launch, since `launch` passes everything after `--` to Codex:
+Codex enables its built-in `web_search` server tool by default. Some models accept or ignore it (verified: `deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `minimax/minimax-m3:free` all return HTTP 200), while others reject it (verified: `openai/gpt-oss-20b` returns HTTP 400 `Server tool request failed`). If a model rejects it, save the override on the provider (`--no-web-search` or `--set web_search=disabled`) or pass it per launch:
 
 ```bash
 codex-switch launch openrouter -- -c web_search=disabled
@@ -192,7 +186,7 @@ On the Accounts tab, press `o` to launch the selected ChatGPT profile, or open t
 |---|---|
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Provider definition and API key (directory `0700`, file `0600`) |
 | `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog used at launch (`/model` list plus metadata) |
-| `$CODEX_SWITCH_HOME/providers/<alias>/codex-home/` | Isolated Codex runtime (`CODEX_HOME` for that launch). First launch may snapshot the user's `config.toml` here. |
+| `$CODEX_SWITCH_HOME/providers/<alias>/codex-home/` | Isolated Codex runtime for that provider (`CODEX_HOME` for the launched process). |
 
 Defaults to `~/.codex-switch/providers/`. Relocate the whole tree with `CODEX_SWITCH_HOME`; this still does not change where Codex reads `auth.json`.
 

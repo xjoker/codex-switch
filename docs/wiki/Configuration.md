@@ -32,6 +32,7 @@ Accounts are added by logging in with `codex-switch login` or by importing an ex
 | `$CODEX_SWITCH_HOME/profiles/<alias>/auth.json` | Saved profile authentication. |
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Custom API provider definition and key (directory `0700`, file `0600`). |
 | `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog passed at launch (`/model` list plus metadata). |
+| `$CODEX_SWITCH_HOME/providers/<alias>/codex-home/` | Isolated Codex runtime for a custom provider launch. |
 | `$CODEX_SWITCH_HOME/deleted-profiles/` | Recoverable deleted profiles. |
 | `$CODEX_SWITCH_HOME/current` | Current alias marker. |
 | `$CODEX_SWITCH_HOME/cache.json` | Per-profile usage cache. |

@@ -11,9 +11,8 @@
 //! `codex -c …` overrides while the key is injected into the child process
 //! environment under `env_key` — never onto the command line — so it stays out of
 //! the process table. The Codex child also gets its own `CODEX_HOME` under
-//! `providers/<alias>/codex-home` so sessions, sqlite, and project trust stay
-//! out of the user's `~/.codex`. A snapshot of the user's `config.toml` (MCP
-//! servers, …) is copied there on first launch; `auth.json` is not.
+//! `providers/<alias>/codex-home`, so sessions, sqlite, and project trust stay
+//! in `$CODEX_SWITCH_HOME` rather than the user's `~/.codex`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -861,43 +860,11 @@ pub(crate) fn isolated_codex_home(alias: &str) -> Result<PathBuf> {
     Ok(provider_dir(alias)?.join("codex-home"))
 }
 
-/// Create the isolated Codex home and, on first use, snapshot the user's
-/// `config.toml` (MCP servers and other settings). Never copies `auth.json`
-/// or other `$CODEX_HOME` files, and never writes back to `$CODEX_HOME`.
+/// Create the isolated Codex home under `$CODEX_SWITCH_HOME`. Nothing is
+/// copied from the user's `$CODEX_HOME`.
 pub(crate) fn prepare_isolated_codex_home(alias: &str) -> Result<PathBuf> {
     let dest = isolated_codex_home(alias)?;
     ensure_private_dir(&dest)?;
-    let dest_config = dest.join("config.toml");
-    if dest_config.exists() {
-        return Ok(dest);
-    }
-    let src_home = match auth::resolved_codex_home() {
-        Ok(path) => path,
-        Err(err) => {
-            debug!("no user CODEX_HOME to snapshot: {err:#}");
-            return Ok(dest);
-        }
-    };
-    if src_home == dest {
-        return Ok(dest);
-    }
-    let src_config = src_home.join("config.toml");
-    if src_config.is_file() {
-        let raw = std::fs::read(&src_config)
-            .with_context(|| format!("reading {}", src_config.display()))?;
-        auth::atomic_write_private(&dest_config, &raw).with_context(|| {
-            format!(
-                "snapshotting {} into {}",
-                src_config.display(),
-                dest_config.display()
-            )
-        })?;
-        debug!(
-            "provider '{alias}' Codex home {} snapshotted config.toml from {}",
-            dest.display(),
-            src_home.display()
-        );
-    }
     Ok(dest)
 }
 
@@ -1776,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_codex_home_snapshots_config_and_leaves_the_user_home_untouched() {
+    fn isolated_codex_home_lives_under_switch_home_and_does_not_copy_user_files() {
         let _home = TestHome::new();
         let user_codex = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1807,13 +1774,13 @@ mod tests {
         save(&sample("zai")).unwrap();
         let isolated = prepare_isolated_codex_home("zai").unwrap();
         assert_eq!(isolated, isolated_codex_home("zai").unwrap());
+        assert!(isolated.starts_with(crate::auth::app_home().unwrap()));
         assert!(isolated.ends_with(std::path::Path::new("providers/zai/codex-home")));
-        let copied = std::fs::read_to_string(isolated.join("config.toml")).unwrap();
-        assert!(copied.contains("mcp_servers"));
         assert!(
-            !isolated.join("auth.json").exists(),
-            "ChatGPT auth.json must not be copied into the provider Codex home"
+            !isolated.join("config.toml").exists(),
+            "user config.toml must not be copied; Codex writes its own files here"
         );
+        assert!(!isolated.join("auth.json").exists());
         assert_eq!(
             std::fs::read_to_string(user_codex.path().join("sentinel")).unwrap(),
             "leave-me\n"
@@ -1822,18 +1789,9 @@ mod tests {
             std::fs::read_to_string(user_codex.path().join("auth.json")).unwrap(),
             "{\"tokens\":{}}\n"
         );
-
-        std::fs::write(
-            isolated.join("config.toml"),
-            "projects = { trusted = true }\n",
-        )
-        .unwrap();
-        prepare_isolated_codex_home("zai").unwrap();
-        assert!(
-            std::fs::read_to_string(isolated.join("config.toml"))
-                .unwrap()
-                .contains("trusted"),
-            "a later launch must not overwrite Codex's isolated config.toml"
+        assert_eq!(
+            std::fs::read_to_string(user_codex.path().join("config.toml")).unwrap(),
+            "mcp_servers = { demo = { command = \"echo\" } }\n"
         );
         assert!(
             !user_codex.path().join("codex-home").exists(),
