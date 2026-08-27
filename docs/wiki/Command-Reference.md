@@ -130,7 +130,8 @@ Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and u
 | `+` / `a` | Add a local `HH:MM` warmup slot |
 | `d` / `-` | Remove the selected warmup slot |
 | `s` | Save `config.toml` |
-| `Tab` | Next tab (Accounts) |
+| `Esc` | Cancel the current field edit (does not discard other unsaved fields) |
+| `Tab` | Next tab (Accounts). Ignored while a field is being edited. Unsaved edits are kept. |
 | `h` | Show help |
 | `q` | Quit |
 

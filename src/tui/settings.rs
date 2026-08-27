@@ -60,6 +60,7 @@ const FOCUS_ORDER: &[Focus] = &[
 pub struct SettingsState {
     focus: Focus,
     editing: bool,
+    dirty: bool,
     input: String,
     cursor: usize,
     error: Option<String>,
@@ -77,10 +78,15 @@ impl SettingsState {
         self.editing
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     pub fn from_config(config: AppConfig) -> Self {
         Self {
             focus: Focus::ProxyUrl,
             editing: false,
+            dirty: false,
             input: String::new(),
             cursor: 0,
             error: None,
@@ -202,13 +208,21 @@ impl SettingsState {
     fn activate(&mut self) {
         match self.focus {
             Focus::TeamPriority => {
-                self.draft.use_cfg.team_priority = !self.draft.use_cfg.team_priority
+                self.draft.use_cfg.team_priority = !self.draft.use_cfg.team_priority;
+                self.dirty = true;
             }
-            Focus::AutoWarmup => self.draft.daemon.auto_warmup = !self.draft.daemon.auto_warmup,
-            Focus::Notify => self.draft.daemon.notify = !self.draft.daemon.notify,
+            Focus::AutoWarmup => {
+                self.draft.daemon.auto_warmup = !self.draft.daemon.auto_warmup;
+                self.dirty = true;
+            }
+            Focus::Notify => {
+                self.draft.daemon.notify = !self.draft.daemon.notify;
+                self.dirty = true;
+            }
             Focus::DeferSwitch => {
                 self.draft.daemon.defer_switch_while_codex_running =
                     !self.draft.daemon.defer_switch_while_codex_running;
+                self.dirty = true;
             }
             Focus::LogLevel => self.nudge(1),
             Focus::WarmupTimes if self.is_add_time_row() => self.add_time_and_edit(),
@@ -225,17 +239,24 @@ impl SettingsState {
                     .unwrap_or(0);
                 let next = (current as i32 + delta).rem_euclid(LOG_LEVELS.len() as i32) as usize;
                 self.draft.daemon.log_level = LOG_LEVELS[next].to_string();
+                self.dirty = true;
             }
             Focus::TeamPriority if delta != 0 => {
                 self.draft.use_cfg.team_priority = !self.draft.use_cfg.team_priority;
+                self.dirty = true;
             }
             Focus::AutoWarmup if delta != 0 => {
                 self.draft.daemon.auto_warmup = !self.draft.daemon.auto_warmup;
+                self.dirty = true;
             }
-            Focus::Notify if delta != 0 => self.draft.daemon.notify = !self.draft.daemon.notify,
+            Focus::Notify if delta != 0 => {
+                self.draft.daemon.notify = !self.draft.daemon.notify;
+                self.dirty = true;
+            }
             Focus::DeferSwitch if delta != 0 => {
                 self.draft.daemon.defer_switch_while_codex_running =
                     !self.draft.daemon.defer_switch_while_codex_running;
+                self.dirty = true;
             }
             _ => {}
         }
@@ -314,13 +335,19 @@ impl SettingsState {
                 };
                 let stamp = format!("{hour:02}:{minute:02}");
                 if self.time_idx < self.draft.daemon.warmup_times.len() {
-                    self.draft.daemon.warmup_times[self.time_idx] = stamp;
+                    self.draft.daemon.warmup_times[self.time_idx] = stamp.clone();
                 } else {
-                    self.draft.daemon.warmup_times.push(stamp);
-                    self.time_idx = self.draft.daemon.warmup_times.len() - 1;
+                    self.draft.daemon.warmup_times.push(stamp.clone());
                 }
                 self.draft.daemon.warmup_times.sort();
                 self.draft.daemon.warmup_times.dedup();
+                self.time_idx = self
+                    .draft
+                    .daemon
+                    .warmup_times
+                    .iter()
+                    .position(|time| *time == stamp)
+                    .unwrap_or(0);
             }
             Focus::Timezone => {
                 if raw.is_empty() {
@@ -348,6 +375,7 @@ impl SettingsState {
             | Focus::LogLevel
             | Focus::DeferSwitch => {}
         }
+        self.dirty = true;
         Ok(())
     }
 
@@ -367,6 +395,7 @@ impl SettingsState {
         }
         crate::config::replace_runtime(config.clone());
         self.draft = config;
+        self.dirty = false;
         let mut message = "Saved config.toml".to_string();
         if !warnings.is_empty() {
             message.push_str(". ");
@@ -426,6 +455,7 @@ impl SettingsState {
         }
         if self.time_idx < self.draft.daemon.warmup_times.len() {
             self.draft.daemon.warmup_times.remove(self.time_idx);
+            self.dirty = true;
             if self.time_idx > 0 && self.time_idx >= self.draft.daemon.warmup_times.len() {
                 self.time_idx -= 1;
             }
@@ -516,8 +546,13 @@ fn push_field(
 }
 
 pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) {
+    let title = if settings.dirty {
+        " Settings * "
+    } else {
+        " Settings "
+    };
     let block = Block::default()
-        .title(" Settings ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(base().fg(super::theme::C_BLUE))
         .style(base());
@@ -782,7 +817,7 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
         lines.push(Line::from(Span::styled(error.clone(), base().fg(C_RED))));
     } else {
         lines.push(Line::from(Span::styled(
-            "j/k move  enter edit/toggle  ←/→ cycle  +/- add time  d remove  s save",
+            "j/k move  enter edit/toggle  ←/→ cycle  +/- add time  d remove  s save  esc cancel edit",
             dim(),
         )));
         lines.push(Line::from(Span::styled(
@@ -909,5 +944,185 @@ mod tests {
                 None => std::env::remove_var("CODEX_SWITCH_HOME"),
             }
         }
+    }
+
+    #[test]
+    fn settings_cover_every_owned_config_key() {
+        // Fails to compile if AppConfig gains a product-owned key the form missed.
+        let AppConfig {
+            proxy,
+            cache,
+            network,
+            tui,
+            use_cfg,
+            daemon,
+            launch,
+        } = AppConfig::default();
+        let crate::config::ProxyConfig {
+            url: _,
+            no_proxy: _,
+        } = proxy;
+        let crate::config::CacheConfig { ttl: _ } = cache;
+        let crate::config::NetworkConfig { max_concurrent: _ } = network;
+        let crate::config::TuiConfig {
+            auto_refresh_interval_secs: _,
+        } = tui;
+        let crate::config::UseConfig {
+            safety_margin_7d: _,
+            team_priority: _,
+        } = use_cfg;
+        let crate::config::DaemonConfig {
+            poll_interval_secs: _,
+            switch_threshold: _,
+            cache_refresh_interval_secs: _,
+            auto_warmup: _,
+            warmup_times: _,
+            timezone: _,
+            token_check_interval_secs: _,
+            notify: _,
+            log_level: _,
+            defer_switch_while_codex_running: _,
+        } = daemon;
+        let crate::config::LaunchConfig {
+            restore_delay_secs: _,
+        } = launch;
+        assert_eq!(FOCUS_ORDER.len(), 18);
+    }
+
+    fn type_value(settings: &mut SettingsState, value: &str) {
+        settings.handle_key(KeyCode::Enter);
+        for _ in 0..32 {
+            settings.handle_key(KeyCode::Backspace);
+        }
+        for ch in value.chars() {
+            settings.handle_key(KeyCode::Char(ch));
+        }
+        settings.handle_key(KeyCode::Enter);
+    }
+
+    fn move_to(settings: &mut SettingsState, target: Focus) {
+        for _ in 0..FOCUS_ORDER.len() * 4 {
+            if settings.focus == target {
+                return;
+            }
+            settings.handle_key(KeyCode::Down);
+        }
+        panic!("did not reach {target:?}");
+    }
+
+    #[test]
+    fn every_field_edits_and_saves() {
+        let _lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prev_cs = std::env::var_os("CODEX_SWITCH_HOME");
+        unsafe {
+            std::env::set_var("CODEX_SWITCH_HOME", dir.path());
+        }
+        let mut settings = SettingsState::from_config(AppConfig::default());
+
+        type_value(&mut settings, "socks5h://127.0.0.1:1080");
+        move_to(&mut settings, Focus::ProxyNoProxy);
+        type_value(&mut settings, "localhost");
+        move_to(&mut settings, Focus::CacheTtl);
+        type_value(&mut settings, "120");
+        move_to(&mut settings, Focus::MaxConcurrent);
+        type_value(&mut settings, "8");
+        move_to(&mut settings, Focus::TuiRefresh);
+        type_value(&mut settings, "60");
+        move_to(&mut settings, Focus::SafetyMargin);
+        type_value(&mut settings, "15");
+        move_to(&mut settings, Focus::TeamPriority);
+        settings.handle_key(KeyCode::Enter);
+        move_to(&mut settings, Focus::PollInterval);
+        type_value(&mut settings, "90");
+        move_to(&mut settings, Focus::SwitchThreshold);
+        type_value(&mut settings, "70");
+        move_to(&mut settings, Focus::CacheRefresh);
+        type_value(&mut settings, "240");
+        move_to(&mut settings, Focus::AutoWarmup);
+        settings.handle_key(KeyCode::Enter);
+        move_to(&mut settings, Focus::WarmupTimes);
+        settings.handle_key(KeyCode::Char('+'));
+        for ch in ['0', '8', ':', '0', '0'] {
+            settings.handle_key(KeyCode::Char(ch));
+        }
+        settings.handle_key(KeyCode::Enter);
+        move_to(&mut settings, Focus::Timezone);
+        type_value(&mut settings, "UTC");
+        move_to(&mut settings, Focus::TokenCheck);
+        type_value(&mut settings, "180");
+        move_to(&mut settings, Focus::Notify);
+        settings.handle_key(KeyCode::Enter);
+        move_to(&mut settings, Focus::LogLevel);
+        settings.handle_key(KeyCode::Right);
+        move_to(&mut settings, Focus::DeferSwitch);
+        settings.handle_key(KeyCode::Enter);
+        move_to(&mut settings, Focus::RestoreDelay);
+        type_value(&mut settings, "5");
+        assert!(settings.is_dirty());
+
+        match settings.try_save() {
+            SettingsOutcome::Saved { .. } => {}
+            SettingsOutcome::Continue => panic!("save should succeed: {:?}", settings.error),
+        }
+        assert!(!settings.is_dirty());
+
+        let loaded = crate::config::load_current().expect("saved config");
+        assert_eq!(
+            loaded.proxy.url.as_deref(),
+            Some("socks5h://127.0.0.1:1080")
+        );
+        assert_eq!(loaded.proxy.no_proxy.as_deref(), Some("localhost"));
+        assert_eq!(loaded.cache.ttl, 120);
+        assert_eq!(loaded.network.max_concurrent, 8);
+        assert_eq!(loaded.tui.auto_refresh_interval_secs, 60);
+        assert_eq!(loaded.use_cfg.safety_margin_7d, 15.0);
+        assert!(!loaded.use_cfg.team_priority);
+        assert_eq!(loaded.daemon.poll_interval_secs, 90);
+        assert_eq!(loaded.daemon.switch_threshold, 70.0);
+        assert_eq!(loaded.daemon.cache_refresh_interval_secs, 240);
+        assert!(loaded.daemon.auto_warmup);
+        assert_eq!(loaded.daemon.warmup_times, vec!["08:00".to_string()]);
+        assert_eq!(loaded.daemon.timezone, "UTC");
+        assert_eq!(loaded.daemon.token_check_interval_secs, 180);
+        assert!(loaded.daemon.notify);
+        assert_eq!(loaded.daemon.log_level, "warn");
+        assert!(!loaded.daemon.defer_switch_while_codex_running);
+        assert_eq!(loaded.launch.restore_delay_secs, 5);
+        unsafe {
+            match prev_cs {
+                Some(v) => std::env::set_var("CODEX_SWITCH_HOME", v),
+                None => std::env::remove_var("CODEX_SWITCH_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn editing_a_warmup_slot_keeps_focus_on_the_new_time() {
+        let mut cfg = AppConfig::default();
+        cfg.daemon.warmup_times = vec!["08:00".into(), "13:00".into()];
+        let mut settings = SettingsState::from_config(cfg);
+        move_to(&mut settings, Focus::WarmupTimes);
+        settings.handle_key(KeyCode::Down);
+        assert_eq!(settings.time_idx, 1);
+        type_value(&mut settings, "07:00");
+        assert_eq!(
+            settings.draft.daemon.warmup_times,
+            vec!["07:00".to_string(), "08:00".to_string()]
+        );
+        assert_eq!(settings.time_idx, 0);
+        assert_eq!(settings.focus, Focus::WarmupTimes);
+    }
+
+    #[test]
+    fn rejected_edit_does_not_mark_dirty() {
+        let mut settings = SettingsState::from_config(AppConfig::default());
+        move_to(&mut settings, Focus::CacheTtl);
+        type_value(&mut settings, "0");
+        assert!(settings.error.is_some());
+        assert!(!settings.is_dirty());
+        assert_eq!(settings.draft.cache.ttl, 300);
     }
 }

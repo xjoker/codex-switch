@@ -226,6 +226,12 @@ pub const KEYMAP: &[Binding] = &[
         label: "save config.toml",
         in_status_bar: false,
     },
+    Binding {
+        keys: "esc",
+        section: Section::Settings,
+        label: "cancel the current field edit",
+        in_status_bar: false,
+    },
     // Global
     Binding {
         keys: "enter",

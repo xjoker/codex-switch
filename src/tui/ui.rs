@@ -1490,6 +1490,62 @@ mod tests {
     }
 
     #[test]
+    fn settings_tab_shows_every_owned_config_label() {
+        let mut app = App::new();
+        app.active_tab = crate::tui::app::Tab::Settings;
+        let backend = TestBackend::new(120, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let joined = (0..50)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for label in [
+            "proxy.url",
+            "proxy.no_proxy",
+            "cache.ttl",
+            "network.max_concurrent",
+            "tui.auto_refresh_secs",
+            "use.safety_margin_7d",
+            "use.team_priority",
+            "poll_interval_secs",
+            "switch_threshold",
+            "cache_refresh_secs",
+            "auto_warmup",
+            "warmup_times",
+            "timezone",
+            "token_check_secs",
+            "notify",
+            "log_level",
+            "defer_while_codex",
+            "restore_delay_secs",
+        ] {
+            assert!(joined.contains(label), "missing {label}:\n{joined}");
+        }
+        assert!(joined.contains("(system local)"), "empty tz:\n{joined}");
+    }
+
+    #[test]
+    fn settings_tab_scrolls_to_restore_delay_on_a_short_screen() {
+        let mut app = App::new();
+        app.active_tab = crate::tui::app::Tab::Settings;
+        for _ in 0..17 {
+            app.settings.handle_key(crossterm::event::KeyCode::Down);
+        }
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let joined = (0..24)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("restore_delay_secs"),
+            "focused last field must be visible:\n{joined}"
+        );
+    }
+
+    #[test]
     fn reset_card_column_distinguishes_refreshing_and_cooling_down() {
         let usage = UsageInfo::default();
         assert_eq!(reset_cards_table_state(&usage, true, false).0, "...");

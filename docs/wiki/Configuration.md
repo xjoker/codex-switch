@@ -91,7 +91,7 @@ restore_delay_secs = 3             # seconds before restoring auth.json after la
 
 Invalid times are dropped with a warning. Duplicate times are merged. Two slots less than five hours apart warn because the later one is a no-op if the earlier warmup opened a 5h window; they are not rejected. An unknown timezone name warns and is kept in the file; due detection then uses system local time. Saving Settings from the TUI rewrites `config.toml` (comments and unknown keys are not preserved). Poll, token, and cache **intervals** still need a daemon restart; `warmup_times`, `timezone`, and `auto_warmup` are re-read about once a minute.
 
-Edit the same keys from the TUI **Settings** tab (`s` saves).
+Edit the same keys from the TUI **Settings** tab (`s` saves). Unsaved form edits are kept if you leave the tab and come back; `Tab` does not change tabs while a field is being typed.
 
 The legacy `[use] mode` and `[use] min_remaining` keys are ignored and produce a startup warning; the unified scoring algorithm replaced the old selection modes.
 

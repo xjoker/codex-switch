@@ -613,7 +613,8 @@ impl App {
     }
 
     /// Cycle Accounts → Providers → Settings → Accounts (`Tab`), or reverse (`BackTab`).
-    /// Entering Settings reloads `config.toml` from disk.
+    /// Entering Settings reloads `config.toml` from disk unless the form has
+    /// unsaved edits.
     pub fn cycle_tab(&mut self, forward: bool) {
         self.active_tab = if forward {
             match self.active_tab {
@@ -629,7 +630,7 @@ impl App {
             }
         };
         self.status_msg = None;
-        if self.active_tab == Tab::Settings {
+        if self.active_tab == Tab::Settings && !self.settings.is_dirty() {
             let cfg = crate::config::load_current().unwrap_or_else(|_| crate::config::get());
             self.settings = super::settings::SettingsState::from_config(cfg);
         }
@@ -2131,10 +2132,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 app.handle_provider_form_key(key.code);
                 continue;
             }
-            if app.active_tab == Tab::Settings
-                && app.settings.is_editing()
-                && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
-            {
+            if app.active_tab == Tab::Settings && app.settings.is_editing() {
                 app.handle_settings_key(key.code);
                 continue;
             }
@@ -3383,5 +3381,27 @@ mod tests {
         let before = app.sort_mode;
         app.cycle_sort();
         assert_ne!(app.sort_mode, before);
+    }
+
+    #[test]
+    fn unsaved_settings_survive_leaving_and_returning_to_the_tab() {
+        let _home = EnvHome::new();
+        let mut app = App::new();
+        app.active_tab = Tab::Settings;
+        for _ in 0..10 {
+            app.handle_settings_key(KeyCode::Down);
+        }
+        app.handle_settings_key(KeyCode::Enter);
+        assert!(app.settings.draft.daemon.auto_warmup);
+        assert!(app.settings.is_dirty());
+
+        app.cycle_tab(true);
+        assert_eq!(app.active_tab, Tab::Accounts);
+        app.cycle_tab(false);
+        assert_eq!(app.active_tab, Tab::Settings);
+        assert!(app.settings.draft.daemon.auto_warmup);
+        assert!(app.settings.is_dirty());
+        let loaded = crate::config::load_current().expect("disk still default");
+        assert!(!loaded.daemon.auto_warmup);
     }
 }
