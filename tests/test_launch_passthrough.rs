@@ -241,6 +241,27 @@ fn launch_chatgpt_puts_cs_model_after_exec() {
 }
 
 #[test]
+fn launch_chatgpt_exec_passthrough_without_model() {
+    let home = temp_home("chatgpt-exec");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+
+    let output = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "work", "--", "exec", "--json", "ping"],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(last_non_version_argv(&log), ["exec", "--json", "ping"]);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
 fn launch_provider_puts_c_overrides_after_exec_and_keeps_json() {
     let home = temp_home("provider-exec");
     let (fake_bin, log) = install_fake_codex(&home);

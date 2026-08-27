@@ -94,7 +94,7 @@ Three tabs: **Accounts**, **Providers**, and **Settings**. `Tab` / `Shift+Tab` c
 | `s` | Cycle sort order (name / quota / status) |
 | `Space` | Mark or unmark an account |
 | `u` (account menu) | Switch to the selected account |
-| `o` | Launch Codex with the selected account (also `o` in the account menu) |
+| `o` | Launch Codex: pick a model (or the Codex default), reasoning, and optional extra argv (also `o` in the account menu) |
 | `c` (account menu) | Confirm and consume the earliest-expiring reset card |
 | `w` (account menu) | Warm up the selected account |
 | `l` (account menu) | Re-login the selected account |

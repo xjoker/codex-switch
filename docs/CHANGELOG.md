@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **TUI launch picker on ChatGPT accounts** — Accounts `o` (list and account menu) opens the same launch picker as Providers: Codex default or a cached `/models` slug, a one-shot reasoning override, and extra Codex argv. Confirming still stages that profile's `auth.json`. Enter on Accounts still opens the account menu.
+
 ## v20260827.4.0 — 2026-08-27
 
 - **Pick models from a large gateway catalog** — OpenRouter-sized `GET /models` lists are not imported wholesale. `provider add --fetch-models --model …` and `provider fetch-models <alias> --model …` keep only those slugs (and must exist on the gateway). TUI `f` opens a filterable picker (`space` toggle, `/` filter, Enter apply). Small catalogs still import every chat slug.

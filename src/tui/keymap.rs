@@ -94,7 +94,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "o",
         section: Section::Account,
-        label: "launch Codex",
+        label: "launch Codex (pick model, reasoning, extra args)",
         in_status_bar: true,
     },
     Binding {
