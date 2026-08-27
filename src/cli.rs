@@ -46,6 +46,11 @@ pub enum ProviderCommand {
         /// Extra model slugs shown in Codex `/model` besides `--model` (repeatable)
         #[arg(long = "models", value_name = "SLUG")]
         models: Vec<String>,
+        /// Catalog metadata fallback after the gateway `/models` call: HTTP(S)
+        /// URL, local JSON file, or `none` to skip. Default is the public
+        /// OpenRouter list (no login).
+        #[arg(long = "metadata-fallback", value_name = "URL|PATH|none")]
+        metadata_fallback: Option<String>,
         /// Human-readable provider name (defaults to the alias)
         #[arg(long)]
         name: Option<String>,

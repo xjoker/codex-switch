@@ -14,6 +14,7 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
             base_url,
             model,
             models,
+            metadata_fallback,
             name,
             env_key,
             wire_api,
@@ -26,6 +27,7 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
             base_url,
             model,
             models,
+            metadata_fallback,
             name,
             env_key,
             wire_api,
@@ -45,6 +47,7 @@ fn add(
     base_url: String,
     model: String,
     models: Vec<String>,
+    metadata_fallback: Option<String>,
     name: Option<String>,
     env_key: Option<String>,
     wire_api: String,
@@ -69,6 +72,7 @@ fn add(
         env_key: env_key.unwrap_or_else(|| provider::derive_env_key(&alias)),
         model,
         models,
+        metadata_fallback: metadata_fallback.unwrap_or_default(),
         wire_api,
         codex_config,
         api_key,
@@ -158,6 +162,7 @@ fn list(json: bool) -> Result<()> {
                     "base_url": p.base_url,
                     "model": p.model,
                     "models": p.models,
+                    "metadata_fallback": p.metadata_fallback,
                     "wire_api": p.wire_api,
                     "env_key": p.env_key,
                     "codex_config": p.codex_config,
@@ -194,6 +199,7 @@ fn show(alias: &str, json: bool) -> Result<()> {
             "base_url": p.base_url,
             "model": p.model,
             "models": p.models,
+            "metadata_fallback": p.metadata_fallback,
             "wire_api": p.wire_api,
             "env_key": p.env_key,
             "codex_config": p.codex_config,
@@ -210,6 +216,11 @@ fn show(alias: &str, json: bool) -> Result<()> {
         user_println("models      (none)");
     } else {
         user_println(&format!("models      {}", p.models.join(", ")));
+    }
+    if p.metadata_fallback.is_empty() {
+        user_println("metadata_fallback (default OpenRouter)");
+    } else {
+        user_println(&format!("metadata_fallback {}", p.metadata_fallback));
     }
     user_println(&format!("wire_api    {}", p.wire_api));
     user_println(&format!("env_key     {}", p.env_key));

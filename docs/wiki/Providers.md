@@ -102,16 +102,23 @@ At launch, `GET {base_url}/models` (Bearer key, 8s timeout) fills `context_windo
 - A small list (at most 48 models, typical of a single vendor) is injected wholesale, with the provider's `--model` first.
 - A large list (OpenRouter is hundreds) is **not** dumped into `/model`. Only `--model` and any extra `--models SLUG` values are listed; matching rows still receive the fetched metadata.
 - `--set model_context_window=N` still wins for the default slug. Other slugs use the fetched window, or 1,048,576 when no source reports one.
-- If the gateway `/models` call fails or a catalog slug has no `context_window`, launch fills those fields from the public OpenRouter catalog (`GET https://openrouter.ai/api/v1/models`, no provider key). Matching is exact id, then a unique `vendor/{slug}` (a `:variant` suffix such as `:free` is ignored). Two vendors with the same model name are not guessed. The catalog `slug` stays the provider's id, so `/model` still selects `glm-5.3-flash` rather than `z-ai/glm-5.3-flash`. OpenRouter's full list is never injected into `/model`. A provider whose `base_url` is already OpenRouter skips this extra fetch.
-- Fetch failure (401, timeout, unrecognized JSON, or OpenRouter unreachable) does not block launch: remaining gaps use the generated defaults.
+- If the gateway `/models` call fails or a catalog slug has no `context_window`, launch fills those fields from a **metadata fallback** (no provider key is sent):
+  - Default: public OpenRouter `GET https://openrouter.ai/api/v1/models` (no login).
+  - Override per provider with `--metadata-fallback URL|PATH|none`, or globally with `CODEX_SWITCH_METADATA_FALLBACK` / `CODEX_SWITCH_OPENROUTER_MODELS_URL`.
+  - Matching is exact id, then a unique `vendor/{slug}` (a `:variant` suffix such as `:free` is ignored). Two vendors with the same model name are not guessed. The catalog `slug` stays the provider's id.
+  - OpenRouter's full list is never injected into `/model`. A fallback whose host is already the provider `base_url` is skipped. `none` disables the fallback.
+- Fetch failure (401, timeout, unrecognized JSON, or fallback unreachable) does not block launch: remaining gaps use the generated defaults.
 - An explicit `--set model_catalog_json=/path/to/models.json` is left alone — that file must then include every slug you want in `/model`.
 
 ```bash
 codex-switch provider add zai \
   --base-url https://api.z.ai/api/v1 \
   --model glm-5.3-flash \
-  --models glm-5.3
+  --models glm-5.3 \
+  --metadata-fallback none
 ```
+
+Omit `--metadata-fallback` to use public OpenRouter. Pass an HTTP(S) URL or a local JSON path instead of `none` to point at your own list.
 
 ### web_search server tool
 

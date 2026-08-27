@@ -88,7 +88,8 @@ The legacy `[use] mode` and `[use] min_remaining` keys are ignored and produce a
 |---|---|
 | `CODEX_HOME` | Codex's own home; `auth.json` and Codex's `config.toml` live here (default `~/.codex`). Paths containing `..` are rejected. |
 | `CODEX_SWITCH_HOME` | Relocates codex-switch state (default `~/.codex-switch`); an empty value is ignored. |
-| `CODEX_SWITCH_OPENROUTER_MODELS_URL` | Override the OpenRouter models URL used as catalog metadata fallback (default `https://openrouter.ai/api/v1/models`). |
+| `CODEX_SWITCH_METADATA_FALLBACK` | Catalog metadata fallback after the provider `GET /models` call: HTTP(S) URL, JSON file path, or `none`. Default is the public OpenRouter models list. Per-provider `--metadata-fallback` wins when set. |
+| `CODEX_SWITCH_OPENROUTER_MODELS_URL` | Older alias for the same fallback URL when `CODEX_SWITCH_METADATA_FALLBACK` is unset. |
 | `CS_PROXY` | Proxy URL; same as `--proxy`. |
 | `CS_COLOR` | Color mode; same as `--color`. |
 | `NO_COLOR` | Disables color output regardless of other settings. |

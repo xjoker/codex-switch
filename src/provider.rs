@@ -57,6 +57,11 @@ pub struct ProviderProfile {
     /// when that list is small enough to inject wholesale.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// Catalog metadata fallback: HTTP(S) URL, local JSON path, or `none` to
+    /// skip. Empty means env (`CODEX_SWITCH_METADATA_FALLBACK`, then
+    /// `CODEX_SWITCH_OPENROUTER_MODELS_URL`) or the public OpenRouter list.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub metadata_fallback: String,
     #[serde(default = "default_wire_api")]
     pub wire_api: String,
     /// Extra `codex -c key=value` overrides applied at launch, stored verbatim as
@@ -166,6 +171,9 @@ impl ProviderProfile {
         }
         if self.model.trim().is_empty() {
             anyhow::bail!("model cannot be empty");
+        }
+        if let Err(err) = validate_metadata_fallback(&self.metadata_fallback) {
+            anyhow::bail!("{err}");
         }
         if self.wire_api.trim().is_empty() {
             anyhow::bail!("wire_api cannot be empty");
@@ -351,6 +359,59 @@ fn override_context_window(config: &[String]) -> Option<i64> {
         .filter(|value| *value > 0)
 }
 
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_metadata_fallback(value: &str) -> Result<()> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return Ok(());
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Ok(());
+    }
+    if value.contains("://") {
+        anyhow::bail!("metadata fallback must be an http(s) URL, a JSON file path, or none");
+    }
+    Ok(())
+}
+
+/// Per-provider `--metadata-fallback`, then env, then public OpenRouter.
+fn metadata_fallback_source(profile: &ProviderProfile) -> String {
+    let from_profile = profile.metadata_fallback.trim();
+    if !from_profile.is_empty() {
+        return from_profile.to_string();
+    }
+    env_nonempty("CODEX_SWITCH_METADATA_FALLBACK")
+        .or_else(|| env_nonempty("CODEX_SWITCH_OPENROUTER_MODELS_URL"))
+        .unwrap_or_else(|| OPENROUTER_MODELS_URL.to_string())
+}
+
+fn is_none_fallback(source: &str) -> bool {
+    source.trim().eq_ignore_ascii_case("none")
+}
+
+fn same_http_host(left: &str, right: &str) -> bool {
+    match (host_from_url(left), host_from_url(right)) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
+fn host_from_url(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let hostport = rest.split(['/', '?', '#']).next()?;
+    let host = hostport.rsplit('@').next()?;
+    if host.starts_with('[') {
+        return None;
+    }
+    host.split(':').next()
+}
+
 /// `GET {base_url}/models` with the provider key. Failure is the caller's to
 /// swallow: launch must still proceed with generated defaults.
 pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Vec<RemoteModel>> {
@@ -364,41 +425,24 @@ pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Ve
     Ok(models)
 }
 
-fn openrouter_models_url() -> String {
-    std::env::var("CODEX_SWITCH_OPENROUTER_MODELS_URL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| OPENROUTER_MODELS_URL.to_string())
-}
-
-fn is_openrouter_base_url(base_url: &str) -> bool {
-    let Some(host) = host_from_url(base_url) else {
-        return false;
-    };
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    host == "openrouter.ai" || host.ends_with(".openrouter.ai")
-}
-
-fn host_from_url(url: &str) -> Option<&str> {
-    let rest = url.split_once("://")?.1;
-    let hostport = rest.split(['/', '?', '#']).next()?;
-    let host = hostport.rsplit('@').next()?;
-    if host.starts_with('[') {
-        return None;
+pub(crate) async fn fetch_fallback_models(source: &str) -> Result<Vec<RemoteModel>> {
+    let source = source.trim();
+    if is_none_fallback(source) {
+        return Ok(Vec::new());
     }
-    host.split(':').next()
-}
-
-/// Public OpenRouter catalog, no provider key. Used only to fill metadata.
-pub(crate) async fn fetch_openrouter_models() -> Result<Vec<RemoteModel>> {
-    let url = openrouter_models_url();
-    let models = fetch_models_url(&url, None).await?;
-    debug!(
-        "OpenRouter /models fallback returned {} entries",
-        models.len()
-    );
-    Ok(models)
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let models = fetch_models_url(source, None).await?;
+        debug!(
+            "metadata fallback GET {source} returned {} entries",
+            models.len()
+        );
+        return Ok(models);
+    }
+    let body = std::fs::read_to_string(source)
+        .with_context(|| format!("reading metadata fallback {}", source))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&body).context("parsing metadata fallback JSON")?;
+    Ok(parse_gateway_models(&value))
 }
 
 async fn fetch_models_url(url: &str, bearer: Option<&str>) -> Result<Vec<RemoteModel>> {
@@ -417,9 +461,9 @@ async fn fetch_models_url(url: &str, bearer: Option<&str>) -> Result<Vec<RemoteM
     Ok(parse_gateway_models(&value))
 }
 
-/// Primary gateway list plus OpenRouter metadata when the gateway did not
-/// cover every catalog slug's `context_window`. OpenRouter never decides
-/// which slugs are injected into `/model`.
+/// Primary gateway list plus fallback metadata when the gateway did not cover
+/// every catalog slug's `context_window`. Fallback never decides which slugs
+/// are injected into `/model`.
 pub(crate) async fn load_remote_catalog(
     profile: &ProviderProfile,
 ) -> (Vec<RemoteModel>, Vec<RemoteModel>) {
@@ -430,21 +474,35 @@ pub(crate) async fn load_remote_catalog(
             Vec::new()
         }
     };
-    if !needs_openrouter_fallback(&profile.saved_model_slugs(), &primary, &profile.base_url) {
+    let source = metadata_fallback_source(profile);
+    if !needs_metadata_fallback(
+        &profile.saved_model_slugs(),
+        &primary,
+        &profile.base_url,
+        &source,
+    ) {
         return (primary, Vec::new());
     }
-    let fallback = match fetch_openrouter_models().await {
+    let fallback = match fetch_fallback_models(&source).await {
         Ok(models) => models,
         Err(err) => {
-            debug!("OpenRouter /models fallback unavailable: {err:#}");
+            debug!("metadata fallback unavailable ({source}): {err:#}");
             Vec::new()
         }
     };
     (primary, fallback)
 }
 
-fn needs_openrouter_fallback(saved: &[String], primary: &[RemoteModel], base_url: &str) -> bool {
-    if is_openrouter_base_url(base_url) {
+fn needs_metadata_fallback(
+    saved: &[String],
+    primary: &[RemoteModel],
+    base_url: &str,
+    fallback_source: &str,
+) -> bool {
+    if is_none_fallback(fallback_source) {
+        return false;
+    }
+    if same_http_host(base_url, fallback_source) {
         return false;
     }
     select_catalog_slugs(saved, primary).iter().any(|slug| {
@@ -916,9 +974,66 @@ mod tests {
             env_key: derive_env_key(alias),
             model: "openai/gpt-5.3-codex".to_string(),
             models: Vec::new(),
+            metadata_fallback: String::new(),
             wire_api: default_wire_api(),
             codex_config: Vec::new(),
             api_key: "sk-secret-1234".to_string(),
+        }
+    }
+
+    struct FallbackEnvGuard {
+        previous_meta: Option<String>,
+        previous_or: Option<String>,
+    }
+
+    impl FallbackEnvGuard {
+        fn snapshot() -> Self {
+            Self {
+                previous_meta: std::env::var("CODEX_SWITCH_METADATA_FALLBACK").ok(),
+                previous_or: std::env::var("CODEX_SWITCH_OPENROUTER_MODELS_URL").ok(),
+            }
+        }
+
+        fn restore_var(name: &str, previous: &Option<String>) {
+            unsafe {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+
+        fn clear() -> Self {
+            let guard = Self::snapshot();
+            unsafe {
+                std::env::remove_var("CODEX_SWITCH_METADATA_FALLBACK");
+                std::env::remove_var("CODEX_SWITCH_OPENROUTER_MODELS_URL");
+            }
+            guard
+        }
+
+        fn set_openrouter_alias(value: &str) -> Self {
+            let guard = Self::clear();
+            unsafe {
+                std::env::set_var("CODEX_SWITCH_OPENROUTER_MODELS_URL", value);
+            }
+            guard
+        }
+
+        fn set_both(meta: &str, openrouter: &str) -> Self {
+            let guard = Self::snapshot();
+            unsafe {
+                std::env::set_var("CODEX_SWITCH_METADATA_FALLBACK", meta);
+                std::env::set_var("CODEX_SWITCH_OPENROUTER_MODELS_URL", openrouter);
+            }
+            guard
+        }
+    }
+
+    impl Drop for FallbackEnvGuard {
+        fn drop(&mut self) {
+            Self::restore_var("CODEX_SWITCH_METADATA_FALLBACK", &self.previous_meta);
+            Self::restore_var("CODEX_SWITCH_OPENROUTER_MODELS_URL", &self.previous_or);
         }
     }
 
@@ -1475,26 +1590,128 @@ mod tests {
         assert_eq!(catalog["models"][0]["display_name"], "Local");
     }
 
+    #[tokio::test]
+    async fn metadata_fallback_source_order() {
+        let _lock = crate::auth::URL_ENV_LOCK.lock().await;
+        let mut profile = sample("zai");
+        profile.base_url = "https://api.z.ai/api/v1".to_string();
+
+        {
+            let _env = FallbackEnvGuard::clear();
+            assert_eq!(metadata_fallback_source(&profile), OPENROUTER_MODELS_URL);
+        }
+
+        {
+            let _env = FallbackEnvGuard::set_openrouter_alias("https://alias.example/models");
+            assert_eq!(
+                metadata_fallback_source(&profile),
+                "https://alias.example/models"
+            );
+        }
+
+        {
+            let _env = FallbackEnvGuard::set_both(
+                "https://meta.example/models",
+                "https://alias.example/models",
+            );
+            assert_eq!(
+                metadata_fallback_source(&profile),
+                "https://meta.example/models"
+            );
+
+            profile.metadata_fallback = "https://example.com/models.json".to_string();
+            assert_eq!(
+                metadata_fallback_source(&profile),
+                "https://example.com/models.json"
+            );
+        }
+
+        profile.metadata_fallback = "none".to_string();
+        assert_eq!(metadata_fallback_source(&profile), "none");
+        assert!(!needs_metadata_fallback(
+            &["glm-5.3-flash".to_string()],
+            &[],
+            "https://api.z.ai/api/v1",
+            "none"
+        ));
+
+        profile.metadata_fallback.clear();
+        let _env = FallbackEnvGuard::set_both("none", "https://should-not-use.example/models");
+        assert_eq!(metadata_fallback_source(&profile), "none");
+    }
+
+    #[test]
+    fn metadata_fallback_rejects_non_http_urls() {
+        let mut profile = sample("zai");
+        profile.base_url = "https://api.z.ai/api/v1".to_string();
+        profile.metadata_fallback = "ftp://example.com/models".to_string();
+        let err = profile.validate().unwrap_err().to_string();
+        assert!(err.contains("metadata fallback"));
+        profile.metadata_fallback = "none".to_string();
+        profile.validate().unwrap();
+        profile.metadata_fallback = "/tmp/models.json".to_string();
+        profile.validate().unwrap();
+    }
+
     #[test]
     fn openrouter_base_url_skips_the_public_fallback() {
-        assert!(is_openrouter_base_url("https://openrouter.ai/api/v1"));
-        assert!(is_openrouter_base_url("https://www.openrouter.ai/api/v1"));
-        assert!(!is_openrouter_base_url("https://api.z.ai/api/v1"));
-        assert!(!needs_openrouter_fallback(
+        assert!(!needs_metadata_fallback(
             &["openai/gpt-5.3-codex".to_string()],
             &[],
-            "https://openrouter.ai/api/v1"
+            "https://openrouter.ai/api/v1",
+            OPENROUTER_MODELS_URL
         ));
-        assert!(needs_openrouter_fallback(
+        assert!(needs_metadata_fallback(
             &["glm-5.3-flash".to_string()],
             &[],
-            "https://api.z.ai/api/v1"
+            "https://api.z.ai/api/v1",
+            OPENROUTER_MODELS_URL
         ));
-        assert!(!needs_openrouter_fallback(
+        assert!(!needs_metadata_fallback(
             &["glm-5.3-flash".to_string()],
             &[remote("glm-5.3-flash", "Flash", 1_048_576, &["text"])],
-            "https://api.z.ai/api/v1"
+            "https://api.z.ai/api/v1",
+            OPENROUTER_MODELS_URL
         ));
+    }
+
+    #[tokio::test]
+    async fn metadata_fallback_reads_a_local_json_file() {
+        let _home = TestHome::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fallback.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "data": [{
+                    "id": "z-ai/glm-5.3-flash",
+                    "name": "From file",
+                    "context_length": 1_310_720
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut profile = sample("zai");
+        profile.model = "glm-5.3-flash".to_string();
+        profile.base_url = "http://127.0.0.1:9/v1".to_string();
+        profile.metadata_fallback = path.to_str().unwrap().to_string();
+        save(&profile).unwrap();
+
+        let fallback = fetch_fallback_models(&profile.metadata_fallback)
+            .await
+            .unwrap();
+        assert_eq!(fallback[0].display_name.as_deref(), Some("From file"));
+        let _args = profile
+            .launch_config_args_from_remote(&[], &fallback)
+            .unwrap();
+        let catalog_path = super::provider_dir("zai").unwrap().join("models.json");
+        let catalog: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(catalog_path).unwrap()).unwrap();
+        assert_eq!(catalog["models"][0]["slug"], "glm-5.3-flash");
+        assert_eq!(catalog["models"][0]["display_name"], "From file");
+        assert_eq!(catalog["models"][0]["context_window"], 1_310_720);
     }
 
     #[test]
@@ -1503,10 +1720,12 @@ mod tests {
         let mut profile = sample("zai");
         profile.model = "glm-5.3-flash".to_string();
         profile.models = vec!["glm-5.3".to_string()];
+        profile.metadata_fallback = "/tmp/my-models.json".to_string();
         save(&profile).unwrap();
         let loaded = load("zai").unwrap();
         assert_eq!(loaded.model, "glm-5.3-flash");
         assert_eq!(loaded.models, vec!["glm-5.3".to_string()]);
+        assert_eq!(loaded.metadata_fallback, "/tmp/my-models.json");
     }
 
     #[tokio::test]
@@ -1640,31 +1859,6 @@ mod tests {
             )
         }
 
-        struct UrlGuard {
-            previous: Option<String>,
-        }
-        impl UrlGuard {
-            fn set(value: &str) -> Self {
-                let previous = std::env::var("CODEX_SWITCH_OPENROUTER_MODELS_URL").ok();
-                unsafe {
-                    std::env::set_var("CODEX_SWITCH_OPENROUTER_MODELS_URL", value);
-                }
-                Self { previous }
-            }
-        }
-        impl Drop for UrlGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.previous {
-                        Some(value) => {
-                            std::env::set_var("CODEX_SWITCH_OPENROUTER_MODELS_URL", value)
-                        }
-                        None => std::env::remove_var("CODEX_SWITCH_OPENROUTER_MODELS_URL"),
-                    }
-                }
-            }
-        }
-
         let _home = TestHome::new();
         let _url_lock = crate::auth::URL_ENV_LOCK.lock().await;
         let saw_auth = Arc::new(AtomicBool::new(false));
@@ -1680,7 +1874,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let _url = UrlGuard::set(&format!("http://{addr}/api/v1/models"));
+        let _url = FallbackEnvGuard::set_openrouter_alias(&format!("http://{addr}/api/v1/models"));
         let mut profile = sample("zai");
         profile.model = "glm-5.3-flash".to_string();
         profile.base_url = format!("http://{addr}/v1");

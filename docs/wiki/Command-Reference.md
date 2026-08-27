@@ -54,13 +54,14 @@ codex-switch --json list
 codex-switch --json use work
 codex-switch launch work -- --model gpt-5.4
 codex-switch provider add openrouter --base-url https://openrouter.ai/api/v1 --model openai/gpt-5.3-codex
+codex-switch provider add zai --base-url https://api.z.ai/api/v1 --model glm-5.3-flash --metadata-fallback none
 codex-switch launch openrouter
 codex-switch self-update --check
 ```
 
 ## Provider
 
-`provider add` required flags are `--base-url` and `--model`. Optional `--name` defaults to the alias; `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). Repeatable `--models SLUG` adds extra ids to Codex `/model`. `--reasoning EFFORT` saves `model_reasoning_effort=EFFORT` (for thinking models) and `--no-web-search` saves `web_search=disabled`; `--set KEY=VALUE` (repeatable) saves any other `codex -c` override. All are applied on every launch and passed to Codex verbatim (only the `KEY=VALUE` shape is checked); an explicit `--set` wins over a convenience flag for the same key. `--api-key-stdin` is required when there is no interactive terminal. Launch writes a model catalog for `/model` unless `--set model_catalog_json=…` is already present, and fills metadata from the gateway `GET /models` when that endpoint is reachable.
+`provider add` required flags are `--base-url` and `--model`. Optional `--name` defaults to the alias; `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). Repeatable `--models SLUG` adds extra ids to Codex `/model`. `--metadata-fallback URL|PATH|none` stores the catalog metadata fallback used when the gateway `/models` call misses a window (default: public OpenRouter, no login; `none` disables it). `--reasoning EFFORT` saves `model_reasoning_effort=EFFORT` (for thinking models) and `--no-web-search` saves `web_search=disabled`; `--set KEY=VALUE` (repeatable) saves any other `codex -c` override. All are applied on every launch and passed to Codex verbatim (only the `KEY=VALUE` shape is checked); an explicit `--set` wins over a convenience flag for the same key. `--api-key-stdin` is required when there is no interactive terminal. Launch writes a model catalog for `/model` unless `--set model_catalog_json=…` is already present, filling metadata from the gateway `GET /models` first and the configured fallback second.
 
 The alias must not collide with a ChatGPT profile, another provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`. Removal is immediate and is not archived under `deleted-profiles/`.
 
