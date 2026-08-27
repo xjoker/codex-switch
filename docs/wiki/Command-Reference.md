@@ -127,7 +127,7 @@ Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and u
 | `j` / `k` or `↑` / `↓` | Move field (`j`/`k` inside `warmup_times` move among slots) |
 | `Enter` / `Space` | Edit the focused value, or toggle a boolean |
 | `←` / `→` | Cycle `log_level` or booleans |
-| `+` / `a` | Add a local `HH:MM` warmup slot |
+| `+` / `a` | Add warmup slots. One `HH:MM`, or paste `08:00, 13:10, 18:20`. After add, focus stays on `+ add time`. |
 | `d` / `-` | Remove the selected warmup slot |
 | `s` | Save `config.toml` |
 | `Esc` | Cancel the current field edit (does not discard other unsaved fields) |

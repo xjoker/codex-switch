@@ -43,8 +43,15 @@ pub fn normalize_warmup_times(times: Vec<String>, warnings: &mut Vec<String>) ->
         }
     }
     normalized.sort();
-    if normalized.len() >= 2 {
-        for pair in normalized.windows(2) {
+    warnings.extend(spacing_warnings(&normalized));
+    normalized
+}
+
+/// Later slot is a no-op if an earlier warmup in the same day opened a 5h window.
+pub fn spacing_warnings(times: &[String]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if times.len() >= 2 {
+        for pair in times.windows(2) {
             let (a, b) = (&pair[0], &pair[1]);
             if minutes_apart(a, b) < 5 * 60 {
                 warnings.push(format!(
@@ -54,7 +61,30 @@ pub fn normalize_warmup_times(times: Vec<String>, warnings: &mut Vec<String>) ->
             }
         }
     }
-    normalized
+    warnings
+}
+
+/// One or more `HH:MM` tokens separated by comma, semicolon, or whitespace.
+pub fn parse_warmup_time_list(raw: &str) -> Result<Vec<String>, String> {
+    let mut stamps = Vec::new();
+    for token in raw.split(|c: char| c == ',' || c == ';' || c.is_whitespace()) {
+        if token.is_empty() {
+            continue;
+        }
+        let Some((hour, minute)) = parse_schedule_time(token) else {
+            return Err(format!(
+                "warmup time must be HH:MM (00-23:00-59), not '{token}'"
+            ));
+        };
+        let stamp = format_hhmm(hour, minute);
+        if !stamps.iter().any(|existing| existing == &stamp) {
+            stamps.push(stamp);
+        }
+    }
+    if stamps.is_empty() {
+        return Err("warmup time must be HH:MM (00-23:00-59)".into());
+    }
+    Ok(stamps)
 }
 
 fn minutes_apart(a: &str, b: &str) -> i32 {
@@ -165,6 +195,20 @@ mod tests {
             .expect("valid date")
             .and_hms_opt(h, min, 0)
             .expect("valid time")
+    }
+
+    #[test]
+    fn parse_warmup_time_list_accepts_comma_and_space() {
+        assert_eq!(
+            parse_warmup_time_list("08:00, 13:10 18:20").unwrap(),
+            vec!["08:00", "13:10", "18:20"]
+        );
+        assert_eq!(
+            parse_warmup_time_list("08:00").unwrap(),
+            vec!["08:00".to_string()]
+        );
+        assert!(parse_warmup_time_list("08:00, 25:00").is_err());
+        assert!(parse_warmup_time_list("   ").is_err());
     }
 
     #[test]

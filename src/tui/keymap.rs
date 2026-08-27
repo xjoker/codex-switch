@@ -211,7 +211,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "+ / a",
         section: Section::Settings,
-        label: "add a warmup HH:MM slot",
+        label: "add warmup HH:MM (comma-separated list ok)",
         in_status_bar: false,
     },
     Binding {

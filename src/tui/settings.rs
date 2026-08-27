@@ -8,9 +8,9 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use super::theme::{C_RED, base, dim, header, highlight};
+use super::theme::{C_RED, C_YELLOW, base, dim, header, highlight};
 use crate::config::{AppConfig, save as save_config};
-use crate::warmup_schedule::{parse_iana_timezone, parse_schedule_time};
+use crate::warmup_schedule::{parse_iana_timezone, parse_warmup_time_list, spacing_warnings};
 
 pub const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
@@ -64,6 +64,7 @@ pub struct SettingsState {
     input: String,
     cursor: usize,
     error: Option<String>,
+    notice: Option<String>,
     time_idx: usize,
     pub(crate) draft: AppConfig,
 }
@@ -90,6 +91,7 @@ impl SettingsState {
             input: String::new(),
             cursor: 0,
             error: None,
+            notice: None,
             time_idx: 0,
             draft: config,
         }
@@ -97,6 +99,7 @@ impl SettingsState {
 
     pub fn handle_key(&mut self, code: KeyCode) -> SettingsOutcome {
         self.error = None;
+        self.notice = None;
         if self.editing {
             return self.handle_edit_key(code);
         }
@@ -330,24 +333,34 @@ impl SettingsState {
                     parse_u64(&raw, 1, "daemon.cache_refresh_interval_secs")?;
             }
             Focus::WarmupTimes => {
-                let Some((hour, minute)) = parse_schedule_time(&raw) else {
-                    return Err("warmup time must be HH:MM (00-23:00-59)".into());
-                };
-                let stamp = format!("{hour:02}:{minute:02}");
-                if self.time_idx < self.draft.daemon.warmup_times.len() {
-                    self.draft.daemon.warmup_times[self.time_idx] = stamp.clone();
-                } else {
-                    self.draft.daemon.warmup_times.push(stamp.clone());
+                let adding = self.is_add_time_row();
+                let stamps = parse_warmup_time_list(&raw)?;
+                if !adding && self.time_idx < self.draft.daemon.warmup_times.len() {
+                    self.draft.daemon.warmup_times.remove(self.time_idx);
+                }
+                for stamp in &stamps {
+                    if !self.draft.daemon.warmup_times.iter().any(|t| t == stamp) {
+                        self.draft.daemon.warmup_times.push(stamp.clone());
+                    }
                 }
                 self.draft.daemon.warmup_times.sort();
-                self.draft.daemon.warmup_times.dedup();
-                self.time_idx = self
-                    .draft
-                    .daemon
-                    .warmup_times
-                    .iter()
-                    .position(|time| *time == stamp)
-                    .unwrap_or(0);
+                if adding {
+                    self.time_idx = self.draft.daemon.warmup_times.len();
+                } else {
+                    self.time_idx = self
+                        .draft
+                        .daemon
+                        .warmup_times
+                        .iter()
+                        .position(|time| stamps.first().is_some_and(|stamp| time == stamp))
+                        .unwrap_or(0);
+                }
+                if let Some(warning) = spacing_warnings(&self.draft.daemon.warmup_times)
+                    .into_iter()
+                    .next()
+                {
+                    self.notice = Some(warning);
+                }
             }
             Focus::Timezone => {
                 if raw.is_empty() {
@@ -701,50 +714,41 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
     );
 
     let times = &settings.draft.daemon.warmup_times;
-    if times.is_empty() && settings.focus != Focus::WarmupTimes {
-        push_field(
-            settings,
-            Focus::WarmupTimes,
-            "warmup_times",
-            "(none: warm on cache refresh when auto_warmup is on)".into(),
-            &mut lines,
-            &mut focused_line,
-        );
-    } else {
-        lines.push(Line::from(Span::styled(
-            format!("{:<22}", "warmup_times"),
-            dim(),
-        )));
-        for (idx, time) in times.iter().enumerate() {
-            let focused = settings.focus == Focus::WarmupTimes && settings.time_idx == idx;
-            if focused {
-                focused_line = lines.len();
-            }
-            let display = if settings.editing && focused {
-                field_value(settings, Focus::WarmupTimes, time)
-            } else {
-                time.clone()
-            };
-            let marker = if focused { ">" } else { " " };
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {marker} "), dim()),
-                Span::styled(display, if focused { focus_style } else { label }),
-            ]));
-        }
-        let add_focused = settings.focus == Focus::WarmupTimes && settings.time_idx >= times.len();
-        if add_focused {
+    lines.push(Line::from(Span::styled(
+        format!("{:<22}", "warmup_times"),
+        dim(),
+    )));
+    for (idx, time) in times.iter().enumerate() {
+        let focused = settings.focus == Focus::WarmupTimes && settings.time_idx == idx;
+        if focused {
             focused_line = lines.len();
         }
-        let add_label = if settings.editing && add_focused {
-            field_value(settings, Focus::WarmupTimes, "")
+        let display = if settings.editing && focused {
+            field_value(settings, Focus::WarmupTimes, time)
         } else {
-            "+ add time".to_string()
+            time.clone()
         };
+        let marker = if focused { ">" } else { " " };
         lines.push(Line::from(vec![
-            Span::styled(if add_focused { "  > " } else { "    " }, dim()),
-            Span::styled(add_label, if add_focused { focus_style } else { dim() }),
+            Span::styled(format!("  {marker} "), dim()),
+            Span::styled(display, if focused { focus_style } else { label }),
         ]));
     }
+    let add_focused = settings.focus == Focus::WarmupTimes && settings.time_idx >= times.len();
+    if add_focused {
+        focused_line = lines.len();
+    }
+    let add_label = if settings.editing && add_focused {
+        field_value(settings, Focus::WarmupTimes, "")
+    } else if times.is_empty() {
+        "+ add HH:MM or 08:00, 13:10".to_string()
+    } else {
+        "+ add time".to_string()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if add_focused { "  > " } else { "    " }, dim()),
+        Span::styled(add_label, if add_focused { focus_style } else { dim() }),
+    ]));
 
     let tz_value = if settings.draft.daemon.timezone.is_empty()
         && !(settings.editing && settings.focus == Focus::Timezone)
@@ -815,13 +819,18 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
     lines.push(Line::from(""));
     if let Some(error) = &settings.error {
         lines.push(Line::from(Span::styled(error.clone(), base().fg(C_RED))));
+    } else if let Some(notice) = &settings.notice {
+        lines.push(Line::from(Span::styled(
+            notice.clone(),
+            base().fg(C_YELLOW),
+        )));
     } else {
         lines.push(Line::from(Span::styled(
             "j/k move  enter edit/toggle  ←/→ cycle  +/- add time  d remove  s save  esc cancel edit",
             dim(),
         )));
         lines.push(Line::from(Span::styled(
-            "Empty timezone = system local. Slots are HH:MM in that zone. Empty warmup_times + auto_warmup on = warm during cache refresh.",
+            "warmup_times: type one HH:MM or paste 08:00, 13:10, 18:20. Empty list + auto_warmup on = warm during cache refresh.",
             dim(),
         )));
     }
@@ -1114,6 +1123,68 @@ mod tests {
         );
         assert_eq!(settings.time_idx, 0);
         assert_eq!(settings.focus, Focus::WarmupTimes);
+    }
+
+    #[test]
+    fn add_row_accepts_a_comma_separated_list_and_stays_on_add_row() {
+        let mut settings = SettingsState::from_config(AppConfig::default());
+        move_to(&mut settings, Focus::WarmupTimes);
+        settings.handle_key(KeyCode::Char('+'));
+        for ch in "08:00, 13:10, 18:20".chars() {
+            settings.handle_key(KeyCode::Char(ch));
+        }
+        settings.handle_key(KeyCode::Enter);
+        assert_eq!(
+            settings.draft.daemon.warmup_times,
+            vec![
+                "08:00".to_string(),
+                "13:10".to_string(),
+                "18:20".to_string()
+            ]
+        );
+        assert!(settings.is_add_time_row());
+        assert!(!settings.is_editing());
+    }
+
+    #[test]
+    fn editing_one_slot_can_expand_it_into_several() {
+        let mut cfg = AppConfig::default();
+        cfg.daemon.warmup_times = vec!["08:00".into(), "20:00".into()];
+        let mut settings = SettingsState::from_config(cfg);
+        move_to(&mut settings, Focus::WarmupTimes);
+        type_value(&mut settings, "09:00, 14:00");
+        assert_eq!(
+            settings.draft.daemon.warmup_times,
+            vec![
+                "09:00".to_string(),
+                "14:00".to_string(),
+                "20:00".to_string()
+            ]
+        );
+        assert_eq!(settings.time_idx, 0);
+    }
+
+    #[test]
+    fn close_slots_warn_immediately_and_are_kept() {
+        let mut settings = SettingsState::from_config(AppConfig::default());
+        move_to(&mut settings, Focus::WarmupTimes);
+        settings.handle_key(KeyCode::Char('+'));
+        for ch in "08:00, 08:30".chars() {
+            settings.handle_key(KeyCode::Char(ch));
+        }
+        settings.handle_key(KeyCode::Enter);
+        assert_eq!(
+            settings.draft.daemon.warmup_times,
+            vec!["08:00".to_string(), "08:30".to_string()]
+        );
+        assert!(
+            settings
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.contains("5 hours")),
+            "{:?}",
+            settings.notice
+        );
     }
 
     #[test]
