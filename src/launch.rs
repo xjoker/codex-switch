@@ -238,17 +238,37 @@ async fn launch_interactive(
     Ok(exit_code)
 }
 
-/// Verify the `codex` binary is reachable before we stage anything or spawn it.
+/// Verify the `codex` binary is on PATH. Do not run it: `codex --version`
+/// writes PATH-alias helpers into `$CODEX_HOME/tmp`.
 fn ensure_codex_available() -> Result<()> {
-    match std::process::Command::new("codex")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        Ok(_) => Ok(()),
-        Err(_) => anyhow::bail!("codex not found in PATH. Install: npm install -g @openai/codex"),
+    if command_is_on_path("codex") {
+        return Ok(());
     }
+    anyhow::bail!("codex not found in PATH. Install: npm install -g @openai/codex")
+}
+
+fn command_is_on_path(name: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let candidates = if cfg!(windows) {
+        vec![
+            format!("{name}.exe"),
+            format!("{name}.cmd"),
+            format!("{name}.bat"),
+            name.to_string(),
+        ]
+    } else {
+        vec![name.to_string()]
+    };
+    for dir in std::env::split_paths(&paths) {
+        for file in &candidates {
+            if dir.join(file).is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Codex's exit code, mapping a Unix signal death to `128 + signal`.
@@ -507,6 +527,15 @@ mod tests {
     // unconditional import is dead on Windows and fails `-D warnings` there.
     #[cfg(unix)]
     use super::backup_launch_auth;
+
+    #[test]
+    fn ensure_codex_available_looks_up_path_without_running_codex() {
+        assert!(
+            !super::command_is_on_path("codex-switch-definitely-not-installed"),
+            "a missing name must not be treated as present"
+        );
+        super::ensure_codex_available().expect("codex is installed in this environment");
+    }
 
     /// Staging moves the user's live `auth.json` aside and puts a profile's
     /// credentials in its place; the restore that undoes it only runs once the
