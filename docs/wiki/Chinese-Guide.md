@@ -148,7 +148,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 ### Settings 页
 
-编辑 `$CODEX_SWITCH_HOME/config.toml`（含 `daemon.auto_warmup`、`warmup_times`、`timezone`）。`j` / `k` 移动字段，`Enter` 编辑或开关，`s` 保存。Accounts 页的 `s` 仍是排序。TUI 的 `W` 只是本次会话开关，不写 `auto_warmup`。`timezone` 留空则用系统时区，也可填 IANA 名称（如 `Asia/Shanghai`）。`warmup_times` 可一次粘贴多个 `HH:MM`（逗号或空格分隔）；加完仍停在新增行，间隔不足 5 小时会立刻黄字提示。保存会重写整个配置文件，不保留注释。未保存的修改切走 Tab 仍会保留；正在编辑字段时 `Tab` 不会切页，`Esc` 取消当前编辑。守护进程的轮询/Token/缓存间隔需重启后生效；`warmup_times` 与 `timezone` 约每分钟重读一次。详情以英文 [Configuration](Configuration) 为准。
+编辑 `$CODEX_SWITCH_HOME/config.toml`（含 `daemon.auto_warmup`、`warmup_times`、`timezone`）。`j` / `k` 移动字段，`Enter` 编辑或开关，`s` 保存。Accounts 页的 `s` 仍是排序。TUI 的 `W` 只是本次会话开关，不写 `auto_warmup`。`timezone` 留空则用系统时区，也可填 IANA 名称（如 `Asia/Shanghai`）。`warmup_times` 最多 10 个，可一次粘贴多个 `HH:MM`（逗号或空格分隔）；间隔不限制。加完仍停在新增行。保存会重写整个配置文件，不保留注释。未保存的修改切走 Tab 仍会保留；正在编辑字段时 `Tab` 不会切页，`Esc` 取消当前编辑。守护进程的轮询/Token/缓存间隔需重启后生效；`warmup_times` 与 `timezone` 约每分钟重读一次。详情以英文 [Configuration](Configuration) 为准。
 
 ### 提供方表单（新增 / 编辑）
 

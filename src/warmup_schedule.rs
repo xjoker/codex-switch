@@ -26,7 +26,10 @@ fn format_hhmm(hour: u8, minute: u8) -> String {
     format!("{hour:02}:{minute:02}")
 }
 
-/// Trim, validate, deduplicate, and sort. Invalid entries are dropped and warned.
+/// Hard cap on `[daemon] warmup_times`. Extra entries are dropped after sort.
+pub const MAX_WARMUP_TIMES: usize = 10;
+
+/// Trim, validate, deduplicate, sort, and cap at [`MAX_WARMUP_TIMES`].
 pub fn normalize_warmup_times(times: Vec<String>, warnings: &mut Vec<String>) -> Vec<String> {
     let mut normalized = Vec::new();
     for value in times {
@@ -43,25 +46,14 @@ pub fn normalize_warmup_times(times: Vec<String>, warnings: &mut Vec<String>) ->
         }
     }
     normalized.sort();
-    warnings.extend(spacing_warnings(&normalized));
-    normalized
-}
-
-/// Later slot is a no-op if an earlier warmup in the same day opened a 5h window.
-pub fn spacing_warnings(times: &[String]) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if times.len() >= 2 {
-        for pair in times.windows(2) {
-            let (a, b) = (&pair[0], &pair[1]);
-            if minutes_apart(a, b) < 5 * 60 {
-                warnings.push(format!(
-                    "config.daemon.warmup_times {a} and {b} are less than 5 hours apart; \
-                     the later slot is a no-op if the earlier warmup opened a 5h window"
-                ));
-            }
-        }
+    if normalized.len() > MAX_WARMUP_TIMES {
+        warnings.push(format!(
+            "config.daemon.warmup_times has {}; keeping the first {MAX_WARMUP_TIMES} after sort",
+            normalized.len()
+        ));
+        normalized.truncate(MAX_WARMUP_TIMES);
     }
-    warnings
+    normalized
 }
 
 /// One or more `HH:MM` tokens separated by comma, semicolon, or whitespace.
@@ -85,16 +77,6 @@ pub fn parse_warmup_time_list(raw: &str) -> Result<Vec<String>, String> {
         return Err("warmup time must be HH:MM (00-23:00-59)".into());
     }
     Ok(stamps)
-}
-
-fn minutes_apart(a: &str, b: &str) -> i32 {
-    let Some((ah, am)) = parse_schedule_time(a) else {
-        return 0;
-    };
-    let Some((bh, bm)) = parse_schedule_time(b) else {
-        return 0;
-    };
-    (bh as i32 * 60 + bm as i32) - (ah as i32 * 60 + am as i32)
 }
 
 /// IANA name such as `Asia/Shanghai` or `UTC`. Empty means system local time.
@@ -235,11 +217,18 @@ mod tests {
         );
         assert_eq!(times, vec!["08:00", "08:30", "13:10"]);
         assert!(warnings.iter().any(|w| w.contains("24:00")));
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("08:00") && w.contains("08:30"))
-        );
+        assert!(warnings.iter().all(|w| !w.contains("5 hours")));
+    }
+
+    #[test]
+    fn normalize_caps_warmup_times_at_ten() {
+        let mut warnings = Vec::new();
+        let input: Vec<String> = (0..12).map(|h| format!("{h:02}:00")).collect();
+        let times = normalize_warmup_times(input, &mut warnings);
+        assert_eq!(times.len(), 10);
+        assert_eq!(times.first().map(String::as_str), Some("00:00"));
+        assert_eq!(times.last().map(String::as_str), Some("09:00"));
+        assert!(warnings.iter().any(|w| w.contains("first 10")));
     }
 
     #[test]

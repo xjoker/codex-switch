@@ -155,7 +155,7 @@ pub struct DaemonConfig {
     /// during cache refresh. With times set, cache refresh only updates
     /// usage and warmup runs at those `HH:MM` slots in `timezone`.
     pub auto_warmup: bool,
-    /// `HH:MM` slots. Empty = cache-refresh warmup when `auto_warmup`.
+    /// `HH:MM` slots (max 10). Empty = cache-refresh warmup when `auto_warmup`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warmup_times: Vec<String>,
     /// IANA timezone for `warmup_times` (e.g. `Asia/Shanghai`). Empty = system local.
