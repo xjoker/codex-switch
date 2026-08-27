@@ -215,7 +215,7 @@ fn launch_dash_dash_exec_json_is_not_an_alias_named_exec() {
 }
 
 #[test]
-fn launch_chatgpt_puts_cs_model_before_exec() {
+fn launch_chatgpt_puts_cs_model_after_exec() {
     let home = temp_home("chatgpt-model-exec");
     let (fake_bin, log) = install_fake_codex(&home);
     setup_chatgpt(&home);
@@ -235,13 +235,13 @@ fn launch_chatgpt_puts_cs_model_before_exec() {
     );
     assert_eq!(
         last_non_version_argv(&log),
-        ["--model", "gpt-5.4", "exec", "--json", "hi"]
+        ["exec", "--model", "gpt-5.4", "--json", "hi"]
     );
     let _ = fs::remove_dir_all(home);
 }
 
 #[test]
-fn launch_provider_puts_c_overrides_before_exec_and_keeps_json() {
+fn launch_provider_puts_c_overrides_after_exec_and_keeps_json() {
     let home = temp_home("provider-exec");
     let (fake_bin, log) = install_fake_codex(&home);
     setup_provider(&home);
@@ -267,22 +267,24 @@ fn launch_provider_puts_c_overrides_before_exec_and_keeps_json() {
         String::from_utf8_lossy(&output.stderr)
     );
     let argv = last_non_version_argv(&log);
-    let exec_at = argv.iter().position(|a| a == "exec").expect("exec");
+    assert_eq!(argv.first().map(String::as_str), Some("exec"));
+    let exec_at = 0;
     assert!(
-        argv[..exec_at]
+        argv[exec_at + 1..]
             .windows(2)
             .any(|pair| pair[0] == "-c" && pair[1].starts_with("model_provider=")),
-        "-c model_provider must precede exec: {argv:?}"
+        "-c model_provider must follow exec: {argv:?}"
     );
     assert!(
-        argv[..exec_at]
+        argv[exec_at + 1..]
             .windows(2)
             .any(|pair| pair[0] == "-c" && pair[1].starts_with("model=")),
-        "-c model must precede exec when the user did not pass --model: {argv:?}"
+        "-c model must follow exec when the user did not pass --model: {argv:?}"
     );
+    let json_at = argv.iter().position(|a| a == "--json").expect("--json");
     assert_eq!(
-        &argv[exec_at..],
-        ["exec", "--json", "--color", "never", "review this"]
+        &argv[json_at..],
+        ["--json", "--color", "never", "review this"]
     );
     assert!(
         !argv.iter().any(|a| a.contains("sk-test-passthrough")),
@@ -321,8 +323,10 @@ fn launch_provider_passthrough_model_drops_saved_model_overrides() {
             .any(|pair| pair[0] == "-c" && pair[1].starts_with("model_provider=")),
         "provider definition must remain: {argv:?}"
     );
-    let exec_at = argv.iter().position(|a| a == "exec").expect("exec");
-    assert_eq!(&argv[exec_at - 2..], ["-m", "one-shot", "exec", "hi"]);
+    assert_eq!(argv.first().map(String::as_str), Some("exec"));
+    let model_at = argv.iter().position(|a| a == "-m").expect("-m");
+    assert!(model_at > 0, "-m must follow exec: {argv:?}");
+    assert_eq!(&argv[model_at..], ["-m", "one-shot", "hi"]);
     let _ = fs::remove_dir_all(home);
 }
 

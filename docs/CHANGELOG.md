@@ -3,7 +3,7 @@
 ## Unreleased
 
 - **Catalog reasoning only when saved** — Models without `--reasoning` get catalog `effort: none` and `supports_reasoning_summaries: false`, so Codex does not send `reasoning.effort`. That 404s some gateways (Cursor-style `composer-2.5`). Thinking models still advertise low…max when an effort is saved.
-- **Provider `launch exec` `-c` placement** — Codex 0.149 applies `-c` on the subcommand (`codex exec -c …`). Flags in front of `exec` are ignored, so the child used the built-in OpenAI provider. `launch` now puts provider overrides after `exec` / `resume` / …; interactive launch (no subcommand) still has them in front.
+- **Provider `launch exec` `-c` placement** — Codex 0.149 applies `-c` on the subcommand (`codex exec -c …`). Flags in front of `exec` are ignored, so the child used the built-in OpenAI provider. `launch` now puts provider overrides after `exec` / `resume` / …, and moves user flags that preceded the subcommand with them. Interactive launch (no subcommand) still has them in front.
 
 ## v20260827.3.0 — 2026-08-27
 

@@ -260,8 +260,9 @@ async fn launch_interactive(
     Ok(exit_code)
 }
 
-/// Codex argv for a ChatGPT `launch`: optional `--model` is a global Codex
-/// flag, so it is placed before any subcommand in `passthrough`.
+/// Codex argv for a ChatGPT `launch`: optional `--model` is spliced after a
+/// Codex subcommand in `passthrough` (Codex 0.149 ignores flags in front of
+/// `exec`). Interactive launch has no subcommand, so `--model` stays in front.
 pub(crate) fn chatgpt_codex_argv(model: Option<&str>, passthrough: Vec<String>) -> Vec<String> {
     let mut extra = Vec::new();
     if let Some(model) = model.filter(|model| !model.is_empty()) {
@@ -287,20 +288,33 @@ pub(crate) fn provider_codex_argv(overrides: Vec<String>, passthrough: Vec<Strin
 }
 
 fn splice_after_subcommand(overrides: Vec<String>, passthrough: Vec<String>) -> Vec<String> {
-    match passthrough.first() {
-        Some(cmd) if crate::cli::is_codex_subcommand(cmd) => {
-            let mut argv = Vec::with_capacity(overrides.len() + passthrough.len());
-            argv.push(cmd.clone());
-            argv.extend(overrides);
-            argv.extend(passthrough.into_iter().skip(1));
-            argv
+    let mut cmd_at = None;
+    for (i, arg) in passthrough.iter().enumerate() {
+        if arg == "--" {
+            break;
         }
-        _ => {
-            let mut argv = overrides;
-            argv.extend(passthrough);
-            argv
+        if crate::cli::is_codex_subcommand(arg) {
+            cmd_at = Some(i);
+            break;
         }
     }
+    let Some(idx) = cmd_at else {
+        let mut argv = overrides;
+        argv.extend(passthrough);
+        return argv;
+    };
+    // Codex 0.149 ignores options in front of the subcommand, so flags that
+    // the user put before `exec` move after it along with our `-c` overrides.
+    let mut argv = Vec::with_capacity(overrides.len() + passthrough.len());
+    argv.push(passthrough[idx].clone());
+    argv.extend(overrides);
+    argv.extend(
+        passthrough
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, arg)| (i != idx).then_some(arg)),
+    );
+    argv
 }
 
 fn passthrough_sets_model(args: &[String]) -> bool {
@@ -896,6 +910,30 @@ mod tests {
                 r#"model_providers.p.base_url="https://example.test""#,
                 "--model",
                 "one-shot",
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_argv_moves_flags_that_precede_exec_after_the_subcommand() {
+        let argv = provider_codex_argv(
+            vec![
+                "-c".into(),
+                r#"model_provider="p""#.into(),
+                "-c".into(),
+                r#"model="saved""#.into(),
+            ],
+            vec!["-m".into(), "one-shot".into(), "exec".into(), "hi".into()],
+        );
+        assert_eq!(
+            argv,
+            [
+                "exec",
+                "-c",
+                r#"model_provider="p""#,
+                "-m",
+                "one-shot",
+                "hi",
             ]
         );
     }
