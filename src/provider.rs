@@ -404,7 +404,7 @@ impl ProviderProfile {
             ReasoningLaunch::Skip => None,
             ReasoningLaunch::Effort(value) => Some(value.as_str()),
         };
-        if let Some(effort) = effort {
+        if let Some(effort) = thinking_effort(effort) {
             pairs.push(format!("model_reasoning_effort={effort}"));
         }
         if model.no_web_search {
@@ -472,6 +472,7 @@ impl ProviderProfile {
         let path = dir.join("models.json");
         let json = build_model_catalog(
             &self.saved_model_slugs(default_slug),
+            &self.models,
             remote,
             fallback,
             default_slug,
@@ -1027,36 +1028,57 @@ fn entry_context_window(
 /// `base_instructions` (an empty string is accepted).
 fn build_model_catalog(
     saved: &[String],
+    models: &[ProviderModel],
     remote: &[RemoteModel],
     fallback: &[RemoteModel],
     default_slug: &str,
     user_context: Option<i64>,
-    default_reasoning: Option<&str>,
+    launch_reasoning: Option<&str>,
 ) -> serde_json::Value {
-    let models: Vec<serde_json::Value> = select_catalog_slugs(saved)
+    let models_json: Vec<serde_json::Value> = select_catalog_slugs(saved)
         .iter()
         .enumerate()
         .map(|(index, slug)| {
             let owned = overlay_remote_metadata(slug, remote, fallback);
             let meta = owned.as_ref();
+            let reasoning = if slug == default_slug {
+                launch_reasoning
+            } else {
+                models
+                    .iter()
+                    .find(|model| model.id == *slug)
+                    .and_then(|model| model.reasoning.as_deref())
+            };
             catalog_entry(
                 slug,
                 entry_context_window(slug, default_slug, user_context, meta),
-                (slug == default_slug)
-                    .then_some(default_reasoning)
-                    .flatten(),
+                reasoning,
                 meta,
                 i64::try_from(index).unwrap_or(i64::MAX),
             )
         })
         .collect();
-    serde_json::json!({ "models": models })
+    serde_json::json!({ "models": models_json })
 }
+
+fn thinking_effort(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
+}
+
+const THINKING_REASONING_LEVELS: &[(&str, &str)] = &[
+    ("low", "Light reasoning"),
+    ("medium", "Balanced"),
+    ("high", "Enhanced reasoning"),
+    ("xhigh", "Extra high reasoning"),
+    ("max", "Deep reasoning"),
+];
 
 fn catalog_entry(
     slug: &str,
     context_window: i64,
-    default_reasoning: Option<&str>,
+    reasoning: Option<&str>,
     meta: Option<&RemoteModel>,
     priority: i64,
 ) -> serde_json::Value {
@@ -1072,17 +1094,35 @@ fn catalog_entry(
         .map(|model| model.input_modalities.clone())
         .filter(|values| !values.is_empty())
         .unwrap_or_else(|| vec!["text".to_string(), "image".to_string()]);
-    let mut entry = serde_json::json!({
+    let thinking = thinking_effort(reasoning);
+    let mut levels: Vec<serde_json::Value> = if thinking.is_some() {
+        THINKING_REASONING_LEVELS
+            .iter()
+            .map(|(effort, description)| {
+                serde_json::json!({ "effort": effort, "description": description })
+            })
+            .collect()
+    } else {
+        vec![serde_json::json!({
+            "effort": "none",
+            "description": "No reasoning",
+        })]
+    };
+    if let Some(effort) = thinking
+        && !levels.iter().any(|level| level["effort"] == effort)
+    {
+        levels.insert(
+            0,
+            serde_json::json!({ "effort": effort, "description": effort }),
+        );
+    }
+    serde_json::json!({
         "slug": slug,
         "display_name": display_name,
         "description": description,
-        "supported_reasoning_levels": [
-            {"effort": "low", "description": "Light reasoning"},
-            {"effort": "medium", "description": "Balanced"},
-            {"effort": "high", "description": "Enhanced reasoning"},
-            {"effort": "xhigh", "description": "Extra high reasoning"},
-            {"effort": "max", "description": "Deep reasoning"},
-        ],
+        "supported_reasoning_levels": levels,
+        "default_reasoning_level": thinking.unwrap_or("none"),
+        "supports_reasoning_summaries": thinking.is_some(),
         "shell_type": "shell_command",
         "visibility": "list",
         "supported_in_api": true,
@@ -1097,11 +1137,7 @@ fn catalog_entry(
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
         "input_modalities": modalities,
-    });
-    if let Some(effort) = default_reasoning.filter(|value| !value.is_empty()) {
-        entry["default_reasoning_level"] = serde_json::Value::String(effort.to_string());
-    }
-    entry
+    })
 }
 /// Render a string as a TOML basic (quoted) string for a `codex -c key=value`
 /// override, escaping the characters TOML requires. Codex parses the value part
@@ -1778,6 +1814,8 @@ api_key = "sk-legacy-key"
         assert_eq!(catalog["models"][0]["visibility"], "list");
         assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
         assert_eq!(catalog["models"][0]["base_instructions"], "");
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], "none");
+        assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
     }
 
     #[test]
@@ -1826,6 +1864,7 @@ api_key = "sk-legacy-key"
         ];
         let catalog = build_model_catalog(
             &["glm-5.3-flash".into()],
+            &[ProviderModel::from_id("glm-5.3-flash")],
             &remote,
             &[],
             "glm-5.3-flash",
@@ -1836,6 +1875,90 @@ api_key = "sk-legacy-key"
         assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
         assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
         assert_eq!(catalog["models"][0]["display_name"], "GLM Flash");
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], "none");
+        assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+        assert_eq!(
+            catalog["models"][0]["supported_reasoning_levels"][0]["effort"],
+            "none"
+        );
+        assert_eq!(
+            catalog["models"][0]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn catalog_without_reasoning_does_not_advertise_thinking_levels() {
+        let catalog = build_model_catalog(
+            &["composer-2.5".into()],
+            &[ProviderModel::from_id("composer-2.5")],
+            &[remote("composer-2.5")],
+            &[],
+            "composer-2.5",
+            None,
+            None,
+        );
+        let levels = catalog["models"][0]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap();
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0]["effort"], "none");
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], "none");
+        assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+    }
+
+    #[test]
+    fn catalog_with_saved_reasoning_keeps_thinking_levels() {
+        let models = vec![
+            ProviderModel::from_id("composer-2.5"),
+            ProviderModel {
+                id: "glm-5.3-flash".into(),
+                reasoning: Some("high".into()),
+                no_web_search: false,
+            },
+        ];
+        let catalog = build_model_catalog(
+            &["composer-2.5".into(), "glm-5.3-flash".into()],
+            &models,
+            &[remote("composer-2.5"), remote("glm-5.3-flash")],
+            &[],
+            "composer-2.5",
+            None,
+            None,
+        );
+        assert_eq!(catalog["models"][0]["slug"], "composer-2.5");
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], "none");
+        assert_eq!(catalog["models"][1]["slug"], "glm-5.3-flash");
+        assert_eq!(catalog["models"][1]["default_reasoning_level"], "high");
+        assert_eq!(catalog["models"][1]["supports_reasoning_summaries"], true);
+        assert!(
+            catalog["models"][1]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|level| level["effort"] == "high")
+        );
+    }
+
+    #[test]
+    fn none_reasoning_is_not_passed_as_a_codex_override() {
+        let mut p = sample("openrouter");
+        p.models = vec![ProviderModel {
+            id: "composer-2.5".into(),
+            reasoning: Some("none".into()),
+            no_web_search: false,
+        }];
+        p.default_model = "composer-2.5".into();
+        let args = p.codex_config_args(None).unwrap();
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.starts_with("model_reasoning_effort=")),
+            "effort none must not be sent: {args:?}"
+        );
     }
 
     #[test]
