@@ -84,7 +84,7 @@ codex-switch launch openrouter -- exec --json "review this"
 codex-switch launch openrouter -- -s workspace-write -a never
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json` and does not read or write the user's `$CODEX_HOME`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, and writes a Codex model catalog next to `provider.toml` so `/model` lists the **saved** provider slugs. Those `-c` flags are global Codex options, so they are placed **in front of** a Codex subcommand such as `exec`. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
+`launch` does **not** replace `$CODEX_HOME/auth.json` and does not read or write the user's `$CODEX_HOME`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, and writes a Codex model catalog next to `provider.toml` so `/model` lists the **saved** provider slugs. Codex 0.149 applies those `-c` flags on the subcommand (`codex exec -c …`); putting them in front of `exec` is ignored. `launch` therefore places overrides after the subcommand and also moves user flags that preceded it (so `launch or -- -m one-shot exec hi` becomes `codex exec -c … -m one-shot hi`). Interactive launch has no subcommand, so the flags stay in front. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
 
 Put `--` before any Codex argv that could be mistaken for a codex-switch alias or flag (`exec`, `--json`, `--color`, a prompt that looks like a name). `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile; it cannot target a provider.
 
@@ -136,6 +136,8 @@ codex-switch provider add openrouter \
 ```
 
 Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex also accepts `ultra`) come from the Codex version in use, so codex-switch does not restrict them on the CLI. The TUI form offers the common presets and `(skip)`. Plain chat models need no reasoning flag.
+
+The generated Codex catalog only advertises thinking levels when a model has a saved effort (or the launch picker sets one). Otherwise it lists `none` and sets `supports_reasoning_summaries` false, so Codex does not send `reasoning.effort`. Gateways that 404 on a reasoning field (Cursor-style `composer-2.5`, which exposes a `fast` parameter rather than effort) stay usable. Do not set `--reasoning` on those models.
 
 ## TUI
 
