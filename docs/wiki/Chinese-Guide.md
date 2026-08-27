@@ -76,12 +76,14 @@ codex-switch provider add openrouter \
   --model openai/gpt-5.3-codex \
   --model deepseek/deepseek-r1-0528 --reasoning medium
 
-# 小网关也可从 GET /models 拉对话模型（embedding / reranker 会去掉；超过 48 条须手填 --model）
+# 小网关也可从 GET /models 拉对话模型（embedding / reranker 会去掉；超过 48 条用 --model 勾选，或 TUI `f`）
 printf '%s' "$KEY" | codex-switch provider add zai \
   --base-url https://api.example/v1 \
   --fetch-models \
   --api-key-stdin
 codex-switch provider fetch-models zai
+# OpenRouter 这类大目录：
+codex-switch provider fetch-models openrouter --model openai/gpt-4.1-nano
 
 # 查看 / 改名 / 删除
 codex-switch provider list
@@ -164,7 +166,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 - **新增**：打开后直接输入 Alias；`Enter` 提交当前字段并进入下一项（Alias → URL → Key → Models；env key / wire API / extra `-c` 保持默认）。
 - **编辑**：从 Base URL 的导航态开始（避免 `s` 被当成输入字符）；`Enter` 进入当前格编辑。
 - `Tab` 走遍每一栏，包括 Env key、Wire API、Extra `-c`；在 Models 内用 `j` / `k` 移动。 Extra `-c` 是 `KEY=VALUE`，值里的逗号会保留。
-- 模型列表最后一行是 **`+ add model`**：`Enter` 或 `+` / `=` / `a` 添加模型并输入 id。导航态按 `f` 从接入站 `GET /models` 拉取对话模型（去掉 embedding / reranker；超过 48 条须手填）。
+- 模型列表最后一行是 **`+ add model`**：`Enter` 或 `+` / `=` / `a` 添加模型并输入 id。导航态按 `f` 从接入站 `GET /models` 拉取对话模型（去掉 embedding / reranker；超过 48 条打开选择器：`/` 过滤，`space` 勾选，`Enter` 应用）。
 - `←` / `→` 切换该模型的 reasoning；`w` 开关 `web_search`；`*` 标为默认模型。
 - `d` / `-` / `Delete` 删除模型前会弹出确认（`y` 删除，`n` 或 `Esc` 取消且**不关闭整张表单**）。至少保留一个模型，**最后一条不能删**。
 - 编辑时 API Key 留空表示**保留原密钥**。

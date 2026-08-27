@@ -37,14 +37,14 @@ printf '%s' "$KEY" | codex-switch provider add zai \
 codex-switch provider fetch-models zai
 ```
 
-`--fetch-models` on add can be combined with `--model`: those ids stay first (and keep `--reasoning` / `--no-web-search`), then other chat slugs from the gateway are appended. `provider fetch-models` replaces the saved list; matching ids keep their reasoning / `web_search` settings, and the default stays if the gateway still lists it. A slug on `/models` is not a guarantee that Codex's `POST /responses` accepts it.
+`--fetch-models` on add can be combined with `--model`: those ids stay first (and keep `--reasoning` / `--no-web-search`), then other chat slugs from the gateway are appended. When the gateway lists more than 48 chat models, only the `--model` picks are saved. `provider fetch-models` replaces the saved list; on a large catalog pass `--model` to pick. Matching ids keep their reasoning / `web_search` settings, and the default stays if it is still among the saved ids. A slug on `/models` is not a guarantee that Codex's `POST /responses` accepts it.
 
 Optional flags:
 
 | Flag | Default | Purpose |
 |---|---|---|
 | `--model ID` | required unless `--fetch-models` | Model id (OpenRouter: full slug). First is `default_model` |
-| `--fetch-models` | off | `GET {base_url}/models` and save chat slugs (embedding/reranker omitted). Catalogs larger than 48 models must be picked with `--model` |
+| `--fetch-models` | off | `GET {base_url}/models` and save chat slugs (embedding/reranker omitted). Catalogs larger than 48 models must be picked with `--model` or TUI `f` |
 | `--reasoning EFFORT` | none | Attach `model_reasoning_effort` to the most recent `--model` |
 | `--no-web-search` | off | Attach `web_search=disabled` to the most recent `--model` |
 | `--env-key` | `CODEX_SWITCH_<ALIAS>_KEY` | Environment variable Codex reads the key from at launch |
@@ -62,7 +62,7 @@ Inspect, rename, and remove:
 ```bash
 codex-switch provider list
 codex-switch provider show openrouter
-codex-switch provider fetch-models openrouter
+codex-switch provider fetch-models openrouter --model openai/gpt-4.1-nano
 codex-switch provider rename openrouter orouter
 codex-switch provider remove openrouter
 ```
@@ -157,7 +157,7 @@ On the Providers tab:
 | `h` | Help |
 | `q` | Quit |
 
-Add and edit use the same form. Add starts typing the alias immediately; Enter commits a field and continues Alias → Base URL → API key → Models (env key, wire API, and extra `-c` stay on their defaults). Tab visits every field, including those three. `j`/`k` move inside the model list. The last row is `+ add model` — Enter (or `+` / `=` / `a`) adds a model and starts typing its id; `f` GETs `{base_url}/models` and replaces the list with chat slugs (embedding/reranker omitted; catalogs larger than 48 must be typed). If a model id is being edited, Esc first. `d` / `-` / Delete ask for confirmation (`y` removes, `n` / Esc keeps it). A provider must keep at least one model, so the last model cannot be removed. `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, `s` saves, Esc cancels. Edit starts on Base URL in navigation mode (Enter edits the focused cell). The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field. Extra `-c` overrides are `KEY=VALUE` items; commas inside a value are kept.
+Add and edit use the same form. Add starts typing the alias immediately; Enter commits a field and continues Alias → Base URL → API key → Models (env key, wire API, and extra `-c` stay on their defaults). Tab visits every field, including those three. `j`/`k` move inside the model list. The last row is `+ add model` — Enter (or `+` / `=` / `a`) adds a model and starts typing its id; `f` GETs `{base_url}/models` and replaces the list with chat slugs (embedding/reranker omitted). Catalogs larger than 48 open a picker: `/` filters, `space` toggles, Enter applies, Esc cancels. If a model id is being edited, Esc first. `d` / `-` / Delete ask for confirmation (`y` removes, `n` / Esc keeps it). A provider must keep at least one model, so the last model cannot be removed. `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, `s` saves, Esc cancels. Edit starts on Base URL in navigation mode (Enter edits the focused cell). The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field. Extra `-c` overrides are `KEY=VALUE` items; commas inside a value are kept.
 
 The stored key is never rendered in the table. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, optional extra Codex argv (Tab), and a one-shot reasoning override, then Enter (or `o`) starts Codex. On the Providers list, Enter also opens that picker; `e` edits (including env key, wire API, and extra `-c` overrides). `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
 

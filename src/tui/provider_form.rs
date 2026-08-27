@@ -5,7 +5,8 @@
 //! moves between every field, including env key, wire API, and extra `-c`.
 //! `j`/`k` move inside Models, which includes a visible `+ add model` row.
 //! `+` adds and `d`/`-` remove from navigation mode. `f` GETs `{base_url}/models`
-//! and fills chat slugs (embedding/reranker omitted). Edit starts on Base URL
+//! and fills chat slugs (embedding/reranker omitted). Catalogs larger than 48
+//! open a picker (`space` toggle, `/` filter, Enter apply). Edit starts on Base URL
 //! so `s` is save, not a character.
 
 use crossterm::event::KeyCode;
@@ -18,8 +19,8 @@ use ratatui::{
 use super::popup::{self, PopupState};
 use super::theme::{C_GREEN, C_RED, base, dim, header, key};
 use crate::provider::{
-    ProviderModel, ProviderProfile, RemoteModel, apply_fetched_models,
-    fetch_gateway_models_blocking,
+    ProviderModel, ProviderProfile, RemoteModel, SMALL_REMOTE_CATALOG_LIMIT, apply_fetched_models,
+    apply_picked_models, chat_slugs_from_gateway, fetch_gateway_models_blocking,
 };
 
 /// Reasoning-effort presets. Index 0 skips the override; the rest are saved as
@@ -62,6 +63,65 @@ fn empty_model_draft() -> ModelDraft {
     }
 }
 
+struct GatewayPickState {
+    slugs: Vec<String>,
+    checked: Vec<bool>,
+    cursor: usize,
+    filter: String,
+    filtering: bool,
+    message: Option<String>,
+}
+
+impl GatewayPickState {
+    fn new(slugs: Vec<String>, already: &[ModelDraft]) -> Self {
+        let checked = slugs
+            .iter()
+            .map(|slug| already.iter().any(|draft| draft.id.trim() == slug))
+            .collect();
+        Self {
+            slugs,
+            checked,
+            cursor: 0,
+            filter: String::new(),
+            filtering: false,
+            message: None,
+        }
+    }
+
+    fn filtered(&self) -> Vec<usize> {
+        let query = self.filter.to_ascii_lowercase();
+        self.slugs
+            .iter()
+            .enumerate()
+            .filter(|(_, slug)| query.is_empty() || slug.to_ascii_lowercase().contains(&query))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    fn selected_count(&self) -> usize {
+        self.checked.iter().filter(|checked| **checked).count()
+    }
+
+    fn clamp_cursor(&mut self) {
+        let n = self.filtered().len();
+        if n == 0 {
+            self.cursor = 0;
+        } else if self.cursor >= n {
+            self.cursor = n - 1;
+        }
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        let n = self.filtered().len() as isize;
+        if n == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let next = (self.cursor as isize + delta).clamp(0, n - 1);
+        self.cursor = next as usize;
+    }
+}
+
 pub(crate) fn reasoning_choice(value: Option<&str>) -> (usize, Option<String>) {
     let Some(value) = value.filter(|v| !v.is_empty()) else {
         return (0, None);
@@ -98,6 +158,7 @@ pub struct ProviderFormState {
     cursor: usize,
     error: Option<String>,
     confirm_remove: bool,
+    pick: Option<GatewayPickState>,
 }
 
 pub enum FormOutcome {
@@ -127,6 +188,7 @@ impl ProviderFormState {
             cursor: 0,
             error: None,
             confirm_remove: false,
+            pick: None,
         }
     }
 
@@ -172,6 +234,7 @@ impl ProviderFormState {
             cursor: 0,
             error: None,
             confirm_remove: false,
+            pick: None,
         }
     }
 
@@ -185,6 +248,9 @@ impl ProviderFormState {
     pub fn handle_key(&mut self, code: KeyCode) -> FormOutcome {
         if self.confirm_remove {
             return self.handle_remove_confirm(code);
+        }
+        if self.pick.is_some() {
+            return self.handle_pick_key(code);
         }
         self.error = None;
         if self.editing {
@@ -471,18 +537,164 @@ impl ProviderFormState {
             return;
         };
         match fetch_gateway_models_blocking(url, key) {
-            Ok(remote) => {
-                if let Err(err) = self.apply_fetched(&remote) {
-                    self.error = Some(err);
-                }
-            }
+            Ok(remote) => self.ingest_remote(&remote),
             Err(err) => self.error = Some(format!("Fetch models failed: {err}")),
         }
     }
 
-    fn apply_fetched(&mut self, remote: &[RemoteModel]) -> Result<(), String> {
-        let existing: Vec<ProviderModel> = self
-            .models
+    fn ingest_remote(&mut self, remote: &[RemoteModel]) {
+        let slugs = match chat_slugs_from_gateway(remote) {
+            Ok(slugs) => slugs,
+            Err(err) => {
+                self.error = Some(err.to_string());
+                return;
+            }
+        };
+        if slugs.len() > SMALL_REMOTE_CATALOG_LIMIT {
+            self.pick = Some(GatewayPickState::new(slugs, &self.models));
+            self.error = None;
+            self.popup.reset();
+            return;
+        }
+        if let Err(err) = self.apply_fetched(remote) {
+            self.error = Some(err);
+        }
+    }
+
+    fn handle_pick_key(&mut self, code: KeyCode) -> FormOutcome {
+        let filtering = self.pick.as_ref().is_some_and(|pick| pick.filtering);
+        if filtering {
+            match code {
+                KeyCode::Esc => {
+                    if let Some(pick) = self.pick.as_mut() {
+                        pick.filtering = false;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(pick) = self.pick.as_mut() {
+                        pick.filtering = false;
+                        pick.clamp_cursor();
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(pick) = self.pick.as_mut() {
+                        pick.filter.pop();
+                        pick.clamp_cursor();
+                    }
+                }
+                KeyCode::Char(ch) => {
+                    if let Some(pick) = self.pick.as_mut() {
+                        pick.filter.push(ch);
+                        pick.cursor = 0;
+                    }
+                }
+                _ => {}
+            }
+            return FormOutcome::Continue;
+        }
+        match code {
+            KeyCode::Esc => {
+                self.pick = None;
+            }
+            KeyCode::Char('/') => {
+                if let Some(pick) = self.pick.as_mut() {
+                    pick.filtering = true;
+                    pick.filter.clear();
+                    pick.cursor = 0;
+                    pick.message = None;
+                }
+            }
+            KeyCode::Char(' ') => self.toggle_pick(),
+            KeyCode::Enter => self.apply_pick(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(pick) = self.pick.as_mut() {
+                    pick.move_cursor(1);
+                    pick.message = None;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(pick) = self.pick.as_mut() {
+                    pick.move_cursor(-1);
+                    pick.message = None;
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(pick) = self.pick.as_mut() {
+                    pick.move_cursor(10);
+                    pick.message = None;
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(pick) = self.pick.as_mut() {
+                    pick.move_cursor(-10);
+                    pick.message = None;
+                }
+            }
+            KeyCode::Home => {
+                if let Some(pick) = self.pick.as_mut() {
+                    pick.cursor = 0;
+                    pick.message = None;
+                }
+            }
+            KeyCode::End => {
+                if let Some(pick) = self.pick.as_mut() {
+                    let last = pick.filtered().len().saturating_sub(1);
+                    pick.cursor = last;
+                    pick.message = None;
+                }
+            }
+            _ => {}
+        }
+        FormOutcome::Continue
+    }
+
+    fn toggle_pick(&mut self) {
+        let Some(pick) = self.pick.as_mut() else {
+            return;
+        };
+        pick.message = None;
+        let filtered = pick.filtered();
+        let Some(&idx) = filtered.get(pick.cursor) else {
+            return;
+        };
+        pick.checked[idx] = !pick.checked[idx];
+    }
+
+    fn apply_pick(&mut self) {
+        let Some(pick) = self.pick.as_ref() else {
+            return;
+        };
+        let allowed = pick.slugs.clone();
+        let picks: Vec<ProviderModel> = pick
+            .slugs
+            .iter()
+            .zip(pick.checked.iter())
+            .filter(|(_, checked)| **checked)
+            .map(|(slug, _)| ProviderModel::from_id(slug.clone()))
+            .collect();
+        if picks.is_empty() {
+            if let Some(pick) = self.pick.as_mut() {
+                pick.message = Some("pick at least one model".into());
+            }
+            return;
+        }
+        let existing = self.existing_models();
+        let current_default = self.current_default_id();
+        match apply_picked_models(&existing, current_default.as_deref(), &allowed, &picks) {
+            Ok((models, default)) => {
+                self.set_saved_models(models, default);
+                self.pick = None;
+            }
+            Err(err) => {
+                if let Some(pick) = self.pick.as_mut() {
+                    pick.message = Some(err.to_string());
+                }
+            }
+        }
+    }
+
+    fn existing_models(&self) -> Vec<ProviderModel> {
+        self.models
             .iter()
             .filter(|draft| !draft.id.trim().is_empty())
             .map(|draft| ProviderModel {
@@ -496,15 +708,27 @@ impl ProviderFormState {
                 },
                 no_web_search: draft.no_web_search,
             })
-            .collect();
-        let current_default = self
-            .models
+            .collect()
+    }
+
+    fn current_default_id(&self) -> Option<String> {
+        self.models
             .get(self.default_idx)
             .map(|draft| draft.id.trim().to_string())
-            .filter(|id| !id.is_empty());
+            .filter(|id| !id.is_empty())
+    }
+
+    fn apply_fetched(&mut self, remote: &[RemoteModel]) -> Result<(), String> {
+        let existing = self.existing_models();
+        let current_default = self.current_default_id();
         let (models, default) =
             apply_fetched_models(&existing, current_default.as_deref(), remote, &[])
                 .map_err(|err| err.to_string())?;
+        self.set_saved_models(models, default);
+        Ok(())
+    }
+
+    fn set_saved_models(&mut self, models: Vec<ProviderModel>, default: String) {
         self.models = models
             .iter()
             .map(|model| {
@@ -528,7 +752,7 @@ impl ProviderFormState {
         self.editing = false;
         self.input.clear();
         self.cursor = 0;
-        Ok(())
+        self.error = None;
     }
 
     fn auto_edit_if_typing_field(&mut self) {
@@ -773,7 +997,87 @@ fn field_value<'a>(
     }
 }
 
+const PICK_LIST_ROWS: usize = 12;
+
+fn render_pick(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
+    let Some(pick) = form.pick.as_ref() else {
+        return;
+    };
+    let filtered = pick.filtered();
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{} chat models   {} selected",
+            pick.slugs.len(),
+            pick.selected_count()
+        ),
+        dim(),
+    )));
+    let filter_shown = if pick.filtering {
+        format!("{}$", pick.filter)
+    } else if pick.filter.is_empty() {
+        "(none)".to_string()
+    } else {
+        pick.filter.clone()
+    };
+    lines.push(Line::from(vec![
+        Span::styled("filter  ", dim()),
+        Span::styled(filter_shown, if pick.filtering { header() } else { base() }),
+    ]));
+    lines.push(Line::from(""));
+    if filtered.is_empty() {
+        lines.push(Line::from(Span::styled("no matches", dim())));
+    } else {
+        let start = pick
+            .cursor
+            .saturating_sub(PICK_LIST_ROWS / 2)
+            .min(filtered.len().saturating_sub(PICK_LIST_ROWS));
+        let end = (start + PICK_LIST_ROWS).min(filtered.len());
+        for (vis, &idx) in filtered.iter().enumerate().take(end).skip(start) {
+            let selected = vis == pick.cursor;
+            let mark = if pick.checked[idx] { "[x]" } else { "[ ]" };
+            let marker = if selected { "▶ " } else { "  " };
+            let style = if selected {
+                base().add_modifier(ratatui::style::Modifier::BOLD)
+            } else {
+                dim()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, base().fg(C_GREEN)),
+                Span::styled(format!("{mark} {}", pick.slugs[idx]), style),
+            ]));
+        }
+    }
+    if let Some(message) = &pick.message {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            message.clone(),
+            base()
+                .fg(C_RED)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("space", key()),
+        Span::styled(" toggle  ", dim()),
+        Span::styled("enter", key()),
+        Span::styled(" apply  ", dim()),
+        Span::styled("/", key()),
+        Span::styled(" filter  ", dim()),
+        Span::styled("j/k", key()),
+        Span::styled(" move  ", dim()),
+        Span::styled("esc", key()),
+        Span::styled(" cancel", dim()),
+    ]));
+    popup::render_popup(f, "Pick models", &lines, &mut form.popup, area);
+}
+
 pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
+    if form.pick.is_some() {
+        render_pick(f, form, area);
+        return;
+    }
     let label = base();
     let focus_style = header().add_modifier(ratatui::style::Modifier::UNDERLINED);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1451,6 +1755,147 @@ mod tests {
         let ids: Vec<&str> = form.models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["glm-5.3-flash", "gemini-3-flash"]);
         assert_eq!(form.models[form.default_idx].id, "glm-5.3-flash");
+    }
+
+    fn remote(slug: &str) -> crate::provider::RemoteModel {
+        crate::provider::RemoteModel {
+            slug: slug.into(),
+            display_name: None,
+            description: None,
+            context_window: None,
+            input_modalities: vec![],
+        }
+    }
+
+    fn large_remote() -> Vec<crate::provider::RemoteModel> {
+        let mut rows: Vec<_> = (0..crate::provider::SMALL_REMOTE_CATALOG_LIMIT)
+            .map(|i| remote(&format!("vendor/pad-{i}")))
+            .collect();
+        rows.push(remote("openai/gpt-4.1-nano"));
+        rows.push(remote("deepseek/deepseek-r1-0528"));
+        rows
+    }
+
+    #[test]
+    fn fetch_large_catalog_opens_a_picker_instead_of_replacing() {
+        let original = ProviderProfile::build(
+            "or",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("composer-2.5")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.ingest_remote(&large_remote());
+        assert!(form.pick.is_some(), "large catalog must open the picker");
+        assert_eq!(form.models[0].id, "composer-2.5");
+        assert!(
+            form.error.is_none(),
+            "picker is not an error: {:?}",
+            form.error
+        );
+    }
+
+    #[test]
+    fn picker_space_and_enter_saves_checked_slugs() {
+        let original = ProviderProfile::build(
+            "or",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("composer-2.5")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.ingest_remote(&large_remote());
+        form.handle_key(KeyCode::Char('/'));
+        for ch in "nano".chars() {
+            form.handle_key(KeyCode::Char(ch));
+        }
+        form.handle_key(KeyCode::Enter);
+        form.handle_key(KeyCode::Char(' '));
+        form.handle_key(KeyCode::Char('/'));
+        for ch in "deepseek-r1".chars() {
+            form.handle_key(KeyCode::Char(ch));
+        }
+        form.handle_key(KeyCode::Enter);
+        form.handle_key(KeyCode::Char(' '));
+        form.handle_key(KeyCode::Enter);
+        assert!(form.pick.is_none());
+        let ids: Vec<&str> = form.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["openai/gpt-4.1-nano", "deepseek/deepseek-r1-0528"]
+        );
+    }
+
+    #[test]
+    fn picker_esc_keeps_the_existing_models() {
+        let original = ProviderProfile::build(
+            "or",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("composer-2.5")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.ingest_remote(&large_remote());
+        form.handle_key(KeyCode::Esc);
+        assert!(form.pick.is_none());
+        assert_eq!(form.models[0].id, "composer-2.5");
+    }
+
+    #[test]
+    fn picker_enter_without_a_check_stays_open() {
+        let original = ProviderProfile::build(
+            "or",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("composer-2.5")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.ingest_remote(&large_remote());
+        form.handle_key(KeyCode::Enter);
+        assert!(form.pick.is_some());
+        assert_eq!(
+            form.pick.as_ref().and_then(|p| p.message.as_deref()),
+            Some("pick at least one model")
+        );
+    }
+
+    #[test]
+    fn picker_renders_gateway_slugs() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let original = ProviderProfile::build(
+            "or",
+            "https://openrouter.ai/api/v1",
+            vec![ProviderModel::from_id("composer-2.5")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.ingest_remote(&large_remote());
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_provider_form(frame, &mut form, frame.area()))
+            .unwrap();
+        let area = terminal.backend().buffer().area;
+        let joined = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        terminal
+                            .backend()
+                            .buffer()
+                            .cell((x, y))
+                            .expect("cell")
+                            .symbol()
+                            .to_string()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Pick models"), "{joined}");
+        assert!(joined.contains("vendor/pad-0"), "{joined}");
+        assert!(joined.contains("[ ]"), "{joined}");
     }
 
     #[test]

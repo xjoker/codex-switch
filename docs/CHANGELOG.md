@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Pick models from a large gateway catalog** — OpenRouter-sized `GET /models` lists are not imported wholesale. `provider add --fetch-models --model …` and `provider fetch-models <alias> --model …` keep only those slugs (and must exist on the gateway). TUI `f` opens a filterable picker (`space` toggle, `/` filter, Enter apply). Small catalogs still import every chat slug.
 - **Catalog reasoning only when saved** — Models without `--reasoning` get catalog `effort: none` and `supports_reasoning_summaries: false`, so Codex does not send `reasoning.effort`. That 404s some gateways (Cursor-style `composer-2.5`). Thinking models still advertise low…max when an effort is saved.
 - **Provider `launch exec` `-c` placement** — Codex 0.149 applies `-c` on the subcommand (`codex exec -c …`). Flags in front of `exec` are ignored, so the child used the built-in OpenAI provider. `launch` now puts provider overrides after `exec` / `resume` / …, and moves user flags that preceded the subcommand with them. Interactive launch (no subcommand) still has them in front.
 

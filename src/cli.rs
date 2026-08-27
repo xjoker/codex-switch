@@ -32,7 +32,7 @@ pub enum DaemonCommand {
 pub enum ProviderCommand {
     /// Add a custom API provider (e.g. OpenRouter) for launching Codex with a third-party model
     #[command(
-        after_help = "The API key is read from a hidden prompt (or stdin with --api-key-stdin), never from the command line.\n--model is repeatable; the first is the default. --reasoning / --no-web-search attach to the most recent --model.\n--fetch-models GETs {base_url}/models and saves chat slugs (embedding/reranker omitted). Use it instead of, or together with, --model. Catalogs larger than 48 models (OpenRouter-sized) are not imported; pass --model.\n\nExample:\n  codex-switch provider add openrouter \\\n    --base-url https://openrouter.ai/api/v1 \\\n    --model openai/gpt-5.3-codex \\\n    --model deepseek/deepseek-r1-0528 --reasoning high\n  printf '%s' \"$KEY\" | codex-switch provider add zai --base-url https://api.example/v1 --fetch-models --api-key-stdin"
+        after_help = "The API key is read from a hidden prompt (or stdin with --api-key-stdin), never from the command line.\n--model is repeatable; the first is the default. --reasoning / --no-web-search attach to the most recent --model.\n--fetch-models GETs {base_url}/models and saves chat slugs (embedding/reranker omitted). Use it instead of, or together with, --model. Catalogs larger than 48 models (OpenRouter-sized) are not imported wholesale: pass --model to pick, or use TUI `f`.\n\nExample:\n  codex-switch provider add openrouter \\\n    --base-url https://openrouter.ai/api/v1 \\\n    --fetch-models \\\n    --model openai/gpt-5.3-codex \\\n    --model deepseek/deepseek-r1-0528 --reasoning high\n  printf '%s' \"$KEY\" | codex-switch provider add zai --base-url https://api.example/v1 --fetch-models --api-key-stdin"
     )]
     Add {
         /// Provider alias (the only user-facing name)
@@ -66,7 +66,7 @@ pub enum ProviderCommand {
         metadata_fallback: Option<String>,
         /// GET `{base_url}/models` and save chat slugs (embedding/reranker
         /// omitted). Required unless `--model` is given. Catalogs larger than
-        /// 48 models must be picked with `--model`.
+        /// 48 models must be picked with `--model` (or the TUI picker).
         #[arg(long)]
         fetch_models: bool,
         /// Read the API key from stdin instead of an interactive hidden prompt
@@ -95,10 +95,15 @@ pub enum ProviderCommand {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Replace saved models with chat slugs from the provider's GET /models
+    /// Replace saved models with chat slugs from the provider's GET /models.
+    /// Large catalogs must be picked with `--model`.
     FetchModels {
         /// Provider alias
         alias: String,
+        /// Chat slug to keep (repeatable). Required when the gateway lists more
+        /// than 48 chat models.
+        #[arg(long, action = clap::ArgAction::Append)]
+        model: Vec<String>,
     },
 }
 
@@ -476,8 +481,31 @@ mod tests {
         let cli = Cli::try_parse_from(["codex-switch", "provider", "fetch-models", "zai"])
             .expect("fetch-models subcommand");
         match cli.command {
-            Commands::Provider(ProviderCommand::FetchModels { alias }) => {
+            Commands::Provider(ProviderCommand::FetchModels { alias, model }) => {
                 assert_eq!(alias, "zai");
+                assert!(model.is_empty());
+            }
+            _ => panic!("expected provider fetch-models"),
+        }
+    }
+
+    #[test]
+    fn provider_fetch_models_accepts_repeatable_model() {
+        let cli = Cli::try_parse_from([
+            "codex-switch",
+            "provider",
+            "fetch-models",
+            "or",
+            "--model",
+            "openai/gpt-4.1-nano",
+            "--model",
+            "deepseek/deepseek-r1-0528",
+        ])
+        .expect("fetch-models --model");
+        match cli.command {
+            Commands::Provider(ProviderCommand::FetchModels { alias, model }) => {
+                assert_eq!(alias, "or");
+                assert_eq!(model, ["openai/gpt-4.1-nano", "deepseek/deepseek-r1-0528"]);
             }
             _ => panic!("expected provider fetch-models"),
         }
