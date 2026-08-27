@@ -28,6 +28,7 @@ pub enum DaemonCommand {
     Uninstall,
 }
 
+#[allow(clippy::large_enum_variant)] // clap parse-once; Add carries the optional flags
 #[derive(Debug, Clone, Subcommand)]
 pub enum ProviderCommand {
     /// Add a custom API provider (e.g. OpenRouter) for launching Codex with a third-party model
