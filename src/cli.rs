@@ -32,7 +32,7 @@ pub enum DaemonCommand {
 pub enum ProviderCommand {
     /// Add a custom API provider (e.g. OpenRouter) for launching Codex with a third-party model
     #[command(
-        after_help = "The API key is read from a hidden prompt (or stdin with --api-key-stdin), never from the command line.\n--model is repeatable; the first is the default. --reasoning / --no-web-search attach to the most recent --model.\n\nExample:\n  codex-switch provider add openrouter \\\n    --base-url https://openrouter.ai/api/v1 \\\n    --model openai/gpt-5.3-codex \\\n    --model deepseek/deepseek-r1-0528 --reasoning high"
+        after_help = "The API key is read from a hidden prompt (or stdin with --api-key-stdin), never from the command line.\n--model is repeatable; the first is the default. --reasoning / --no-web-search attach to the most recent --model.\n--fetch-models GETs {base_url}/models and saves chat slugs (embedding/reranker omitted). Use it instead of, or together with, --model. Catalogs larger than 48 models (OpenRouter-sized) are not imported; pass --model.\n\nExample:\n  codex-switch provider add openrouter \\\n    --base-url https://openrouter.ai/api/v1 \\\n    --model openai/gpt-5.3-codex \\\n    --model deepseek/deepseek-r1-0528 --reasoning high\n  printf '%s' \"$KEY\" | codex-switch provider add zai --base-url https://api.example/v1 --fetch-models --api-key-stdin"
     )]
     Add {
         /// Provider alias (the only user-facing name)
@@ -41,7 +41,7 @@ pub enum ProviderCommand {
         #[arg(long)]
         base_url: String,
         /// Model id (repeatable; first is the default). For OpenRouter, the full slug
-        #[arg(long, required = true, action = clap::ArgAction::Append)]
+        #[arg(long, action = clap::ArgAction::Append)]
         model: Vec<String>,
         /// Environment variable Codex reads the key from (defaults to a codex-switch-owned name)
         #[arg(long)]
@@ -64,6 +64,11 @@ pub enum ProviderCommand {
         /// OpenRouter list (no login).
         #[arg(long = "metadata-fallback", value_name = "URL|PATH|none")]
         metadata_fallback: Option<String>,
+        /// GET `{base_url}/models` and save chat slugs (embedding/reranker
+        /// omitted). Required unless `--model` is given. Catalogs larger than
+        /// 48 models must be picked with `--model`.
+        #[arg(long)]
+        fetch_models: bool,
         /// Read the API key from stdin instead of an interactive hidden prompt
         #[arg(long)]
         api_key_stdin: bool,
@@ -90,6 +95,11 @@ pub enum ProviderCommand {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Replace saved models with chat slugs from the provider's GET /models
+    FetchModels {
+        /// Provider alias
+        alias: String,
+    },
 }
 
 #[derive(Parser)]
@@ -101,7 +111,7 @@ pub enum ProviderCommand {
     after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, launch, reset-card, rename, delete, login, import, self-update, daemon status, provider add/list/show/rename/remove)
+    /// Output as compact JSON (supported by list, use, launch, reset-card, rename, delete, login, import, self-update, daemon status, provider add/list/show/rename/remove/fetch-models)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -432,6 +442,44 @@ mod tests {
                 );
             }
             _ => panic!("expected provider add"),
+        }
+    }
+
+    #[test]
+    fn provider_add_allows_fetch_models_without_model() {
+        let cli = Cli::try_parse_from([
+            "codex-switch",
+            "provider",
+            "add",
+            "zai",
+            "--base-url",
+            "https://example.test/v1",
+            "--fetch-models",
+            "--api-key-stdin",
+        ])
+        .expect("--fetch-models must satisfy the model list");
+        match cli.command {
+            Commands::Provider(ProviderCommand::Add {
+                fetch_models,
+                model,
+                ..
+            }) => {
+                assert!(fetch_models);
+                assert!(model.is_empty());
+            }
+            _ => panic!("expected provider add"),
+        }
+    }
+
+    #[test]
+    fn provider_fetch_models_subcommand_parses() {
+        let cli = Cli::try_parse_from(["codex-switch", "provider", "fetch-models", "zai"])
+            .expect("fetch-models subcommand");
+        match cli.command {
+            Commands::Provider(ProviderCommand::FetchModels { alias }) => {
+                assert_eq!(alias, "zai");
+            }
+            _ => panic!("expected provider fetch-models"),
         }
     }
 

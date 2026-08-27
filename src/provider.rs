@@ -504,8 +504,8 @@ impl ProviderProfile {
 /// by "degrade performance".
 const DEFAULT_PROVIDER_CONTEXT_WINDOW: i64 = 1_048_576;
 
-/// Gateways at or under this size are injected wholesale into Codex `/model`.
-/// Larger catalogs (OpenRouter is hundreds) stay limited to saved slugs.
+/// Gateways at or under this size can be imported with `--fetch-models` / TUI
+/// `f`. Larger catalogs (OpenRouter is hundreds) must be picked with `--model`.
 const SMALL_REMOTE_CATALOG_LIMIT: usize = 48;
 
 const GATEWAY_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
@@ -583,14 +583,40 @@ fn same_models_endpoint(base_url: &str, fallback_source: &str) -> bool {
 /// `GET {base_url}/models` with the provider key. Failure is the caller's to
 /// swallow: launch must still proceed with generated defaults.
 pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Vec<RemoteModel>> {
-    let url = format!("{}/models", profile.base_url.trim_end_matches('/'));
-    let models = fetch_models_url(&url, Some(profile.api_key.as_str())).await?;
+    let models = fetch_gateway_models_at(&profile.base_url, &profile.api_key).await?;
     debug!(
         "provider '{}' gateway /models returned {} entries",
         profile.alias,
         models.len()
     );
     Ok(models)
+}
+
+pub(crate) async fn fetch_gateway_models_at(
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<RemoteModel>> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    fetch_models_url(&url, Some(api_key)).await
+}
+
+/// Same as [`fetch_gateway_models_at`] from a sync caller (CLI add, TUI `f`).
+pub(crate) fn fetch_gateway_models_blocking(
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<RemoteModel>> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(fetch_gateway_models_at(base_url, api_key))
+        }),
+        Err(_) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("starting runtime for gateway /models")?;
+            runtime.block_on(fetch_gateway_models_at(base_url, api_key))
+        }
+    }
 }
 
 pub(crate) async fn fetch_fallback_models(source: &str) -> Result<Vec<RemoteModel>> {
@@ -673,7 +699,7 @@ fn needs_metadata_fallback(
     if same_models_endpoint(base_url, fallback_source) {
         return false;
     }
-    select_catalog_slugs(saved, primary).iter().any(|slug| {
+    select_catalog_slugs(saved).iter().any(|slug| {
         find_exact_model(primary, slug)
             .and_then(|model| model.context_window)
             .is_none()
@@ -869,21 +895,114 @@ fn overlay_remote_metadata(
     })
 }
 
-fn select_catalog_slugs(saved: &[String], remote: &[RemoteModel]) -> Vec<String> {
+fn select_catalog_slugs(saved: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for slug in saved {
         if !slug.is_empty() && !out.iter().any(|existing| existing == slug) {
             out.push(slug.clone());
         }
     }
-    if !remote.is_empty() && remote.len() <= SMALL_REMOTE_CATALOG_LIMIT {
-        for model in remote {
-            if !out.iter().any(|existing| existing == &model.slug) {
-                out.push(model.slug.clone());
-            }
+    out
+}
+
+/// Embedding / reranker slugs cannot run Codex's Responses loop.
+pub(crate) fn is_vector_model_slug(slug: &str) -> bool {
+    slug.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "embed" | "embedding" | "embeddings" | "rerank" | "reranker" | "reranking"
+            )
+        })
+}
+
+/// Chat slugs a user can import from a gateway `/models` body.
+/// Embedding and reranker ids are dropped. Catalogs larger than
+/// [`SMALL_REMOTE_CATALOG_LIMIT`] must be picked with `--model`.
+pub(crate) fn chat_slugs_from_gateway(remote: &[RemoteModel]) -> Result<Vec<String>> {
+    if remote.is_empty() {
+        anyhow::bail!("gateway /models returned no models");
+    }
+    if remote.len() > SMALL_REMOTE_CATALOG_LIMIT {
+        anyhow::bail!(
+            "gateway listed {} models; pass --model to pick slugs",
+            remote.len()
+        );
+    }
+    let mut out = Vec::new();
+    for model in remote {
+        if model.slug.is_empty() || is_vector_model_slug(&model.slug) {
+            continue;
+        }
+        if !out.iter().any(|existing| existing == &model.slug) {
+            out.push(model.slug.clone());
         }
     }
-    out
+    if out.is_empty() {
+        anyhow::bail!(
+            "gateway /models listed only embedding/reranker ids; pass --model for a chat slug"
+        );
+    }
+    Ok(out)
+}
+
+fn settings_for(existing: &[ProviderModel], slug: &str) -> ProviderModel {
+    existing
+        .iter()
+        .find(|model| model.id == slug)
+        .cloned()
+        .unwrap_or_else(|| ProviderModel::from_id(slug))
+}
+
+/// Build the saved model list from a gateway fetch.
+///
+/// `prepend` (CLI `--model`) stays first and keeps its settings. Other gateway
+/// chat slugs are appended. Matching ids reuse existing reasoning /
+/// `no_web_search`. Default is `current_default` when still present, else the
+/// first model in the result.
+pub(crate) fn apply_fetched_models(
+    existing: &[ProviderModel],
+    current_default: Option<&str>,
+    remote: &[RemoteModel],
+    prepend: &[ProviderModel],
+) -> Result<(Vec<ProviderModel>, String)> {
+    let fetched = chat_slugs_from_gateway(remote)?;
+    let mut models: Vec<ProviderModel> = Vec::new();
+    for model in prepend {
+        if model.id.is_empty() {
+            continue;
+        }
+        if !models.iter().any(|row| row.id == model.id) {
+            models.push(model.clone());
+        }
+    }
+    for slug in &fetched {
+        if !models.iter().any(|row| row.id == *slug) {
+            models.push(settings_for(existing, slug));
+        }
+    }
+    let default = current_default
+        .filter(|id| models.iter().any(|model| model.id == *id))
+        .map(str::to_string)
+        .or_else(|| models.first().map(|model| model.id.clone()))
+        .ok_or_else(|| anyhow::anyhow!("pass --model ID or --fetch-models"))?;
+    Ok((models, default))
+}
+
+/// Replace `profile.models` with chat slugs from the gateway. Matching ids keep
+/// their reasoning / `no_web_search`. The default stays if it is still listed.
+pub(crate) async fn fetch_and_apply_models(profile: &mut ProviderProfile) -> Result<usize> {
+    let remote = fetch_gateway_models(profile).await?;
+    let (models, default) = apply_fetched_models(
+        &profile.models,
+        Some(profile.default_model.as_str()),
+        &remote,
+        &[],
+    )?;
+    let n = models.len();
+    profile.models = models;
+    profile.default_model = default;
+    Ok(n)
 }
 
 fn entry_context_window(
@@ -914,7 +1033,7 @@ fn build_model_catalog(
     user_context: Option<i64>,
     default_reasoning: Option<&str>,
 ) -> serde_json::Value {
-    let models: Vec<serde_json::Value> = select_catalog_slugs(saved, remote)
+    let models: Vec<serde_json::Value> = select_catalog_slugs(saved)
         .iter()
         .enumerate()
         .map(|(index, slug)| {
@@ -1677,8 +1796,18 @@ api_key = "sk-legacy-key"
         assert!(!provider_dir("zai").unwrap().join("models.json").exists());
     }
 
+    fn remote(slug: &str) -> RemoteModel {
+        RemoteModel {
+            slug: slug.into(),
+            display_name: None,
+            description: None,
+            context_window: Some(8_192),
+            input_modalities: vec![],
+        }
+    }
+
     #[test]
-    fn small_remote_catalog_is_injected_with_the_default_first() {
+    fn catalog_lists_only_saved_slugs_even_when_the_gateway_is_small() {
         let remote = vec![
             RemoteModel {
                 slug: "glm-5.3".into(),
@@ -1704,7 +1833,125 @@ api_key = "sk-legacy-key"
             None,
         );
         assert_eq!(catalog["models"][0]["slug"], "glm-5.3-flash");
-        assert_eq!(catalog["models"][1]["slug"], "glm-5.3");
-        assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
+        assert_eq!(catalog["models"][0]["display_name"], "GLM Flash");
+    }
+
+    #[test]
+    fn fetch_drops_embedding_and_reranker_slugs() {
+        let slugs = chat_slugs_from_gateway(&[
+            remote("glm-5.3-flash"),
+            remote("deepseek-v4-flash"),
+            remote("Qwen/Qwen3-Embedding-0.6B"),
+            remote("Qwen/Qwen3-Reranker-8B"),
+            remote("text-embedding-3-small"),
+            remote("nomic-embed-text"),
+        ])
+        .unwrap();
+        assert_eq!(slugs, vec!["glm-5.3-flash", "deepseek-v4-flash"]);
+        assert!(!is_vector_model_slug("glm-5.3-flash"));
+        assert!(!is_vector_model_slug("remember"));
+        assert!(is_vector_model_slug("Qwen/Qwen3-Embedding-4B"));
+        assert!(is_vector_model_slug("BAAI/bge-reranker-v2-m3"));
+    }
+
+    #[test]
+    fn fetch_refuses_an_openrouter_sized_catalog() {
+        let remote: Vec<RemoteModel> = (0..SMALL_REMOTE_CATALOG_LIMIT + 1)
+            .map(|i| remote(&format!("model-{i}")))
+            .collect();
+        let err = chat_slugs_from_gateway(&remote).unwrap_err().to_string();
+        assert!(
+            err.contains("pass --model"),
+            "large catalogs must be picked by hand: {err}"
+        );
+    }
+
+    #[test]
+    fn fetch_keeps_cli_models_first_and_reuses_saved_settings() {
+        let existing = vec![ProviderModel {
+            id: "glm-5.3-flash".into(),
+            reasoning: Some("high".into()),
+            no_web_search: true,
+        }];
+        let prepend = vec![ProviderModel::from_id("composer-2.5")];
+        let (models, default) = apply_fetched_models(
+            &existing,
+            Some("composer-2.5"),
+            &[remote("glm-5.3-flash"), remote("deepseek-v4-flash")],
+            &prepend,
+        )
+        .unwrap();
+        assert_eq!(default, "composer-2.5");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["composer-2.5", "glm-5.3-flash", "deepseek-v4-flash"]
+        );
+        assert_eq!(models[1].reasoning.as_deref(), Some("high"));
+        assert!(models[1].no_web_search);
+    }
+
+    #[test]
+    fn fetch_replaces_the_saved_list_and_keeps_a_still_listed_default() {
+        let existing = vec![
+            ProviderModel::from_id("composer-2.5"),
+            ProviderModel {
+                id: "glm-5.3-flash".into(),
+                reasoning: Some("low".into()),
+                no_web_search: false,
+            },
+        ];
+        let (models, default) = apply_fetched_models(
+            &existing,
+            Some("glm-5.3-flash"),
+            &[remote("glm-5.3-flash"), remote("gemini-3-flash")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(default, "glm-5.3-flash");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["glm-5.3-flash", "gemini-3-flash"]
+        );
+        assert_eq!(models[0].reasoning.as_deref(), Some("low"));
+    }
+
+    #[tokio::test]
+    async fn fetch_gateway_models_at_reads_openai_style_ids() {
+        use axum::Json;
+        use axum::Router;
+        use axum::routing::get;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(serde_json::json!({
+                    "data": [
+                        {"id": "glm-5.3-flash"},
+                        {"id": "Qwen/Qwen3-Embedding-0.6B"}
+                    ]
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let remote = fetch_gateway_models_at(&format!("http://{addr}/v1"), "sk-test")
+            .await
+            .expect("GET /v1/models");
+        server.abort();
+        assert_eq!(
+            chat_slugs_from_gateway(&remote).unwrap(),
+            vec!["glm-5.3-flash"]
+        );
     }
 }
