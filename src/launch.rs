@@ -722,7 +722,68 @@ mod tests {
 
     #[test]
     fn ensure_codex_available_looks_up_path_without_running_codex() {
-        ensure_codex_available().expect("codex is installed in this environment");
+        let _lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = if cfg!(windows) {
+            dir.path().join("codex.exe")
+        } else {
+            dir.path().join("codex")
+        };
+        std::fs::write(&fake, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let previous = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", dir.path());
+        }
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("PATH", value),
+                        None => std::env::remove_var("PATH"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(previous);
+        ensure_codex_available().expect("a PATH file named codex is enough; do not run it");
+    }
+
+    #[test]
+    fn ensure_codex_available_fails_when_codex_is_not_on_path() {
+        let _lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let empty = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", empty.path());
+        }
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("PATH", value),
+                        None => std::env::remove_var("PATH"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(previous);
+        let err = ensure_codex_available().unwrap_err().to_string();
+        assert!(
+            err.contains("codex not found in PATH"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
