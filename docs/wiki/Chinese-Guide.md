@@ -129,7 +129,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 | `/` | 过滤账号 |
 | `r` | 刷新当前可见账号 |
 | `a` | 添加账号 |
-| `o` | 用选中账号启动 Codex |
+| `o` | 启动 Codex：先选模型（含 Codex 默认）、可改本次 reasoning 和额外参数 |
 | `Space` | 勾选 / 取消勾选（批量操作） |
 | `t` | 开关自动刷新 |
 | `W` | 开关自动预热（5h 窗口过期时） |
@@ -137,7 +137,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 | `s` | 循环排序（名称 / 额度 / 状态） |
 | `Esc` | 清除过滤、勾选或关闭弹层 |
 
-在账号菜单内：`u` 切换、`o` 启动、`w` 预热、`l` **重新登录**、`c` 消耗最早过期的重置卡、`n` 改名、`d` 删除（均需确认）。批量菜单内 `r` / `w` / `l` / `d` 作用于已勾选账号。
+在账号菜单内：`u` 切换、`o` 打开启动选择器、`w` 预热、`l` **重新登录**、`c` 消耗最早过期的重置卡、`n` 改名、`d` 删除（均需确认）。批量菜单内 `r` / `w` / `l` / `d` 作用于已勾选账号。
 
 ### Providers 页
 

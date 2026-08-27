@@ -1,5 +1,6 @@
-//! Launch picker for a custom API provider: choose one saved model and the
-//! reasoning effort for this session. The saved provider file is not written.
+//! Launch picker for a ChatGPT account or a custom API provider: choose a
+//! model, optional reasoning, and extra Codex argv for this session. Saved
+//! provider files are not written.
 
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -12,10 +13,19 @@ use super::popup::{self, PopupState};
 use super::provider_form::{REASONING_CHOICES, reasoning_choice};
 use super::theme::{base, dim, header, key};
 use crate::provider::{ProviderProfile, ReasoningLaunch};
+use crate::warmup::ModelEntry;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchKind {
+    Provider,
+    Account,
+}
 
 #[derive(Debug, Clone)]
 struct LaunchModel {
+    /// Empty id means "Codex default" (no `--model`).
     id: String,
+    title: String,
     saved_reasoning: Option<String>,
     no_web_search: bool,
     is_default: bool,
@@ -23,6 +33,7 @@ struct LaunchModel {
 
 pub struct ProviderLaunchState {
     pub popup: PopupState,
+    kind: LaunchKind,
     alias: String,
     models: Vec<LaunchModel>,
     selected: usize,
@@ -51,6 +62,7 @@ impl ProviderLaunchState {
             .iter()
             .map(|model| LaunchModel {
                 id: model.id.clone(),
+                title: model.id.clone(),
                 saved_reasoning: model.reasoning.clone(),
                 no_web_search: model.no_web_search,
                 is_default: model.id.trim() == profile.default_model.trim(),
@@ -66,11 +78,52 @@ impl ProviderLaunchState {
             .unwrap_or((0, None));
         Self {
             popup: PopupState::new(),
+            kind: LaunchKind::Provider,
             alias: profile.alias.clone(),
             models,
             selected,
             reasoning_idx,
             custom_reasoning,
+            extra_args: String::new(),
+            extra_editing: false,
+            extra_cursor: 0,
+        }
+    }
+
+    /// ChatGPT account picker. First row is Codex's own default (no `--model`).
+    /// Cached `/models` slugs follow when the TUI already fetched them.
+    pub fn from_chatgpt(alias: impl Into<String>, models: &[ModelEntry]) -> Self {
+        let mut launch_models = vec![LaunchModel {
+            id: String::new(),
+            title: "(Codex default)".into(),
+            saved_reasoning: None,
+            no_web_search: false,
+            is_default: true,
+        }];
+        for model in crate::warmup::sorted_models_for_display(models) {
+            let title = model
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(model.slug.as_str())
+                .to_string();
+            launch_models.push(LaunchModel {
+                id: model.slug.clone(),
+                title,
+                saved_reasoning: model.default_reasoning_effort.clone(),
+                no_web_search: false,
+                is_default: false,
+            });
+        }
+        Self {
+            popup: PopupState::new(),
+            kind: LaunchKind::Account,
+            alias: alias.into(),
+            models: launch_models,
+            selected: 0,
+            reasoning_idx: 0,
+            custom_reasoning: None,
             extra_args: String::new(),
             extra_editing: false,
             extra_cursor: 0,
@@ -236,14 +289,23 @@ impl ProviderLaunchState {
 pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    let (kind_label, title, hint) = match state.kind {
+        LaunchKind::Provider => (
+            "Provider  ",
+            "Launch provider",
+            "Pick a saved model. Reasoning applies to this launch only.",
+        ),
+        LaunchKind::Account => (
+            "Account   ",
+            "Launch account",
+            "Pick a Codex model, or the default. Reasoning and extra args apply to this launch only.",
+        ),
+    };
     lines.push(Line::from(vec![
-        Span::styled("Provider  ", dim()),
+        Span::styled(kind_label, dim()),
         Span::styled(state.alias.clone(), header()),
     ]));
-    lines.push(Line::from(Span::styled(
-        "Pick a saved model. Reasoning applies to this launch only.",
-        dim(),
-    )));
+    lines.push(Line::from(Span::styled(hint, dim())));
     lines.push(Line::from(""));
 
     for (idx, model) in state.models.iter().enumerate() {
@@ -258,7 +320,7 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
         let style = if selected { header() } else { base() };
         lines.push(Line::from(vec![
             Span::styled(marker, key()),
-            Span::styled(format!("{}{default}{search}", model.id), style),
+            Span::styled(format!("{}{default}{search}", model.title), style),
         ]));
     }
 
@@ -301,7 +363,7 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
         Span::styled(" cancel", dim()),
     ]));
 
-    popup::render_popup(f, "Launch provider", &lines, &mut state.popup, area);
+    popup::render_popup(f, title, &lines, &mut state.popup, area);
 }
 
 #[cfg(test)]
@@ -310,6 +372,7 @@ mod tests {
 
     use super::{LaunchPickerOutcome, ProviderLaunchState};
     use crate::provider::{ProviderModel, ProviderProfile, ReasoningLaunch};
+    use crate::warmup::ModelEntry;
 
     fn profile() -> ProviderProfile {
         let mut p = ProviderProfile::build(
@@ -448,5 +511,67 @@ mod tests {
         };
         assert_eq!(alias, "or");
         assert_eq!(model, "minimax/minimax-m3:free");
+    }
+
+    #[test]
+    fn chatgpt_picker_default_row_launches_without_a_model() {
+        let mut picker = ProviderLaunchState::from_chatgpt("work", &[]);
+        let LaunchPickerOutcome::Launch {
+            alias,
+            model,
+            reasoning,
+            extra_args,
+        } = picker.handle_key(KeyCode::Enter)
+        else {
+            panic!("enter should launch");
+        };
+        assert_eq!(alias, "work");
+        assert!(model.is_empty());
+        assert_eq!(reasoning, ReasoningLaunch::Skip);
+        assert!(extra_args.is_empty());
+    }
+
+    #[test]
+    fn chatgpt_picker_selects_cached_slug_and_its_default_reasoning() {
+        let models = [ModelEntry {
+            slug: "gpt-5.4".into(),
+            display_name: Some("GPT-5.4".into()),
+            default_reasoning_effort: Some("high".into()),
+            ..ModelEntry::default()
+        }];
+        let mut picker = ProviderLaunchState::from_chatgpt("work", &models);
+        picker.handle_key(KeyCode::Down);
+        let LaunchPickerOutcome::Launch {
+            model, reasoning, ..
+        } = picker.handle_key(KeyCode::Enter)
+        else {
+            panic!("enter should launch");
+        };
+        assert_eq!(model, "gpt-5.4");
+        assert_eq!(reasoning, ReasoningLaunch::Effort("high".into()));
+    }
+
+    #[test]
+    fn chatgpt_picker_renders_as_an_account_launch() {
+        let models = [ModelEntry {
+            slug: "gpt-5.4".into(),
+            display_name: Some("GPT-5.4".into()),
+            ..ModelEntry::default()
+        }];
+        let mut picker = ProviderLaunchState::from_chatgpt("work", &models);
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_provider_launch(frame, &mut picker, frame.area()))
+            .unwrap();
+        let joined = (0..20)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Launch account"));
+        assert!(joined.contains("work"));
+        assert!(joined.contains("(Codex default)"));
+        assert!(joined.contains("GPT-5.4"));
+        assert!(!joined.contains("Launch provider"));
     }
 }

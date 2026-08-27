@@ -1341,6 +1341,7 @@ fn short_label(label: &str) -> &str {
         "show this help" => "help",
         "quit" => "quit",
         "launch Codex" => "launch",
+        "launch Codex (pick model, reasoning, extra args)" => "launch",
         other => other,
     }
 }

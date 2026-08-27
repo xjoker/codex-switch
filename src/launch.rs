@@ -89,7 +89,7 @@ async fn launch_interactive(
         return launch_provider(profile, model, reasoning, args, json).await;
     }
 
-    let forwarded = chatgpt_codex_argv(model, args);
+    let forwarded = chatgpt_codex_argv(model, reasoning, args);
 
     let mut revival_hint = None;
     let target_alias = match alias {
@@ -260,14 +260,26 @@ async fn launch_interactive(
     Ok(exit_code)
 }
 
-/// Codex argv for a ChatGPT `launch`: optional `--model` is spliced after a
-/// Codex subcommand in `passthrough` (Codex 0.149 ignores flags in front of
-/// `exec`). Interactive launch has no subcommand, so `--model` stays in front.
-pub(crate) fn chatgpt_codex_argv(model: Option<&str>, passthrough: Vec<String>) -> Vec<String> {
+/// Codex argv for a ChatGPT `launch`: optional `--model` and a one-shot
+/// `model_reasoning_effort` `-c` are spliced after a Codex subcommand in
+/// `passthrough` (Codex 0.149 ignores flags in front of `exec`). Interactive
+/// launch has no subcommand, so those flags stay in front.
+pub(crate) fn chatgpt_codex_argv(
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
+    passthrough: Vec<String>,
+) -> Vec<String> {
     let mut extra = Vec::new();
     if let Some(model) = model.filter(|model| !model.is_empty()) {
         extra.push("--model".to_string());
         extra.push(model.to_string());
+    }
+    if let ReasoningLaunch::Effort(effort) = &reasoning {
+        let effort = effort.trim();
+        if !effort.is_empty() && !effort.eq_ignore_ascii_case("none") {
+            extra.push("-c".to_string());
+            extra.push(format!("model_reasoning_effort={effort}"));
+        }
     }
     splice_after_subcommand(extra, passthrough)
 }
@@ -739,6 +751,7 @@ mod tests {
         chatgpt_codex_argv, ensure_codex_available, passthrough_model_value, provider_codex_argv,
         restore_launch_auth,
     };
+    use crate::provider::ReasoningLaunch;
     // Only the permission assertions call this, and those are unix-only, so an
     // unconditional import is dead on Windows and fails `-D warnings` there.
     #[cfg(unix)]
@@ -749,7 +762,8 @@ mod tests {
         assert_eq!(
             chatgpt_codex_argv(
                 Some("gpt-5.4"),
-                vec!["exec".into(), "--json".into(), "hi".into()]
+                ReasoningLaunch::Saved,
+                vec!["exec".into(), "--json".into(), "hi".into()],
             ),
             ["exec", "--model", "gpt-5.4", "--json", "hi"]
         );
@@ -824,8 +838,52 @@ mod tests {
     #[test]
     fn chatgpt_argv_without_model_is_passthrough_only() {
         assert_eq!(
-            chatgpt_codex_argv(None, vec!["resume".into(), "--last".into()]),
+            chatgpt_codex_argv(
+                None,
+                ReasoningLaunch::Saved,
+                vec!["resume".into(), "--last".into()],
+            ),
             ["resume", "--last"]
+        );
+    }
+
+    #[test]
+    fn chatgpt_argv_puts_model_and_reasoning_after_exec() {
+        assert_eq!(
+            chatgpt_codex_argv(
+                Some("gpt-5.4"),
+                ReasoningLaunch::Effort("high".into()),
+                vec!["exec".into(), "--json".into(), "hi".into()],
+            ),
+            [
+                "exec",
+                "--model",
+                "gpt-5.4",
+                "-c",
+                "model_reasoning_effort=high",
+                "--json",
+                "hi"
+            ]
+        );
+    }
+
+    #[test]
+    fn chatgpt_argv_skip_and_none_reasoning_do_not_add_c() {
+        assert_eq!(
+            chatgpt_codex_argv(
+                Some("gpt-5.4"),
+                ReasoningLaunch::Skip,
+                vec!["exec".into(), "hi".into()],
+            ),
+            ["exec", "--model", "gpt-5.4", "hi"]
+        );
+        assert_eq!(
+            chatgpt_codex_argv(
+                None,
+                ReasoningLaunch::Effort("none".into()),
+                vec!["exec".into(), "hi".into()],
+            ),
+            ["exec", "hi"]
         );
     }
 

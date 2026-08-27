@@ -715,12 +715,36 @@ impl App {
         }
     }
 
+    /// Accounts list / menu `o`: same picker as Providers (model, reasoning, extra argv).
+    pub fn open_account_launch(&mut self) {
+        let Some(idx) = self.selected_account_idx() else {
+            self.set_status_error("No account selected".to_string(), 3);
+            return;
+        };
+        if !self.marked.is_empty() {
+            return;
+        }
+        let alias = self.accounts[idx].alias.clone();
+        self.open_account_launch_for(&alias);
+    }
+
+    pub fn open_account_launch_for(&mut self, alias: &str) {
+        self.ensure_models_loaded(alias);
+        let models = match self.model_cache.get(alias) {
+            Some(ModelStatus::Loaded(models)) => models.clone(),
+            _ => Vec::new(),
+        };
+        self.provider_launch = Some(super::provider_launch::ProviderLaunchState::from_chatgpt(
+            alias, &models,
+        ));
+    }
+
     pub fn handle_provider_launch_key(
         &mut self,
         code: KeyCode,
     ) -> Option<(
         String,
-        String,
+        Option<String>,
         crate::provider::ReasoningLaunch,
         Vec<String>,
     )> {
@@ -738,6 +762,11 @@ impl App {
                 extra_args,
             } => {
                 self.provider_launch = None;
+                let model = if model.trim().is_empty() {
+                    None
+                } else {
+                    Some(model)
+                };
                 Some((alias, model, reasoning, extra_args))
             }
         }
@@ -2140,15 +2169,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                 if let Some((alias, model, reasoning, extra_args)) =
                     app.handle_provider_launch_key(key.code)
                 {
-                    perform_launch(
-                        terminal,
-                        &mut app,
-                        alias,
-                        Some(model),
-                        reasoning,
-                        extra_args,
-                    )
-                    .await;
+                    perform_launch(terminal, &mut app, alias, model, reasoning, extra_args).await;
                 }
                 continue;
             }
@@ -2226,23 +2247,7 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                         }
                         KeyCode::Char('a') => app.open_add_menu(),
                         KeyCode::Char('o') if app.marked.is_empty() => {
-                            if let Some(alias) = app
-                                .selected_account_idx()
-                                .and_then(|idx| app.accounts.get(idx))
-                                .map(|entry| entry.alias.clone())
-                            {
-                                perform_launch(
-                                    terminal,
-                                    &mut app,
-                                    alias,
-                                    None,
-                                    crate::provider::ReasoningLaunch::Saved,
-                                    Vec::new(),
-                                )
-                                .await;
-                            } else {
-                                app.set_status_error("No account selected".to_string(), 3);
-                            }
+                            app.open_account_launch();
                         }
                         KeyCode::Char('r') => app.refresh(Refresh::Forced),
                         KeyCode::Char('t') => app.toggle_auto_refresh(),
@@ -2294,15 +2299,7 @@ async fn handle_menu_key(app: &mut App, terminal: &mut DefaultTerminal, code: Ke
         }
         MenuAction::Launch(alias) => {
             app.close_menu();
-            perform_launch(
-                terminal,
-                app,
-                alias,
-                None,
-                crate::provider::ReasoningLaunch::Saved,
-                Vec::new(),
-            )
-            .await;
+            app.open_account_launch_for(&alias);
         }
         MenuAction::ReloginRequest(alias, email) => {
             app.open_relogin_flow_menu(alias, email);
@@ -2811,7 +2808,7 @@ mod tests {
             .handle_provider_launch_key(KeyCode::Enter)
             .expect("enter launches");
         assert_eq!(alias, "or");
-        assert_eq!(model, "liquid/lfm-2.5-2.6b:free");
+        assert_eq!(model.as_deref(), Some("liquid/lfm-2.5-2.6b:free"));
         assert_eq!(
             reasoning,
             crate::provider::ReasoningLaunch::Effort("high".into())
@@ -2867,6 +2864,94 @@ mod tests {
         app.handle_provider_list_key(KeyCode::Char('o'));
         assert!(app.provider_launch.is_some());
         assert!(app.provider_form.is_none());
+    }
+
+    fn chatgpt_account(alias: &str) -> AccountEntry {
+        AccountEntry {
+            alias: alias.into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        }
+    }
+
+    #[test]
+    fn account_o_opens_launch_picker_and_default_row_omits_model() {
+        let mut app = App::new();
+        app.accounts.push(chatgpt_account("work"));
+        app.view_indices.push(0);
+        app.model_cache.insert(
+            "work".into(),
+            ModelStatus::Loaded(vec![ModelEntry {
+                slug: "gpt-5.4".into(),
+                display_name: Some("GPT-5.4".into()),
+                default_reasoning_effort: Some("medium".into()),
+                ..ModelEntry::default()
+            }]),
+        );
+        app.open_account_launch();
+        assert!(app.provider_launch.is_some());
+        let (alias, model, reasoning, extra_args) = app
+            .handle_provider_launch_key(KeyCode::Enter)
+            .expect("enter launches the Codex default");
+        assert_eq!(alias, "work");
+        assert_eq!(model, None);
+        assert_eq!(reasoning, crate::provider::ReasoningLaunch::Skip);
+        assert!(extra_args.is_empty());
+    }
+
+    #[test]
+    fn account_launch_picker_picks_cached_model_reasoning_and_extra_args() {
+        let mut app = App::new();
+        app.accounts.push(chatgpt_account("work"));
+        app.view_indices.push(0);
+        app.model_cache.insert(
+            "work".into(),
+            ModelStatus::Loaded(vec![ModelEntry {
+                slug: "gpt-5.4".into(),
+                display_name: Some("GPT-5.4".into()),
+                default_reasoning_effort: Some("high".into()),
+                ..ModelEntry::default()
+            }]),
+        );
+        app.open_account_launch();
+        assert!(app.handle_provider_launch_key(KeyCode::Down).is_none());
+        assert!(app.handle_provider_launch_key(KeyCode::Tab).is_none());
+        for c in "exec --json ping".chars() {
+            assert!(app.handle_provider_launch_key(KeyCode::Char(c)).is_none());
+        }
+        let (alias, model, reasoning, extra_args) = app
+            .handle_provider_launch_key(KeyCode::Enter)
+            .expect("enter launches");
+        assert_eq!(alias, "work");
+        assert_eq!(model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(
+            reasoning,
+            crate::provider::ReasoningLaunch::Effort("high".into())
+        );
+        assert_eq!(extra_args, ["exec", "--json", "ping"]);
+    }
+
+    #[test]
+    fn account_menu_o_opens_the_same_launch_picker() {
+        let mut app = App::new();
+        app.accounts.push(chatgpt_account("work"));
+        app.view_indices.push(0);
+        app.model_cache
+            .insert("work".into(), ModelStatus::Loaded(Vec::new()));
+        app.open_account_menu();
+        let mut menu = app.menu.take().expect("account menu");
+        assert!(matches!(
+            menu.handle_key(KeyCode::Char('o')),
+            crate::tui::menu::MenuAction::Launch(alias) if alias == "work"
+        ));
+        app.open_account_launch_for("work");
+        assert!(app.provider_launch.is_some());
+        let (alias, model, ..) = app
+            .handle_provider_launch_key(KeyCode::Char('o'))
+            .expect("picker o launches");
+        assert_eq!(alias, "work");
+        assert_eq!(model, None);
     }
 
     #[test]
