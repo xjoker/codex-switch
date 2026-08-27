@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v20260827.3.0 — 2026-08-27
+
 - **Provider models from the gateway or by hand** — Codex `/model` lists only the models saved on the provider. Fill them with `--model`, or import chat slugs from `GET {base_url}/models` (`provider add --fetch-models`, `provider fetch-models <alias>`, TUI `f`). Embedding and reranker ids are omitted. Catalogs larger than 48 models (OpenRouter-sized) are not imported wholesale.
 
 ## v20260827.2.0 — 2026-08-27
