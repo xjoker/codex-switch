@@ -281,7 +281,7 @@ async fn dispatch(
         }
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => commands::open_cmd()?,
-        Commands::Provider(sub) => commands::provider_cmd(sub, json)?,
+        Commands::Provider(sub) => commands::provider_cmd(sub, json).await?,
         Commands::Daemon(sub) => daemon::dispatch(sub, json).await?,
     }
 

@@ -4,7 +4,8 @@
 //! continues into the next one (Alias → URL → Key → Models). Tab always
 //! moves between every field, including env key, wire API, and extra `-c`.
 //! `j`/`k` move inside Models, which includes a visible `+ add model` row.
-//! `+` adds and `d`/`-` remove from navigation mode. Edit starts on Base URL
+//! `+` adds and `d`/`-` remove from navigation mode. `f` GETs `{base_url}/models`
+//! and fills chat slugs (embedding/reranker omitted). Edit starts on Base URL
 //! so `s` is save, not a character.
 
 use crossterm::event::KeyCode;
@@ -16,7 +17,10 @@ use ratatui::{
 
 use super::popup::{self, PopupState};
 use super::theme::{C_GREEN, C_RED, base, dim, header, key};
-use crate::provider::{ProviderModel, ProviderProfile};
+use crate::provider::{
+    ProviderModel, ProviderProfile, RemoteModel, apply_fetched_models,
+    fetch_gateway_models_blocking,
+};
 
 /// Reasoning-effort presets. Index 0 skips the override; the rest are saved as
 /// `model_reasoning_effort=<v>`. CLI `--reasoning` remains the escape hatch for
@@ -250,6 +254,10 @@ impl ProviderFormState {
                 self.toggle_web_search();
                 FormOutcome::Continue
             }
+            KeyCode::Char('f') => {
+                self.fetch_from_gateway();
+                FormOutcome::Continue
+            }
             _ => FormOutcome::Continue,
         }
     }
@@ -446,6 +454,81 @@ impl ProviderFormState {
         }
         let model = &mut self.models[self.model_idx];
         model.no_web_search = !model.no_web_search;
+    }
+
+    fn fetch_from_gateway(&mut self) {
+        let url = self.base_url.trim();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            self.error = Some("Base URL must start with http:// or https://".into());
+            return;
+        }
+        let key = if !self.api_key.trim().is_empty() {
+            self.api_key.trim()
+        } else if self.mode == FormMode::Edit && !self.original_key.trim().is_empty() {
+            self.original_key.trim()
+        } else {
+            self.error = Some("API key cannot be empty".into());
+            return;
+        };
+        match fetch_gateway_models_blocking(url, key) {
+            Ok(remote) => {
+                if let Err(err) = self.apply_fetched(&remote) {
+                    self.error = Some(err);
+                }
+            }
+            Err(err) => self.error = Some(format!("Fetch models failed: {err}")),
+        }
+    }
+
+    fn apply_fetched(&mut self, remote: &[RemoteModel]) -> Result<(), String> {
+        let existing: Vec<ProviderModel> = self
+            .models
+            .iter()
+            .filter(|draft| !draft.id.trim().is_empty())
+            .map(|draft| ProviderModel {
+                id: draft.id.trim().to_string(),
+                reasoning: if let Some(custom) = &draft.custom_reasoning {
+                    Some(custom.clone())
+                } else if draft.reasoning_idx == 0 {
+                    None
+                } else {
+                    Some(REASONING_CHOICES[draft.reasoning_idx].to_string())
+                },
+                no_web_search: draft.no_web_search,
+            })
+            .collect();
+        let current_default = self
+            .models
+            .get(self.default_idx)
+            .map(|draft| draft.id.trim().to_string())
+            .filter(|id| !id.is_empty());
+        let (models, default) =
+            apply_fetched_models(&existing, current_default.as_deref(), remote, &[])
+                .map_err(|err| err.to_string())?;
+        self.models = models
+            .iter()
+            .map(|model| {
+                let (reasoning_idx, custom_reasoning) =
+                    reasoning_choice(model.reasoning.as_deref());
+                ModelDraft {
+                    id: model.id.clone(),
+                    reasoning_idx,
+                    custom_reasoning,
+                    no_web_search: model.no_web_search,
+                }
+            })
+            .collect();
+        self.default_idx = self
+            .models
+            .iter()
+            .position(|draft| draft.id == default)
+            .unwrap_or(0);
+        self.model_idx = self.default_idx;
+        self.focus = Focus::Models;
+        self.editing = false;
+        self.input.clear();
+        self.cursor = 0;
+        Ok(())
     }
 
     fn auto_edit_if_typing_field(&mut self) {
@@ -823,7 +906,7 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
     lines.push(Line::from(vec![
         Span::styled(if add_selected { "▶ " } else { "  " }, base().fg(C_GREEN)),
         Span::styled("+ add model", if add_selected { header() } else { dim() }),
-        Span::styled("   d/- remove", dim()),
+        Span::styled("   d/- remove   f fetch", dim()),
     ]));
     if let Some(error) = &form.error {
         lines.push(Line::from(""));
@@ -867,6 +950,8 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             Span::styled(" search  ", dim()),
             Span::styled("*", key()),
             Span::styled(" default  ", dim()),
+            Span::styled("f", key()),
+            Span::styled(" fetch  ", dim()),
             Span::styled("s", key()),
             Span::styled(" save  ", dim()),
             Span::styled("esc", key()),
@@ -1328,5 +1413,57 @@ mod tests {
         assert_eq!(profile.env_key, "MY_CUSTOM_KEY");
         assert_eq!(profile.wire_api, "responses");
         assert_eq!(profile.codex_config, ["temperature=0", "foo=bar"]);
+    }
+
+    #[test]
+    fn fetch_fills_chat_slugs_and_drops_embeddings() {
+        let original = ProviderProfile::build(
+            "demo",
+            "https://example.test/v1",
+            vec![ProviderModel::from_id("composer-2.5")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.apply_fetched(&[
+            crate::provider::RemoteModel {
+                slug: "glm-5.3-flash".into(),
+                display_name: None,
+                description: None,
+                context_window: Some(1_048_576),
+                input_modalities: vec![],
+            },
+            crate::provider::RemoteModel {
+                slug: "Qwen/Qwen3-Embedding-0.6B".into(),
+                display_name: None,
+                description: None,
+                context_window: Some(8_192),
+                input_modalities: vec![],
+            },
+            crate::provider::RemoteModel {
+                slug: "gemini-3-flash".into(),
+                display_name: None,
+                description: None,
+                context_window: Some(8_192),
+                input_modalities: vec![],
+            },
+        ])
+        .expect("gateway chat slugs");
+        let ids: Vec<&str> = form.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["glm-5.3-flash", "gemini-3-flash"]);
+        assert_eq!(form.models[form.default_idx].id, "glm-5.3-flash");
+    }
+
+    #[test]
+    fn fetch_without_a_url_reports_an_error() {
+        let mut form = ProviderFormState::add();
+        form.handle_key(KeyCode::Esc);
+        form.handle_key(KeyCode::Char('f'));
+        assert!(
+            form.error
+                .as_deref()
+                .is_some_and(|e| e.contains("Base URL")),
+            "error was {:?}",
+            form.error
+        );
     }
 }

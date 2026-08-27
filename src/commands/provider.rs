@@ -7,7 +7,7 @@ use crate::cli::ProviderCommand;
 use crate::output::{JsonOk, print_json, user_println};
 use crate::provider::{self, ProviderProfile};
 
-pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
+pub(crate) async fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
     match cmd {
         ProviderCommand::Add {
             alias,
@@ -19,32 +19,39 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
             no_web_search: _,
             set,
             metadata_fallback,
+            fetch_models,
             api_key_stdin,
-        } => add(
-            alias,
-            base_url,
-            env_key,
-            wire_api,
-            set,
-            metadata_fallback,
-            api_key_stdin,
-            json,
-        ),
+        } => {
+            add(
+                alias,
+                base_url,
+                env_key,
+                wire_api,
+                set,
+                metadata_fallback,
+                fetch_models,
+                api_key_stdin,
+                json,
+            )
+            .await
+        }
         ProviderCommand::List => list(json),
         ProviderCommand::Show { alias } => show(&alias, json),
         ProviderCommand::Rename { old, new } => rename(&old, &new, json),
         ProviderCommand::Remove { alias, yes } => remove(&alias, yes, json),
+        ProviderCommand::FetchModels { alias } => refresh_models(&alias, json).await,
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn add(
+async fn add(
     alias: String,
     base_url: String,
     env_key: Option<String>,
     wire_api: String,
     set: Vec<String>,
     metadata_fallback: Option<String>,
+    fetch_models: bool,
     api_key_stdin: bool,
     json: bool,
 ) -> Result<()> {
@@ -57,12 +64,25 @@ fn add(
     }
 
     let argv: Vec<String> = std::env::args().collect();
-    let models = provider::models_from_cli_args(&argv)?;
-    if models.is_empty() {
-        anyhow::bail!("at least one --model is required");
+    let mut models = provider::models_from_cli_args(&argv)?;
+    if models.is_empty() && !fetch_models {
+        anyhow::bail!("pass --model ID or --fetch-models");
     }
 
     let api_key = read_api_key(&alias, api_key_stdin)?;
+
+    let mut fetched_default = None;
+    if fetch_models {
+        let remote = provider::fetch_gateway_models_at(&base_url, &api_key).await?;
+        let default_hint = models.first().map(|model| model.id.clone());
+        let (merged, default) =
+            provider::apply_fetched_models(&[], default_hint.as_deref(), &remote, &models)?;
+        models = merged;
+        fetched_default = Some(default);
+    }
+    if models.is_empty() {
+        anyhow::bail!("pass --model ID or --fetch-models");
+    }
 
     let mut profile = ProviderProfile::build(&alias, base_url, models, api_key);
     if let Some(env_key) = env_key {
@@ -70,16 +90,22 @@ fn add(
     }
     profile.wire_api = wire_api;
     profile.codex_config = set;
+    if let Some(default) = fetched_default {
+        profile.default_model = default;
+    }
     if let Some(fallback) = metadata_fallback {
         profile.metadata_fallback = fallback;
     }
     profile.validate()?;
     provider::save(&profile)?;
+    print_added(&profile, json)
+}
 
+fn print_added(profile: &ProviderProfile, json: bool) -> Result<()> {
     if json {
         print_json(&JsonOk {
             ok: true,
-            alias,
+            alias: profile.alias.clone(),
             action: "provider-added".into(),
         });
     } else {
@@ -95,6 +121,33 @@ fn add(
         user_println(&format!(
             "  key stored; Codex reads it from ${} at launch",
             profile.env_key
+        ));
+    }
+    Ok(())
+}
+
+async fn refresh_models(alias: &str, json: bool) -> Result<()> {
+    let mut profile = provider::load(alias)?;
+    let count = provider::fetch_and_apply_models(&mut profile).await?;
+    profile.validate()?;
+    provider::save(&profile)?;
+    if json {
+        print_json(&serde_json::json!({
+            "ok": true,
+            "alias": profile.alias,
+            "action": "provider-models-fetched",
+            "default_model": profile.default_model,
+            "models": models_json(&profile),
+        }));
+    } else {
+        user_println(&format!(
+            "Updated provider '{}' models from {}/models",
+            profile.alias,
+            profile.base_url.trim_end_matches('/')
+        ));
+        user_println(&format!(
+            "  {count} model(s); default {}",
+            profile.default_model
         ));
     }
     Ok(())
