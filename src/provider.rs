@@ -878,12 +878,27 @@ fn select_catalog_slugs(saved: &[String], remote: &[RemoteModel]) -> Vec<String>
     }
     if !remote.is_empty() && remote.len() <= SMALL_REMOTE_CATALOG_LIMIT {
         for model in remote {
+            if is_vector_model_slug(&model.slug) {
+                continue;
+            }
             if !out.iter().any(|existing| existing == &model.slug) {
                 out.push(model.slug.clone());
             }
         }
     }
     out
+}
+
+/// Embedding / reranker slugs cannot run Codex's Responses loop. Applied only
+/// to wholesale gateway injection; a slug the user saved is kept.
+fn is_vector_model_slug(slug: &str) -> bool {
+    slug.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "embed" | "embedding" | "embeddings" | "rerank" | "reranker" | "reranking"
+            )
+        })
 }
 
 fn entry_context_window(
@@ -1706,5 +1721,72 @@ api_key = "sk-legacy-key"
         assert_eq!(catalog["models"][0]["slug"], "glm-5.3-flash");
         assert_eq!(catalog["models"][1]["slug"], "glm-5.3");
         assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
+    }
+
+    fn remote(slug: &str) -> RemoteModel {
+        RemoteModel {
+            slug: slug.into(),
+            display_name: None,
+            description: None,
+            context_window: Some(8_192),
+            input_modalities: vec![],
+        }
+    }
+
+    #[test]
+    fn wholesale_injection_drops_embedding_and_reranker_slugs() {
+        let catalog = build_model_catalog(
+            &["glm-5.3-flash".into()],
+            &[
+                remote("glm-5.3-flash"),
+                remote("deepseek-v4-flash"),
+                remote("Qwen/Qwen3-Embedding-0.6B"),
+                remote("Qwen/Qwen3-Embedding-8B"),
+                remote("Qwen/Qwen3-Reranker-0.6B"),
+                remote("Qwen/Qwen3-Reranker-8B"),
+                remote("text-embedding-3-small"),
+                remote("nomic-embed-text"),
+            ],
+            &[],
+            "glm-5.3-flash",
+            None,
+            None,
+        );
+        let slugs: Vec<&str> = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["slug"].as_str().unwrap())
+            .collect();
+        assert_eq!(slugs, vec!["glm-5.3-flash", "deepseek-v4-flash"]);
+    }
+
+    #[test]
+    fn a_saved_embedding_slug_stays_in_the_catalog() {
+        let catalog = build_model_catalog(
+            &["Qwen/Qwen3-Embedding-0.6B".into()],
+            &[remote("Qwen/Qwen3-Embedding-0.6B"), remote("glm-5.3-flash")],
+            &[],
+            "Qwen/Qwen3-Embedding-0.6B",
+            None,
+            None,
+        );
+        let slugs: Vec<&str> = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["slug"].as_str().unwrap())
+            .collect();
+        assert_eq!(slugs, vec!["Qwen/Qwen3-Embedding-0.6B", "glm-5.3-flash"]);
+    }
+
+    #[test]
+    fn chat_slugs_that_only_contain_embed_as_a_longer_word_are_kept() {
+        assert!(!is_vector_model_slug("glm-5.3-flash"));
+        assert!(!is_vector_model_slug("gemini-3-flash"));
+        assert!(!is_vector_model_slug("remember"));
+        assert!(!is_vector_model_slug("unembedded-chat"));
+        assert!(is_vector_model_slug("Qwen/Qwen3-Embedding-4B"));
+        assert!(is_vector_model_slug("BAAI/bge-reranker-v2-m3"));
     }
 }
