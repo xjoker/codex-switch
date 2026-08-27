@@ -84,12 +84,13 @@ pub async fn run_daemon_loop() -> Result<()> {
     state::write(&mut st);
 
     tracing::info!(
-        "Daemon loop started: poll={}s, token_check={}s, cache_refresh={}s, auto_warmup={}, warmup_times={:?}, threshold={}%",
+        "Daemon loop started: poll={}s, token_check={}s, cache_refresh={}s, auto_warmup={}, warmup_times={:?}, timezone={}, threshold={}%",
         poll_secs,
         token_secs,
         cache_refresh_secs,
         cfg.daemon.auto_warmup,
         cfg.daemon.warmup_times,
+        warmup_schedule::timezone_label(&cfg.daemon.timezone),
         cfg.daemon.switch_threshold,
     );
 
@@ -208,7 +209,7 @@ async fn run_due_scheduled_warmup(st: &mut DaemonState) {
     if !daemon.auto_warmup || daemon.warmup_times.is_empty() {
         return;
     }
-    let now = chrono::Local::now();
+    let now = warmup_schedule::schedule_now(&daemon.timezone);
     let Some(slot) =
         warmup_schedule::latest_due_slot(&daemon.warmup_times, now, st.last_warmup_slot.as_deref())
     else {

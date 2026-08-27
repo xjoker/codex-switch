@@ -122,7 +122,7 @@ codex-switch warmup
 codex-switch warmup work
 ```
 
-Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Already-active or unavailable pools are skipped. Inside the TUI, `W` toggles automatic warmup for accounts whose 5-hour window has expired; that session toggle is separate from `daemon.auto_warmup`. When `auto_warmup` is on and `warmup_times` is empty, the daemon warms during cache refresh. When slots are set, warmup runs only at those local `HH:MM` times (see [Configuration](Configuration#timed-warmup)).
+Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Already-active or unavailable pools are skipped. Inside the TUI, `W` toggles automatic warmup for accounts whose 5-hour window has expired; that session toggle is separate from `daemon.auto_warmup`. When `auto_warmup` is on and `warmup_times` is empty, the daemon warms during cache refresh. When slots are set, warmup runs only at those `HH:MM` times in `daemon.timezone` (empty = system local; see [Configuration](Configuration#timed-warmup)).
 
 ## Run the background daemon
 
@@ -135,7 +135,7 @@ codex-switch daemon status
 
 Service integration is platform-native: LaunchAgent on macOS, a systemd user service on Linux, and Task Scheduler on Windows. Windows installation requires elevated PowerShell.
 
-The daemon runs four independent timers: account polling (`poll_interval_secs`), full cache refresh (`cache_refresh_interval_secs`, with warmup only when `auto_warmup` is on and `warmup_times` is empty), scheduled warmup (~60s, when `auto_warmup` is on and `warmup_times` is set), and proactive token refresh (`token_check_interval_secs`). A switch happens only when at least two profiles exist and the current profile's 5-hour usage reaches `switch_threshold`.
+The daemon runs four independent timers: account polling (`poll_interval_secs`), full cache refresh (`cache_refresh_interval_secs`, with warmup only when `auto_warmup` is on and `warmup_times` is empty), scheduled warmup (~60s, when `auto_warmup` is on and `warmup_times` is set), and proactive token refresh (`token_check_interval_secs`). Scheduled slots use `daemon.timezone` when set, otherwise the process local timezone. A switch happens only when at least two profiles exist and the current profile's 5-hour usage reaches `switch_threshold`.
 
 By default, a switch is deferred while an interactive Codex process (`codex`, `codex resume`, `codex exec`) is running; the daemon records the pending switch and retries on the next poll. Long-lived MCP or app-server processes do not block a switch. Operational state lives in `daemon-state.json` and is shown by `daemon status`. Daemon switches cannot ask for confirmation: an untracked live `auth.json` is replaced after the normal backup rotation, so save or import an account first if you want to keep it selectable.
 

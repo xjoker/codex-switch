@@ -10,7 +10,7 @@ use ratatui::{
 
 use super::theme::{C_RED, base, dim, header, highlight};
 use crate::config::{AppConfig, save as save_config};
-use crate::warmup_schedule::parse_schedule_time;
+use crate::warmup_schedule::{parse_iana_timezone, parse_schedule_time};
 
 pub const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
@@ -28,6 +28,7 @@ enum Focus {
     CacheRefresh,
     AutoWarmup,
     WarmupTimes,
+    Timezone,
     TokenCheck,
     Notify,
     LogLevel,
@@ -48,6 +49,7 @@ const FOCUS_ORDER: &[Focus] = &[
     Focus::CacheRefresh,
     Focus::AutoWarmup,
     Focus::WarmupTimes,
+    Focus::Timezone,
     Focus::TokenCheck,
     Focus::Notify,
     Focus::LogLevel,
@@ -261,6 +263,7 @@ impl SettingsState {
                 .get(self.time_idx)
                 .cloned()
                 .unwrap_or_default(),
+            Focus::Timezone => self.draft.daemon.timezone.clone(),
             Focus::TokenCheck => self.draft.daemon.token_check_interval_secs.to_string(),
             Focus::RestoreDelay => self.draft.launch.restore_delay_secs.to_string(),
             Focus::TeamPriority
@@ -319,6 +322,18 @@ impl SettingsState {
                 self.draft.daemon.warmup_times.sort();
                 self.draft.daemon.warmup_times.dedup();
             }
+            Focus::Timezone => {
+                if raw.is_empty() {
+                    self.draft.daemon.timezone.clear();
+                } else if parse_iana_timezone(&raw).is_none() {
+                    return Err(
+                        "timezone must be empty (system local) or an IANA name like Asia/Shanghai"
+                            .into(),
+                    );
+                } else {
+                    self.draft.daemon.timezone = raw;
+                }
+            }
             Focus::TokenCheck => {
                 self.draft.daemon.token_check_interval_secs =
                     parse_u64(&raw, 1, "daemon.token_check_interval_secs")?;
@@ -358,7 +373,7 @@ impl SettingsState {
             message.push_str(&warnings.join(" "));
         }
         message.push_str(
-            ". Restart the daemon to apply poll/token/cache intervals; warmup slots are re-read about once a minute.",
+            ". Restart the daemon to apply poll/token/cache intervals; warmup slots and timezone are re-read about once a minute.",
         );
         SettingsOutcome::Saved { message }
     }
@@ -696,6 +711,22 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
         ]));
     }
 
+    let tz_value = if settings.draft.daemon.timezone.is_empty()
+        && !(settings.editing && settings.focus == Focus::Timezone)
+    {
+        "(system local)".to_string()
+    } else {
+        field_value(settings, Focus::Timezone, &settings.draft.daemon.timezone)
+    };
+    push_field(
+        settings,
+        Focus::Timezone,
+        "timezone",
+        tz_value,
+        &mut lines,
+        &mut focused_line,
+    );
+
     push_field(
         settings,
         Focus::TokenCheck,
@@ -755,7 +786,7 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
             dim(),
         )));
         lines.push(Line::from(Span::styled(
-            "Empty warmup_times + auto_warmup on = warm during cache refresh. Slots gate warmup to those local times.",
+            "Empty timezone = system local. Slots are HH:MM in that zone. Empty warmup_times + auto_warmup on = warm during cache refresh.",
             dim(),
         )));
     }
@@ -817,7 +848,32 @@ mod tests {
         }
         assert!(settings.is_add_time_row());
         settings.handle_key(KeyCode::Down);
-        assert_eq!(settings.focus, Focus::TokenCheck);
+        assert_eq!(settings.focus, Focus::Timezone);
+    }
+
+    #[test]
+    fn timezone_edit_accepts_iana_and_rejects_garbage() {
+        let mut settings = SettingsState::from_config(AppConfig::default());
+        while settings.focus != Focus::Timezone {
+            settings.handle_key(KeyCode::Down);
+        }
+        settings.handle_key(KeyCode::Enter);
+        for ch in "Asia/Shanghai".chars() {
+            settings.handle_key(KeyCode::Char(ch));
+        }
+        settings.handle_key(KeyCode::Enter);
+        assert_eq!(settings.draft.daemon.timezone, "Asia/Shanghai");
+
+        settings.handle_key(KeyCode::Enter);
+        settings.handle_key(KeyCode::Backspace);
+        settings.handle_key(KeyCode::Char('x'));
+        settings.handle_key(KeyCode::Enter);
+        assert!(
+            settings.error.as_ref().is_some_and(|e| e.contains("IANA")),
+            "{:?}",
+            settings.error
+        );
+        assert_eq!(settings.draft.daemon.timezone, "Asia/Shanghai");
     }
 
     #[test]
@@ -833,6 +889,7 @@ mod tests {
         let mut settings = SettingsState::from_config(AppConfig::default());
         settings.draft.daemon.auto_warmup = true;
         settings.draft.daemon.warmup_times = vec!["08:00".into(), "13:10".into()];
+        settings.draft.daemon.timezone = "Asia/Shanghai".into();
         match settings.try_save() {
             SettingsOutcome::Saved { message } => {
                 assert!(message.contains("Saved config.toml"), "{message}");
@@ -845,6 +902,7 @@ mod tests {
             loaded.daemon.warmup_times,
             vec!["08:00".to_string(), "13:10".to_string()]
         );
+        assert_eq!(loaded.daemon.timezone, "Asia/Shanghai");
         unsafe {
             match prev_cs {
                 Some(v) => std::env::set_var("CODEX_SWITCH_HOME", v),

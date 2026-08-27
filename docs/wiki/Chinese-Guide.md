@@ -148,7 +148,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 ### Settings 页
 
-编辑 `$CODEX_SWITCH_HOME/config.toml`（含 `daemon.auto_warmup` 与 `warmup_times`）。`j` / `k` 移动字段，`Enter` 编辑或开关，`s` 保存。Accounts 页的 `s` 仍是排序。TUI 的 `W` 只是本次会话开关，不写 `auto_warmup`。保存会重写整个配置文件，不保留注释。守护进程的轮询/Token/缓存间隔需重启后生效；`warmup_times` 约每分钟重读一次。详情以英文 [Configuration](Configuration) 为准。
+编辑 `$CODEX_SWITCH_HOME/config.toml`（含 `daemon.auto_warmup`、`warmup_times`、`timezone`）。`j` / `k` 移动字段，`Enter` 编辑或开关，`s` 保存。Accounts 页的 `s` 仍是排序。TUI 的 `W` 只是本次会话开关，不写 `auto_warmup`。`timezone` 留空则用系统时区，也可填 IANA 名称（如 `Asia/Shanghai`）。保存会重写整个配置文件，不保留注释。守护进程的轮询/Token/缓存间隔需重启后生效；`warmup_times` 与 `timezone` 约每分钟重读一次。详情以英文 [Configuration](Configuration) 为准。
 
 ### 提供方表单（新增 / 编辑）
 

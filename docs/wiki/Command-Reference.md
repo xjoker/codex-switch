@@ -120,7 +120,7 @@ The Providers table never renders the stored key. `Enter` or `o` picks a saved m
 
 ### Settings tab
 
-Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and unknown keys are not kept). Daemon poll/token/cache intervals need a restart; `auto_warmup` and `warmup_times` are re-read about once a minute.
+Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and unknown keys are not kept). Daemon poll/token/cache intervals need a restart; `auto_warmup`, `warmup_times`, and `timezone` are re-read about once a minute.
 
 | Key | Action |
 |---|---|

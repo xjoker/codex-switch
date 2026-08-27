@@ -1462,6 +1462,7 @@ mod tests {
         app.active_tab = crate::tui::app::Tab::Settings;
         app.settings.draft.daemon.auto_warmup = true;
         app.settings.draft.daemon.warmup_times = vec!["08:00".into()];
+        app.settings.draft.daemon.timezone = "Asia/Shanghai".into();
 
         let backend = TestBackend::new(120, 36);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1474,6 +1475,10 @@ mod tests {
         assert!(joined.contains("Settings"), "tab bar or panel:\n{joined}");
         assert!(joined.contains("auto_warmup"), "daemon field:\n{joined}");
         assert!(joined.contains("08:00"), "warmup slot:\n{joined}");
+        assert!(
+            joined.contains("Asia/Shanghai"),
+            "timezone field:\n{joined}"
+        );
         assert!(
             joined.contains("s save"),
             "status bar must show save:\n{joined}"

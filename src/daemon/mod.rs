@@ -363,6 +363,7 @@ fn status(json: bool) -> Result<()> {
                 "cache_refresh_interval_secs": cfg.daemon.cache_refresh_interval_secs,
                 "auto_warmup": cfg.daemon.auto_warmup,
                 "warmup_times": cfg.daemon.warmup_times,
+                "timezone": cfg.daemon.timezone,
                 "token_check_interval_secs": cfg.daemon.token_check_interval_secs,
                 "switch_threshold": cfg.daemon.switch_threshold,
                 "notify": cfg.daemon.notify,
@@ -439,6 +440,10 @@ fn status(json: bool) -> Result<()> {
                         cfg.daemon.warmup_times.join(", ")
                     ));
                 }
+                user_println(&format!(
+                    "  timezone={}",
+                    crate::warmup_schedule::timezone_label(&cfg.daemon.timezone)
+                ));
             }
             (Some(pid), false) => {
                 user_println(&format!("Daemon is not running (stale PID {pid})"));

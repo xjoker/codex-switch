@@ -3367,10 +3367,12 @@ mod tests {
         let mut app = App::new();
         app.settings.draft.daemon.auto_warmup = true;
         app.settings.draft.daemon.warmup_times = vec!["18:20".into()];
+        app.settings.draft.daemon.timezone = "UTC".into();
         app.handle_settings_key(KeyCode::Char('s'));
         let loaded = crate::config::load_current().expect("saved config");
         assert!(loaded.daemon.auto_warmup);
         assert_eq!(loaded.daemon.warmup_times, vec!["18:20".to_string()]);
+        assert_eq!(loaded.daemon.timezone, "UTC");
         assert!(
             app.status_msg
                 .as_deref()

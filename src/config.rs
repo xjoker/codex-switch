@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::app_home;
-use crate::warmup_schedule::normalize_warmup_times;
+use crate::warmup_schedule::{normalize_timezone, normalize_warmup_times};
 
 static CONFIG: OnceLock<RwLock<AppConfig>> = OnceLock::new();
 static STARTUP_WARNINGS: OnceLock<Vec<String>> = OnceLock::new();
@@ -65,6 +65,8 @@ impl AppConfig {
         }
         self.daemon.warmup_times =
             normalize_warmup_times(std::mem::take(&mut self.daemon.warmup_times), warnings);
+        self.daemon.timezone =
+            normalize_timezone(std::mem::take(&mut self.daemon.timezone), warnings);
         if self.daemon.log_level.trim().is_empty() {
             self.daemon.log_level = "error".to_string();
         }
@@ -151,11 +153,14 @@ pub struct DaemonConfig {
     pub cache_refresh_interval_secs: u64,
     /// Warm inactive quota windows. With empty `warmup_times`, this happens
     /// during cache refresh. With times set, cache refresh only updates
-    /// usage and warmup runs at those local-clock slots.
+    /// usage and warmup runs at those `HH:MM` slots in `timezone`.
     pub auto_warmup: bool,
-    /// Local `HH:MM` slots. Empty = cache-refresh warmup when `auto_warmup`.
+    /// `HH:MM` slots. Empty = cache-refresh warmup when `auto_warmup`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warmup_times: Vec<String>,
+    /// IANA timezone for `warmup_times` (e.g. `Asia/Shanghai`). Empty = system local.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub timezone: String,
     /// Token expiry check interval in seconds (default: 300)
     pub token_check_interval_secs: u64,
     /// Send desktop notification on switch (default: false)
@@ -174,6 +179,7 @@ impl Default for DaemonConfig {
             cache_refresh_interval_secs: 300,
             auto_warmup: false,
             warmup_times: Vec::new(),
+            timezone: String::new(),
             token_check_interval_secs: 300,
             notify: false,
             log_level: "error".to_string(),
@@ -433,5 +439,28 @@ warmup_times = [" 13:10 ", "08:00", "08:00", "bad"]
             vec!["08:00".to_string(), "13:10".to_string()]
         );
         assert!(warnings.iter().any(|w| w.contains("bad")));
+    }
+
+    #[test]
+    fn timezone_trims_and_warns_when_invalid() {
+        let (config, warnings) = super::load_from_str_with_warnings(
+            r#"
+[daemon]
+timezone = "  Asia/Shanghai  "
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.daemon.timezone, "Asia/Shanghai");
+        assert!(warnings.is_empty());
+
+        let (config, warnings) = super::load_from_str_with_warnings(
+            r#"
+[daemon]
+timezone = "Not/A_Zone"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.daemon.timezone, "Not/A_Zone");
+        assert!(warnings.iter().any(|w| w.contains("Not/A_Zone")));
     }
 }
