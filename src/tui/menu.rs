@@ -10,14 +10,9 @@ use ratatui::{
 };
 
 use super::popup::{PopupState, render_popup};
-
-const C_WHITE: Color = Color::Rgb(240, 240, 240);
-const DIM: Color = Color::Rgb(120, 120, 120);
-const C_RED: Color = Color::Rgb(255, 90, 90);
-const C_GREEN: Color = Color::Rgb(80, 220, 120);
-const C_YELLOW: Color = Color::Rgb(255, 220, 80);
-const C_CYAN: Color = Color::Rgb(100, 210, 255);
-const C_PURPLE: Color = Color::Rgb(145, 90, 220);
+use super::theme::{
+    C_CYAN, C_GREEN, C_PURPLE, C_RED, C_WHITE, C_YELLOW, DIM, base, dim as dim_style, header, key,
+};
 
 /// Active menu state. Only one menu is visible at a time.
 pub enum MenuState {
@@ -138,26 +133,20 @@ fn quota_window_lines(
             .round()
             .clamp(0.0, (BAR_WIDTH - 1) as f64) as usize
     });
-    let mut spans = vec![Span::styled(
-        format!("{label:<3} "),
-        Style::default().fg(C_WHITE),
-    )];
+    let mut spans = vec![Span::styled(format!("{label:<3} "), base().fg(C_WHITE))];
     for index in 0..BAR_WIDTH {
         let (symbol, style) = if Some(index) == pace_index {
-            (
-                "┃",
-                Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
-            )
+            ("┃", base().fg(C_CYAN).add_modifier(Modifier::BOLD))
         } else if index < used_width {
-            ("█", Style::default().fg(used_color))
+            ("█", base().fg(used_color))
         } else {
-            ("░", Style::default().fg(DIM))
+            ("░", base().fg(DIM))
         };
         spans.push(Span::styled(symbol, style));
     }
     spans.push(Span::styled(
         format!("  {remaining:.0}% left"),
-        Style::default().fg(if remaining <= 10.0 { C_RED } else { C_YELLOW }),
+        base().fg(if remaining <= 10.0 { C_RED } else { C_YELLOW }),
     ));
     if let Some(pace) = pace {
         let delta = used - pace;
@@ -168,7 +157,7 @@ fn quota_window_lines(
                     " · {delta:.0}% over pace · rest {}",
                     format_duration(seconds)
                 ),
-                Style::default().fg(C_YELLOW),
+                base().fg(C_YELLOW),
             ));
         }
     }
@@ -178,20 +167,20 @@ fn quota_window_lines(
         .unwrap_or_else(|| "--".to_string());
     spans.push(Span::styled(
         format!(" · reset {reset_relative}"),
-        Style::default().fg(DIM),
+        base().fg(DIM),
     ));
     vec![Line::from(spans)]
 }
 
 fn reasoning_style(effort: &str) -> Style {
     match effort {
-        "low" => Style::default().fg(C_GREEN),
-        "medium" => Style::default().fg(C_CYAN),
-        "high" => Style::default().fg(C_YELLOW),
-        "xhigh" => Style::default().fg(Color::LightMagenta),
-        "max" => Style::default().fg(C_RED),
-        "ultra" => Style::default().fg(C_PURPLE),
-        _ => Style::default().fg(DIM),
+        "low" => base().fg(C_GREEN),
+        "medium" => base().fg(C_CYAN),
+        "high" => base().fg(C_YELLOW),
+        "xhigh" => base().fg(Color::LightMagenta),
+        "max" => base().fg(C_RED),
+        "ultra" => base().fg(C_PURPLE),
+        _ => base().fg(DIM),
     }
 }
 
@@ -206,13 +195,13 @@ fn model_line_spans(model: &str, label_style: Style) -> Vec<Span<'static>> {
 
     let mut spans = vec![
         Span::styled(name.to_string(), label_style),
-        Span::styled(" · default ", Style::default().fg(DIM)),
+        Span::styled(" · default ", base().fg(DIM)),
         Span::styled(default.to_string(), reasoning_style(default)),
-        Span::styled(" · allowed ", Style::default().fg(DIM)),
+        Span::styled(" · allowed ", base().fg(DIM)),
     ];
     for (index, effort) in allowed.split(", ").enumerate() {
         if index > 0 {
-            spans.push(Span::styled(", ", Style::default().fg(DIM)));
+            spans.push(Span::styled(", ", base().fg(DIM)));
         }
         spans.push(Span::styled(effort.to_string(), reasoning_style(effort)));
     }
@@ -235,10 +224,7 @@ fn format_duration(seconds: i64) -> String {
 
 fn quota_lines(usage: Option<&crate::usage::UsageInfo>) -> Vec<Line<'static>> {
     let Some(usage) = usage else {
-        return vec![Line::from(Span::styled(
-            "Usage not loaded",
-            Style::default().fg(DIM),
-        ))];
+        return vec![Line::from(Span::styled("Usage not loaded", base().fg(DIM)))];
     };
     let mut lines = Vec::new();
     let mut add_pool = |name: &str,
@@ -251,11 +237,11 @@ fn quota_lines(usage: Option<&crate::usage::UsageInfo>) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![
             Span::styled(
                 name.to_string(),
-                Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD),
+                base().fg(C_CYAN).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 if unavailable { "  unavailable" } else { "" },
-                Style::default().fg(C_RED),
+                base().fg(C_RED),
             ),
         ]));
         if let Some(window) = primary {
@@ -267,7 +253,7 @@ fn quota_lines(usage: Option<&crate::usage::UsageInfo>) -> Vec<Line<'static>> {
         if primary.is_none() && secondary.is_none() {
             lines.push(Line::from(Span::styled(
                 "  No active window",
-                Style::default().fg(DIM),
+                base().fg(DIM),
             )));
         }
     };
@@ -398,10 +384,10 @@ impl MenuState {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
-        let key_style = Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD);
-        let label_style = Style::default().fg(C_WHITE);
-        let dim = Style::default().fg(DIM);
-        let header_style = Style::default().fg(C_CYAN);
+        let key_style = key();
+        let label_style = base();
+        let dim = dim_style();
+        let header_style = header();
 
         match self {
             MenuState::Account { info, popup } => {
@@ -413,25 +399,25 @@ impl MenuState {
                 let mut identity = vec![
                     Span::styled(
                         info.alias.clone(),
-                        Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                        base().fg(C_WHITE).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled("  ", Style::default()),
+                    Span::styled("  ", base()),
                     Span::styled(
                         info.plan_label.clone(),
-                        Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+                        base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
                     ),
                 ];
                 if info.is_current {
                     identity.push(Span::styled(
                         "  ● active",
-                        Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD),
+                        base().fg(C_GREEN).add_modifier(Modifier::BOLD),
                     ));
                 }
                 left_lines.push(Line::from(identity));
                 if let Some(email) = &info.email {
                     left_lines.push(Line::from(vec![
                         Span::styled("email      ", dim),
-                        Span::styled(email.clone(), Style::default().fg(C_WHITE)),
+                        Span::styled(email.clone(), base().fg(C_WHITE)),
                     ]));
                 }
                 if info.workspace_name.is_some() || info.plan_type.is_some() {
@@ -467,7 +453,7 @@ impl MenuState {
                 if info.is_fedramp {
                     left_lines.push(Line::from(vec![
                         Span::styled("route      ", dim),
-                        Span::styled("FedRAMP", Style::default().fg(C_YELLOW)),
+                        Span::styled("FedRAMP", base().fg(C_YELLOW)),
                     ]));
                 }
                 for organization in &info.organizations {
@@ -481,7 +467,7 @@ impl MenuState {
                         left_lines.push(Line::from(vec![
                             Span::styled(
                                 name.to_string(),
-                                Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                                base().fg(C_WHITE).add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(format!(" · {details}"), dim),
                         ]));
@@ -511,7 +497,7 @@ impl MenuState {
                     .as_deref()
                     .map(super::ui::credits_table_color)
                     .unwrap_or(DIM);
-                let credits_style = Style::default().fg(credits_color);
+                let credits_style = base().fg(credits_color);
                 left_lines.push(Line::from(vec![
                     Span::styled("Credits  ", credits_style.add_modifier(Modifier::BOLD)),
                     Span::styled(credits_text, credits_style),
@@ -525,7 +511,7 @@ impl MenuState {
                     .as_deref()
                     .map(super::ui::reset_cards_color)
                     .unwrap_or(DIM);
-                let cards_style = Style::default().fg(cards_color);
+                let cards_style = base().fg(cards_color);
                 left_lines.push(Line::from(vec![
                     Span::styled("Reset cards  ", cards_style.add_modifier(Modifier::BOLD)),
                     Span::styled(cards, cards_style),
@@ -544,7 +530,7 @@ impl MenuState {
                     header_style.add_modifier(Modifier::BOLD),
                 )));
                 for model in &info.models {
-                    let mut spans = vec![Span::styled("● ", Style::default().fg(C_CYAN))];
+                    let mut spans = vec![Span::styled("● ", base().fg(C_CYAN))];
                     spans.extend(model_line_spans(model, label_style));
                     left_lines.push(Line::from(spans));
                 }
@@ -659,7 +645,7 @@ impl MenuState {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "Sequential re-login. Browser uses local port 1455 each round.",
-                    Style::default().fg(DIM),
+                    base().fg(DIM),
                 )));
                 lines.push(Line::from(""));
                 lines.extend(menu_items(
@@ -686,10 +672,10 @@ fn menu_items(items: &[(&str, &str)], key_style: Style, label_style: Style) -> V
         .map(|(k, label)| {
             let pad = key_w.saturating_sub(k.chars().count());
             Line::from(vec![
-                Span::raw("  "),
+                Span::styled("  ", base()),
                 Span::styled((*k).to_string(), key_style),
-                Span::raw(" ".repeat(pad)),
-                Span::raw("  "),
+                Span::styled(" ".repeat(pad), base()),
+                Span::styled("  ", base()),
                 Span::styled((*label).to_string(), label_style),
             ])
         })
@@ -951,7 +937,7 @@ mod tests {
     fn model_reasoning_efforts_use_semantic_colors() {
         let spans = model_line_spans(
             "GPT-5.6-Sol · default medium · allowed low, medium, high, xhigh, max, ultra",
-            ratatui::style::Style::default(),
+            super::base(),
         );
         let color_for = |effort: &str| {
             spans

@@ -362,6 +362,8 @@ fn status(json: bool) -> Result<()> {
                 "poll_interval_secs": cfg.daemon.poll_interval_secs,
                 "cache_refresh_interval_secs": cfg.daemon.cache_refresh_interval_secs,
                 "auto_warmup": cfg.daemon.auto_warmup,
+                "warmup_times": cfg.daemon.warmup_times,
+                "timezone": cfg.daemon.timezone,
                 "token_check_interval_secs": cfg.daemon.token_check_interval_secs,
                 "switch_threshold": cfg.daemon.switch_threshold,
                 "notify": cfg.daemon.notify,
@@ -421,7 +423,27 @@ fn status(json: bool) -> Result<()> {
                             ));
                         }
                     }
+                    if let Some(slot) = &snap.last_warmup_slot {
+                        user_println(&format!("  Last warmup slot: {slot}"));
+                    }
                 }
+                let cfg = crate::config::get();
+                if cfg.daemon.warmup_times.is_empty() {
+                    user_println(&format!(
+                        "  auto_warmup={} (empty warmup_times: cache-refresh warmup when on)",
+                        cfg.daemon.auto_warmup
+                    ));
+                } else {
+                    user_println(&format!(
+                        "  auto_warmup={} warmup_times=[{}]",
+                        cfg.daemon.auto_warmup,
+                        cfg.daemon.warmup_times.join(", ")
+                    ));
+                }
+                user_println(&format!(
+                    "  timezone={}",
+                    crate::warmup_schedule::timezone_label(&cfg.daemon.timezone)
+                ));
             }
             (Some(pid), false) => {
                 user_println(&format!("Daemon is not running (stale PID {pid})"));

@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use super::state::{self, DaemonState, PendingSwitch, SwitchRecord};
 use crate::signals::ShutdownListener;
+use crate::warmup_schedule::{self, warmup_on_cache_refresh};
 use crate::{auth, cache, config, profile, usage, warmup};
 
 async fn shutdown_request_received() {
@@ -59,7 +60,6 @@ pub async fn run_daemon_loop() -> Result<()> {
     let poll_secs = cfg.daemon.poll_interval_secs;
     let token_secs = cfg.daemon.token_check_interval_secs;
     let cache_refresh_secs = cfg.daemon.cache_refresh_interval_secs;
-    let auto_warmup = cfg.daemon.auto_warmup;
 
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
     poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -71,20 +71,26 @@ pub async fn run_daemon_loop() -> Result<()> {
         cache_refresh_period,
     );
     cache_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut warmup_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    warmup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    let previous = state::read();
     let mut st = DaemonState {
         pid: std::process::id(),
         started_at: auth::now_unix_secs(),
+        last_warmup_slot: previous.and_then(|snap| snap.last_warmup_slot),
         ..DaemonState::default()
     };
     state::write(&mut st);
 
     tracing::info!(
-        "Daemon loop started: poll={}s, token_check={}s, cache_refresh={}s, auto_warmup={}, threshold={}%",
+        "Daemon loop started: poll={}s, token_check={}s, cache_refresh={}s, auto_warmup={}, warmup_times={:?}, timezone={}, threshold={}%",
         poll_secs,
         token_secs,
         cache_refresh_secs,
-        auto_warmup,
+        cfg.daemon.auto_warmup,
+        cfg.daemon.warmup_times,
+        warmup_schedule::timezone_label(&cfg.daemon.timezone),
         cfg.daemon.switch_threshold,
     );
 
@@ -158,7 +164,9 @@ pub async fn run_daemon_loop() -> Result<()> {
                 }
             }
             _ = cache_refresh_interval.tick() => {
-                match refresh_profile_cache(auto_warmup).await {
+                let daemon = live_daemon_cfg();
+                let warm = warmup_on_cache_refresh(daemon.auto_warmup, &daemon.warmup_times);
+                match refresh_profile_cache(warm).await {
                     Ok(summary) => tracing::debug!(
                         "Cache refresh completed: refreshed={}, warmed={}, failed={}",
                         summary.refreshed,
@@ -169,6 +177,9 @@ pub async fn run_daemon_loop() -> Result<()> {
                 }
                 st.last_cache_refresh_at = Some(auth::now_unix_secs());
                 state::write(&mut st);
+            }
+            _ = warmup_interval.tick() => {
+                run_due_scheduled_warmup(&mut st).await;
             }
             _ = shutdown.recv() => {
                 tracing::info!("Received shutdown signal, exiting daemon loop");
@@ -181,6 +192,41 @@ pub async fn run_daemon_loop() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn live_daemon_cfg() -> crate::config::DaemonConfig {
+    match config::load_current() {
+        Ok(cfg) => cfg.daemon,
+        Err(e) => {
+            tracing::debug!("Using in-memory daemon config; failed to re-read file: {e}");
+            config::get().daemon
+        }
+    }
+}
+
+async fn run_due_scheduled_warmup(st: &mut DaemonState) {
+    let daemon = live_daemon_cfg();
+    if !daemon.auto_warmup || daemon.warmup_times.is_empty() {
+        return;
+    }
+    let now = warmup_schedule::schedule_now(&daemon.timezone);
+    let Some(slot) =
+        warmup_schedule::latest_due_slot(&daemon.warmup_times, now, st.last_warmup_slot.as_deref())
+    else {
+        return;
+    };
+    match refresh_profile_cache(true).await {
+        Ok(summary) => tracing::info!(
+            "Scheduled warmup for {slot}: refreshed={}, warmed={}, failed={}",
+            summary.refreshed,
+            summary.warmed,
+            summary.failed
+        ),
+        Err(e) => tracing::warn!("Scheduled warmup for {slot} skipped: {e}"),
+    }
+    st.last_warmup_slot = Some(warmup_schedule::slot_stamp_for(now, &slot));
+    st.last_cache_refresh_at = Some(auth::now_unix_secs());
+    state::write(st);
 }
 
 /// Check current account usage and switch to a better candidate if threshold exceeded.

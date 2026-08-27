@@ -1,16 +1,17 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::app_home;
+use crate::warmup_schedule::{normalize_timezone, normalize_warmup_times};
 
-static CONFIG: OnceLock<AppConfig> = OnceLock::new();
+static CONFIG: OnceLock<RwLock<AppConfig>> = OnceLock::new();
 static STARTUP_WARNINGS: OnceLock<Vec<String>> = OnceLock::new();
 static CLI_PROXY: OnceLock<Option<String>> = OnceLock::new();
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AppConfig {
     pub proxy: ProxyConfig,
@@ -27,7 +28,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    fn normalize(mut self, warnings: &mut Vec<String>) -> Self {
+    pub(crate) fn normalize(mut self, warnings: &mut Vec<String>) -> Self {
         if self.network.max_concurrent == 0 {
             warnings.push("config.network.max_concurrent=0 is invalid; using 1 instead".into());
             self.network.max_concurrent = 1;
@@ -62,18 +63,27 @@ impl AppConfig {
             warnings.push("config.launch.restore_delay_secs=0 is invalid; using 3 instead".into());
             self.launch.restore_delay_secs = 3;
         }
+        self.daemon.warmup_times =
+            normalize_warmup_times(std::mem::take(&mut self.daemon.warmup_times), warnings);
+        self.daemon.timezone =
+            normalize_timezone(std::mem::take(&mut self.daemon.timezone), warnings);
+        if self.daemon.log_level.trim().is_empty() {
+            self.daemon.log_level = "error".to_string();
+        }
         self
     }
 }
 
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProxyConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub no_proxy: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CacheConfig {
     /// Cache TTL in seconds (default: 300)
@@ -86,7 +96,7 @@ impl Default for CacheConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NetworkConfig {
     /// Max concurrent usage requests (default: 20)
@@ -99,7 +109,7 @@ impl Default for NetworkConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TuiConfig {
     /// TUI auto-refresh interval in seconds (default: 300, minimum: 30)
@@ -114,7 +124,7 @@ impl Default for TuiConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UseConfig {
     /// 7d safety margin: when 7d remaining% falls below this, a scoring penalty kicks in (default: 20)
@@ -132,7 +142,7 @@ impl Default for UseConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DaemonConfig {
     /// Usage poll interval in seconds (default: 60)
@@ -141,8 +151,16 @@ pub struct DaemonConfig {
     pub switch_threshold: f64,
     /// Background cache refresh interval in seconds (default: 300)
     pub cache_refresh_interval_secs: u64,
-    /// Warm up accounts whose quota window is not active during cache refresh (default: false)
+    /// Warm inactive quota windows. With empty `warmup_times`, this happens
+    /// during cache refresh. With times set, cache refresh only updates
+    /// usage and warmup runs at those `HH:MM` slots in `timezone`.
     pub auto_warmup: bool,
+    /// `HH:MM` slots (max 10). Empty = cache-refresh warmup when `auto_warmup`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warmup_times: Vec<String>,
+    /// IANA timezone for `warmup_times` (e.g. `Asia/Shanghai`). Empty = system local.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub timezone: String,
     /// Token expiry check interval in seconds (default: 300)
     pub token_check_interval_secs: u64,
     /// Send desktop notification on switch (default: false)
@@ -160,6 +178,8 @@ impl Default for DaemonConfig {
             switch_threshold: 80.0,
             cache_refresh_interval_secs: 300,
             auto_warmup: false,
+            warmup_times: Vec::new(),
+            timezone: String::new(),
             token_check_interval_secs: 300,
             notify: false,
             log_level: "error".to_string(),
@@ -168,7 +188,7 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaunchConfig {
     /// Seconds to wait after starting codex before restoring auth.json (default: 3).
@@ -279,7 +299,7 @@ fn load_from_file() -> Result<(AppConfig, Vec<String>)> {
 pub fn init() -> Result<()> {
     let (config, warnings) = load_from_file()?;
     CONFIG
-        .set(config)
+        .set(RwLock::new(config))
         .map_err(|_| anyhow::anyhow!("configuration was initialized before config::init"))?;
     STARTUP_WARNINGS
         .set(warnings)
@@ -290,11 +310,33 @@ pub fn startup_warnings() -> &'static [String] {
     STARTUP_WARNINGS.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
-pub fn get() -> &'static AppConfig {
+pub fn get() -> AppConfig {
     // The binary entry point calls init() and fails fast for an unreadable or
     // invalid existing file. Library-only callers have no startup phase, so
     // they receive the in-memory defaults instead of panicking.
-    CONFIG.get_or_init(AppConfig::default)
+    CONFIG
+        .get()
+        .map(|lock| lock.read().unwrap_or_else(|e| e.into_inner()).clone())
+        .unwrap_or_default()
+}
+
+/// Replace the process-wide snapshot after a successful `save`.
+pub fn replace_runtime(config: AppConfig) {
+    if let Some(lock) = CONFIG.get() {
+        *lock.write().unwrap_or_else(|e| e.into_inner()) = config;
+    }
+}
+
+/// Write `config.toml` with mode 0600. Unknown extra keys are not preserved.
+pub fn save(config: &AppConfig) -> Result<()> {
+    let path = config_path()?;
+    let body = toml::to_string_pretty(config).context("failed to serialize config.toml")?;
+    crate::auth::atomic_write_private(&path, body.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+pub(crate) fn load_current() -> Result<AppConfig> {
+    load_from_file().map(|(config, _)| config)
 }
 
 pub fn set_cli_proxy(proxy: Option<String>) {
@@ -307,7 +349,8 @@ pub fn resolve_proxy() -> Option<String> {
     {
         return Some(p.clone());
     }
-    if let Some(p) = &get().proxy.url
+    let cfg = get();
+    if let Some(p) = &cfg.proxy.url
         && !p.is_empty()
     {
         return Some(p.clone());
@@ -316,7 +359,8 @@ pub fn resolve_proxy() -> Option<String> {
 }
 
 pub fn resolve_no_proxy() -> Option<String> {
-    if let Some(np) = &get().proxy.no_proxy
+    let cfg = get();
+    if let Some(np) = &cfg.proxy.no_proxy
         && !np.is_empty()
     {
         return Some(np.clone());
@@ -376,5 +420,47 @@ cache_refresh_interval_secs = 0
                 .any(|warning| warning.contains("restore_delay_secs")),
             "a silently-corrected launch delay is what hands Codex the wrong account: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn warmup_times_are_normalized_on_load() {
+        let (config, warnings) = super::load_from_str_with_warnings(
+            r#"
+[daemon]
+auto_warmup = true
+warmup_times = [" 13:10 ", "08:00", "08:00", "bad"]
+"#,
+        )
+        .unwrap();
+
+        assert!(config.daemon.auto_warmup);
+        assert_eq!(
+            config.daemon.warmup_times,
+            vec!["08:00".to_string(), "13:10".to_string()]
+        );
+        assert!(warnings.iter().any(|w| w.contains("bad")));
+    }
+
+    #[test]
+    fn timezone_trims_and_warns_when_invalid() {
+        let (config, warnings) = super::load_from_str_with_warnings(
+            r#"
+[daemon]
+timezone = "  Asia/Shanghai  "
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.daemon.timezone, "Asia/Shanghai");
+        assert!(warnings.is_empty());
+
+        let (config, warnings) = super::load_from_str_with_warnings(
+            r#"
+[daemon]
+timezone = "Not/A_Zone"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.daemon.timezone, "Not/A_Zone");
+        assert!(warnings.iter().any(|w| w.contains("Not/A_Zone")));
     }
 }

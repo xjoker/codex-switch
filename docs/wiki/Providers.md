@@ -2,7 +2,9 @@
 
 A custom API provider is a saved third-party endpoint that `codex-switch launch` can hand to Codex CLI for one session. Typical case: OpenRouter, or another gateway that speaks Codex's Responses protocol.
 
-Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores a model-provider definition plus a bearer API key under `$CODEX_SWITCH_HOME`, then at launch injects that definition as `codex -c …` overrides. The Codex process is given its own `CODEX_HOME` under `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. Catalog, sessions, sqlite, and project trust all stay in that tree. The user's `~/.codex` is not read or written.
+Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores one endpoint plus a bearer API key under `$CODEX_SWITCH_HOME`, and a list of models. Each model can carry its own reasoning effort and `web_search` setting. At launch those become `codex -c …` overrides. The Codex process is given its own `CODEX_HOME` under `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. Catalog, sessions, sqlite, and project trust all stay in that tree. The user's `~/.codex` is not read or written.
+
+The alias is the only name. Codex's required `model_providers.<id>.name` is set to the alias.
 
 > Never put an API key on the command line. `provider add` reads it from a hidden prompt, or from stdin with `--api-key-stdin`. The key is stored mode `0600` and never printed, listed, or placed in argv.
 
@@ -11,10 +13,11 @@ Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota das
 ```bash
 codex-switch provider add openrouter \
   --base-url https://openrouter.ai/api/v1 \
-  --model openai/gpt-5.3-codex
+  --model openai/gpt-5.3-codex \
+  --model deepseek/deepseek-r1-0528 --reasoning high
 ```
 
-The command then prompts for the API key without echoing it. For scripts, pass the key on stdin instead:
+The first `--model` is the default. `--reasoning` and `--no-web-search` attach to the most recent `--model`. The command then prompts for the API key without echoing it. For scripts, pass the key on stdin instead:
 
 ```bash
 printf '%s' "$OPENROUTER_API_KEY" | codex-switch provider add openrouter \
@@ -27,29 +30,33 @@ Optional flags:
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--name` | the alias | Human-readable name Codex shows |
+| `--model ID` | required, repeatable | Model id (OpenRouter: full slug). First is `default_model` |
+| `--reasoning EFFORT` | none | Attach `model_reasoning_effort` to the most recent `--model` |
+| `--no-web-search` | off | Attach `web_search=disabled` to the most recent `--model` |
 | `--env-key` | `CODEX_SWITCH_<ALIAS>_KEY` | Environment variable Codex reads the key from at launch |
 | `--wire-api` | `responses` | Codex wire protocol; current Codex only accepts `responses` |
-| `--reasoning EFFORT` | none | Save `model_reasoning_effort=EFFORT` for thinking models (see below) |
-| `--no-web-search` | off | Save `web_search=disabled` for models that reject the built-in tool |
-| `--set KEY=VALUE` | none | Extra `codex -c` override saved with the provider and applied at launch (repeatable) |
+| `--set KEY=VALUE` | none | Extra provider-level `codex -c` override (repeatable) |
+| `--metadata-fallback URL\|PATH\|none` | public OpenRouter `/models` | Catalog metadata fallback after the gateway `/models` call |
 | `--api-key-stdin` | off | Read the key from stdin instead of a hidden prompt |
 
-These save `codex -c KEY=VALUE` overrides with the provider, so a model-specific Codex setting is applied on every launch without retyping it after `--` (see [Model-specific request settings](#model-specific-request-settings)). `--reasoning` and `--no-web-search` are convenience shortcuts for the two most common settings; `--set` (repeatable) covers any other override. Values are passed to Codex verbatim — Codex, not codex-switch, decides which keys and values are valid — so only the `KEY=VALUE` shape is checked. An explicit `--set` wins over a convenience flag for the same key.
+`--set` is for overrides that are not per-model. Values are passed to Codex verbatim — Codex, not codex-switch, decides which keys and values are valid — so only the `KEY=VALUE` shape is checked.
 
 The alias follows the same rules as a ChatGPT profile (ASCII letters, digits, `_`, `-`, `.`; at most 64 characters) and must not collide with an existing profile, an existing provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`.
 
-Inspect and remove:
+Inspect, rename, and remove:
 
 ```bash
 codex-switch provider list
 codex-switch provider show openrouter
+codex-switch provider rename openrouter orouter
 codex-switch provider remove openrouter
 ```
 
-`show` prints a redacted key (`…` plus the last four characters). Removal deletes the stored key immediately; unlike ChatGPT profile deletion, it is not archived under `deleted-profiles/`. Non-interactive and `--json` runs require `--yes`.
+`show` prints a redacted key (`…` plus the last four characters). Rename moves the on-disk directory and re-derives `provider_id` / `env_key` from the new alias. Removal deletes the stored key immediately; unlike ChatGPT profile deletion, it is not archived under `deleted-profiles/`. Non-interactive and `--json` runs require `--yes`.
 
-`--json` is supported on `provider add`, `list`, `show`, and `remove`. JSON never includes the raw key.
+`--json` is supported on `provider add`, `list`, `show`, `rename`, and `remove`. JSON never includes the raw key.
+
+Older single-`model` files still load: the model becomes the only `[[models]]` entry, and a provider-level `model_reasoning_effort` / `web_search=disabled` is moved onto that model.
 
 ## Launch Codex with a provider
 
@@ -57,12 +64,14 @@ Name the provider alias. Auto-select (`launch` with no alias) stays ChatGPT-only
 
 ```bash
 codex-switch launch openrouter
-codex-switch launch openrouter -- --full-auto
+codex-switch launch openrouter --model deepseek/deepseek-r1-0528
+codex-switch launch openrouter -- exec --json "review this"
+codex-switch launch openrouter -- -s workspace-write -a never
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json` and does not write into the user's `$CODEX_HOME`. It starts `codex` with `-c` overrides that define and select the provider, injects the API key into the child process environment under `env_key`, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, and writes a Codex model catalog next to `provider.toml` so `/model` lists the provider's slugs and Codex does not fall back to generic metadata. Extra arguments after `--` are appended as Codex CLI flags.
+`launch` does **not** replace `$CODEX_HOME/auth.json` and does not read or write the user's `$CODEX_HOME`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, and writes a Codex model catalog next to `provider.toml` so `/model` lists the provider's slugs. Those `-c` flags are global Codex options, so they are placed **in front of** a Codex subcommand such as `exec`. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
 
-Some models need extra Codex request settings (disabling `web_search`, or setting a reasoning effort for thinking models) — see [Model-specific request settings](#model-specific-request-settings).
+Put `--` before any Codex argv that could be mistaken for a codex-switch alias or flag (`exec`, `--json`, `--color`, a prompt that looks like a name). `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile; it cannot target a provider.
 
 On first launch Codex creates its runtime files in that isolated home. Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are stored on the provider and passed as `-c`; they are not written into the user's `$CODEX_HOME/config.toml`.
 
@@ -70,115 +79,70 @@ On first launch Codex creates its runtime files in that isolated home. Provider-
 
 ## OpenRouter and DeepSeek
 
-OpenRouter is the intended first provider: its `/api/v1` base URL plus a full model slug (including the vendor prefix) is what Codex expects.
-
-Codex currently speaks only `wire_api = "responses"`. DeepSeek's official API is Chat Completions, so pointing `--base-url` at DeepSeek directly will not work. Route DeepSeek (or any other Chat Completions-only vendor) through OpenRouter or another Responses-capable gateway, and set `--model` to that gateway's slug:
+OpenRouter is the intended first provider: its `/api/v1` base URL plus a full model slug (including the vendor prefix) is what Codex expects. One OpenRouter provider can hold every slug that shares that key:
 
 ```bash
-codex-switch provider add deepseek \
+codex-switch provider add openrouter \
   --base-url https://openrouter.ai/api/v1 \
+  --model openai/gpt-5.3-codex \
   --model deepseek/deepseek-chat \
-  --name "DeepSeek via OpenRouter"
+  --model deepseek/deepseek-r1-0528 --reasoning medium
 ```
+
+Codex currently speaks only `wire_api = "responses"`. DeepSeek's official API is Chat Completions, so pointing `--base-url` at DeepSeek directly will not work. Route DeepSeek (or any other Chat Completions-only vendor) through OpenRouter or another Responses-capable gateway.
 
 Pick the slug from the gateway's catalog. If Codex rejects the model, the usual cause is a Chat Completions-only endpoint rather than a missing key.
 
 ## Model-specific request settings
 
-Codex always sends the same Responses request shape (including its built-in `web_search` server tool). Whether a given model accepts it depends on the model, not on luck — the behavior is consistent per model, not intermittent.
-
-### Model metadata
-
-Codex only ships metadata for its own model slugs. A custom id such as `glm-5.3-flash` otherwise produces:
-
-```
-warning: Model metadata for `glm-5.3-flash` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
-```
-
-`launch` generates a catalog and passes it as `model_catalog_json`. Codex `/model` reads that file as a **replacement** for the bundled OpenAI list (it does not merge). Each injected entry uses `visibility: list` so it appears in the picker.
-
-At launch, `GET {base_url}/models` (Bearer key, 8s timeout) fills `context_window`, display name, description, and input modalities when the gateway returns them:
-
-- A small list (at most 48 models, typical of a single vendor) is injected wholesale, with the provider's `--model` first.
-- A large list (OpenRouter is hundreds) is **not** dumped into `/model`. Only `--model` and any extra `--models SLUG` values are listed; matching rows still receive the fetched metadata.
-- `--set model_context_window=N` still wins for the default slug. Other slugs use the fetched window, or 1,048,576 when no source reports one.
-- If the gateway `/models` call fails or a catalog slug has no `context_window`, launch fills those fields from a **metadata fallback** (no provider key is sent):
-  - Default: public OpenRouter `GET https://openrouter.ai/api/v1/models` (no login).
-  - Override per provider with `--metadata-fallback URL|PATH|none`, or globally with `CODEX_SWITCH_METADATA_FALLBACK` / `CODEX_SWITCH_OPENROUTER_MODELS_URL`.
-  - Matching is exact id, then a unique `vendor/{slug}` (a `:variant` suffix such as `:free` is ignored). Two vendors with the same model name are not guessed. The catalog `slug` stays the provider's id.
-  - OpenRouter's full list is never injected into `/model`. A fallback that is already the gateway `/models` URL is skipped. `none` disables the fallback.
-- Fetch failure (401, timeout, unrecognized JSON, or fallback unreachable) does not block launch: remaining gaps use the generated defaults.
-- An explicit `--set model_catalog_json=/path/to/models.json` is left alone — that file must then include every slug you want in `/model`.
-
-```bash
-codex-switch provider add zai \
-  --base-url https://api.z.ai/api/v1 \
-  --model glm-5.3-flash \
-  --models glm-5.3 \
-  --metadata-fallback none
-```
-
-Omit `--metadata-fallback` to use public OpenRouter. Pass an HTTP(S) URL or a local JSON path instead of `none` to point at your own list.
+Codex always sends the same Responses request shape (including its built-in `web_search` server tool). Whether a given model accepts it depends on the model, not on luck — the behavior is consistent per model, not intermittent. Those settings are stored on the model, not on the whole provider.
 
 ### web_search server tool
 
-Codex enables its built-in `web_search` server tool by default. Some models accept or ignore it (verified: `deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `minimax/minimax-m3:free` all return HTTP 200), while others reject it (verified: `openai/gpt-oss-20b` returns HTTP 400 `Server tool request failed`). If a model rejects it, save the override on the provider (`--no-web-search` or `--set web_search=disabled`) or pass it per launch:
-
-```bash
-codex-switch launch openrouter -- -c web_search=disabled
-```
-
-or saved once with the provider so every launch applies it:
+Codex enables its built-in `web_search` server tool by default. Some models accept or ignore it (verified: `deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `minimax/minimax-m3:free` all return HTTP 200), while others reject it (verified: `openai/gpt-oss-20b` returns HTTP 400 `Server tool request failed`). Disable it on that model:
 
 ```bash
 codex-switch provider add openrouter \
   --base-url https://openrouter.ai/api/v1 \
-  --model openai/gpt-oss-20b \
-  --no-web-search
+  --model openai/gpt-oss-20b --no-web-search
 ```
 
-(`--no-web-search` is shorthand for `--set web_search=disabled`.)
+Or per launch: `codex-switch launch openrouter -- -c web_search=disabled`.
 
 ### Reasoning ("thinking") models
 
-Codex defaults an unknown model to `reasoning effort: none`, which reads as reasoning disabled. Thinking models reject that with HTTP 400 `Reasoning is mandatory for this endpoint`. Give Codex a reasoning effort (verified with `deepseek/deepseek-r1-0528` and `moonshotai/kimi-k2-thinking`):
+Codex defaults an unknown model to `reasoning effort: none`, which reads as reasoning disabled. Thinking models reject that with HTTP 400 `Reasoning is mandatory for this endpoint`. Set the effort on that model (verified with `deepseek/deepseek-r1-0528` and `moonshotai/kimi-k2-thinking`):
 
 ```bash
-codex-switch launch openrouter -- -c model_reasoning_effort=medium
-```
-
-or save it with the provider so it is always applied:
-
-```bash
-codex-switch provider add r1 \
+codex-switch provider add openrouter \
   --base-url https://openrouter.ai/api/v1 \
-  --model deepseek/deepseek-r1-0528 \
-  --reasoning medium
+  --model openai/gpt-5.3-codex \
+  --model deepseek/deepseek-r1-0528 --reasoning medium
 ```
 
-(`--reasoning medium` is shorthand for `--set model_reasoning_effort=medium`.)
-
-Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex also accepts `ultra`) come from the Codex version in use, so codex-switch does not restrict them — pass any value with `--reasoning` (or `--set`) and Codex reports if it is invalid. Plain chat models (`deepseek/deepseek-v3.2`, `moonshotai/kimi-k2`, `openai/gpt-4o-mini`) need no reasoning flag. Combine `--reasoning` and `--no-web-search` (or repeat `--set`) when a model needs both.
+Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex also accepts `ultra`) come from the Codex version in use, so codex-switch does not restrict them on the CLI. The TUI form offers the common presets and `(skip)`. Plain chat models need no reasoning flag.
 
 ## TUI
 
-`codex-switch tui` has two tabs: **Accounts** (ChatGPT OAuth, quota, scoring) and **Providers** (alias, name, model, base URL). Switch with `Tab` / `Shift+Tab`.
+`codex-switch tui` has three tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (alias, models, base URL), and **Settings** (`config.toml`). Switch with `Tab` / `Shift+Tab`.
 
 On the Providers tab:
 
 | Key | Action |
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
-| `a` | Add a provider (alias → base URL → model → reasoning → web_search → API key) |
-| `l` / `Enter` | Launch Codex with the selected provider |
-| `d` | Remove the selected provider (confirmation required) |
-| `Tab` | Return to Accounts |
+| `a` | Add a provider (form dialog) |
+| `Enter` / `o` | Launch: pick a saved model and reasoning for this session |
+| `e` | Edit the selected provider |
+| `n` | Rename |
+| `d` | Remove (confirmation required) |
+| `Tab` | Next tab (Settings) |
 | `h` | Help |
 | `q` | Quit |
 
-The reasoning step is a single choice (`←`/`→`, default `(skip)` saves nothing); the web_search step is a toggle (`Space`, default leaves it enabled). Both are saved into the provider's `codex_config`. The API-key step is masked (`*`). The stored key is never rendered in the table. The wizard does not set `--name`, `--env-key`, or `--wire-api`; those keep the CLI defaults (`name` = alias, derived `env_key`, `responses`). Use the CLI (`--set`) for any override other than reasoning and web_search.
+Add and edit use the same form. Add starts typing the alias immediately; Enter commits a field and continues Alias → Base URL → API key → Models (env key, wire API, and extra `-c` stay on their defaults). Tab visits every field, including those three. `j`/`k` move inside the model list. The last row is `+ add model` — Enter (or `+` / `=` / `a`) adds a model and starts typing its id; `d` / `-` / Delete ask for confirmation (`y` removes, `n` / Esc keeps it). A provider must keep at least one model, so the last model cannot be removed. `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, `s` saves, Esc cancels. Edit starts on Base URL in navigation mode (Enter edits the focused cell). The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field. Extra `-c` overrides are `KEY=VALUE` items; commas inside a value are kept.
 
-On the Accounts tab, press `o` to launch the selected ChatGPT profile, or open the account menu with `Enter` and press `o` there. Codex runs in the foreground; the TUI resumes when Codex exits.
+The stored key is never rendered in the table. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, optional extra Codex argv (Tab), and a one-shot reasoning override, then Enter (or `o`) starts Codex. On the Providers list, Enter also opens that picker; `e` edits (including env key, wire API, and extra `-c` overrides). `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
 
 ## Storage and security
 
@@ -186,9 +150,29 @@ On the Accounts tab, press `o` to launch the selected ChatGPT profile, or open t
 |---|---|
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Provider definition and API key (directory `0700`, file `0600`) |
 | `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog used at launch (`/model` list plus metadata) |
-| `$CODEX_SWITCH_HOME/providers/<alias>/codex-home/` | Isolated Codex runtime for that provider (`CODEX_HOME` for the launched process). |
+| `$CODEX_SWITCH_HOME/providers/<alias>/codex-home/` | Isolated Codex runtime for that provider (`CODEX_HOME` for the launched process) |
 
 Defaults to `~/.codex-switch/providers/`. Relocate the whole tree with `CODEX_SWITCH_HOME`; this still does not change where Codex reads `auth.json`.
+
+On disk, `name` always equals the alias (Codex requires `model_providers.<id>.name`). `default_model` must name one of the `[[models]]` entries. Example:
+
+```toml
+provider_id = "openrouter"
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "CODEX_SWITCH_OPENROUTER_KEY"
+default_model = "openai/gpt-5.3-codex"
+wire_api = "responses"
+
+[[models]]
+id = "openai/gpt-5.3-codex"
+
+[[models]]
+id = "deepseek/deepseek-r1-0528"
+reasoning = "medium"
+```
+
+The `api_key` field is stored in the same file but never printed by `list`, `show`, JSON, or the TUI.
 
 Security contract:
 

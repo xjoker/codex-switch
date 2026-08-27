@@ -1,5 +1,5 @@
 use crate::output::{print_json, user_println};
-use crate::provider::{self, ProviderProfile};
+use crate::provider::{self, ProviderProfile, ReasoningLaunch};
 use crate::signals::ShutdownListener;
 use crate::{auth, config, profile};
 use anyhow::{Context, Result};
@@ -32,8 +32,13 @@ async fn wait_for_codex_to_read_auth(
 
 /// Launch Codex for one alias from the TUI. Returns Codex's exit code instead of
 /// terminating the codex-switch process on failure.
-pub(crate) async fn launch_for_tui(alias: &str) -> Result<i32> {
-    launch_interactive(Some(alias), vec![], false, false).await
+pub(crate) async fn launch_for_tui(
+    alias: &str,
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
+    extra_args: Vec<String>,
+) -> Result<i32> {
+    launch_interactive(Some(alias), extra_args, false, false, model, reasoning).await
 }
 
 pub(crate) async fn launch_cmd(
@@ -41,8 +46,19 @@ pub(crate) async fn launch_cmd(
     args: Vec<String>,
     json: bool,
     consume_card: bool,
+    model: Option<&str>,
 ) -> Result<()> {
-    finish_launch_cli(launch_interactive(alias, args, json, consume_card).await?)
+    finish_launch_cli(
+        launch_interactive(
+            alias,
+            args,
+            json,
+            consume_card,
+            model,
+            ReasoningLaunch::Saved,
+        )
+        .await?,
+    )
 }
 
 fn finish_launch_cli(exit_code: i32) -> Result<()> {
@@ -57,6 +73,8 @@ async fn launch_interactive(
     args: Vec<String>,
     json: bool,
     consume_card: bool,
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
 ) -> Result<i32> {
     use std::io::IsTerminal;
 
@@ -68,8 +86,10 @@ async fn launch_interactive(
         && provider::exists(alias)
     {
         let profile = provider::load(alias)?;
-        return launch_provider(profile, args, json).await;
+        return launch_provider(profile, model, reasoning, args, json).await;
     }
+
+    let forwarded = chatgpt_codex_argv(model, args);
 
     let mut revival_hint = None;
     let target_alias = match alias {
@@ -168,12 +188,7 @@ async fn launch_interactive(
         user_println(&format!("Launching codex with profile '{target_alias}'..."));
     }
 
-    let child_result = std::process::Command::new("codex")
-        .args(&args)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn();
+    let child_result = spawn_codex(&forwarded, None, json, None);
 
     let mut child = match child_result {
         Ok(child) => child,
@@ -190,6 +205,7 @@ async fn launch_interactive(
             return Err(spawn_err).context("Failed to start codex");
         }
     };
+    let pipes = take_codex_pipes(&mut child, json);
 
     // Give codex time to read auth.json, then restore immediately.
     // Configurable via [launch] restore_delay_secs (default: 3).
@@ -216,6 +232,7 @@ async fn launch_interactive(
 
     // Wait for codex to exit
     let status = child.wait().context("waiting for codex")?;
+    let captured = join_codex_pipes(pipes);
 
     let exit_code = child_exit_code(&status);
 
@@ -225,7 +242,12 @@ async fn launch_interactive(
             "alias": target_alias,
             "action": "launched",
             "exit_code": exit_code,
+            "codex_stdout": captured.stdout,
+            "codex_stderr": captured.stderr,
         });
+        if let Some(model) = display_model(model, &forwarded) {
+            payload["model"] = serde_json::Value::String(model);
+        }
         if let Some(hint) = &revival_hint {
             payload["hint"] =
                 serde_json::Value::String(crate::commands::profile::revival_hint_message(hint));
@@ -236,6 +258,151 @@ async fn launch_interactive(
     }
 
     Ok(exit_code)
+}
+
+/// Codex argv for a ChatGPT `launch`: optional `--model` is a global Codex
+/// flag, so it is placed before any subcommand in `passthrough`.
+pub(crate) fn chatgpt_codex_argv(model: Option<&str>, passthrough: Vec<String>) -> Vec<String> {
+    let mut argv = Vec::with_capacity(passthrough.len() + 2);
+    if let Some(model) = model.filter(|model| !model.is_empty()) {
+        argv.push("--model".to_string());
+        argv.push(model.to_string());
+    }
+    argv.extend(passthrough);
+    argv
+}
+
+/// Codex argv for a provider `launch`: our `-c` overrides are root-level
+/// options and must stay in front of a Codex subcommand. If the caller already
+/// passed `--model` / `-m`, drop our per-model `-c` pairs (`model`,
+/// `model_reasoning_effort`, `web_search`) so they do not fight the one-shot
+/// model; provider definition overrides stay.
+pub(crate) fn provider_codex_argv(overrides: Vec<String>, passthrough: Vec<String>) -> Vec<String> {
+    let mut argv = overrides;
+    if passthrough_sets_model(&passthrough) {
+        strip_c_pair(&mut argv, is_per_model_override);
+    }
+    argv.extend(passthrough);
+    argv
+}
+
+fn passthrough_sets_model(args: &[String]) -> bool {
+    passthrough_model_value(args).is_some()
+}
+
+fn passthrough_model_value(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            return None;
+        }
+        if arg == "--model" || arg == "-m" {
+            return args.get(i + 1).cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--model=") {
+            return Some(value.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+fn display_model(cs_model: Option<&str>, passthrough: &[String]) -> Option<String> {
+    passthrough_model_value(passthrough).or_else(|| {
+        cs_model
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn is_per_model_override(value: &str) -> bool {
+    value
+        .split_once('=')
+        .is_some_and(|(key, _)| matches!(key, "model" | "model_reasoning_effort" | "web_search"))
+}
+
+fn strip_c_pair(argv: &mut Vec<String>, value_matches: impl Fn(&str) -> bool) {
+    let mut i = 0;
+    while i + 1 < argv.len() {
+        if argv[i] == "-c" && value_matches(&argv[i + 1]) {
+            argv.drain(i..=i + 1);
+            continue;
+        }
+        i += 1;
+    }
+}
+
+fn spawn_codex(
+    args: &[String],
+    extra_env: Option<(String, String)>,
+    json: bool,
+    isolated_codex_home: Option<&std::path::Path>,
+) -> std::io::Result<std::process::Child> {
+    let mut cmd = std::process::Command::new("codex");
+    cmd.args(args).stdin(std::process::Stdio::inherit());
+    if json {
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    } else {
+        cmd.stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+    }
+    if let Some((name, value)) = extra_env {
+        cmd.env(name, value);
+    }
+    if let Some(home) = isolated_codex_home {
+        cmd.env("CODEX_HOME", home);
+    }
+    cmd.spawn()
+}
+
+struct CodexPipes {
+    stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+}
+
+struct CapturedCodexIo {
+    stdout: String,
+    stderr: String,
+}
+
+fn take_codex_pipes(child: &mut std::process::Child, json: bool) -> CodexPipes {
+    if !json {
+        return CodexPipes {
+            stdout: None,
+            stderr: None,
+        };
+    }
+    CodexPipes {
+        stdout: child.stdout.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                buf
+            })
+        }),
+        stderr: child.stderr.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                buf
+            })
+        }),
+    }
+}
+
+fn join_codex_pipes(pipes: CodexPipes) -> CapturedCodexIo {
+    fn into_string(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> String {
+        handle
+            .and_then(|h| h.join().ok())
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default()
+    }
+    CapturedCodexIo {
+        stdout: into_string(pipes.stdout),
+        stderr: into_string(pipes.stderr),
+    }
 }
 
 /// Verify the `codex` binary is on PATH. Do not run it: `codex --version`
@@ -292,15 +459,19 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// `codex -c …` overrides and the API key is injected into the child process
 /// environment under the profile's `env_key`. A generated model catalog is
 /// written under the provider directory so Codex `/model` lists the provider's
-/// slugs and has metadata for them; the gateway `GET /models` list fills
-/// context windows and display names when it is reachable, then a configurable
-/// metadata fallback (default: public OpenRouter, no login). The child
-/// `CODEX_HOME` is `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, so Codex
-/// session files, sqlite, and project trust stay in our tree. The user's
-/// `~/.codex` is not read or written.
-async fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<i32> {
+/// slugs and has metadata for them. The child `CODEX_HOME` is
+/// `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. The user's `~/.codex` is
+/// not read or written.
+async fn launch_provider(
+    profile: ProviderProfile,
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
+    args: Vec<String>,
+    json: bool,
+) -> Result<i32> {
     ensure_codex_available()?;
 
+    let selected = profile.resolve_model(model)?.clone();
     let (primary, fallback) = if profile.has_explicit_model_catalog() {
         (Vec::new(), Vec::new())
     } else {
@@ -308,27 +479,34 @@ async fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool
     };
     let (env_name, env_value) = profile.launch_env();
     let isolated_home = provider::prepare_isolated_codex_home(&profile.alias)?;
-    let mut codex_args = profile.launch_config_args_from_remote(&primary, &fallback)?;
-    codex_args.extend(args);
+    let overrides =
+        profile.codex_config_args_from_remote(model, reasoning.clone(), &primary, &fallback)?;
+    let codex_args = provider_codex_argv(overrides, args.clone());
+    let shown_model = passthrough_model_value(&args).unwrap_or_else(|| selected.id.clone());
 
     if !json {
+        let reasoning_note = match &reasoning {
+            ReasoningLaunch::Saved => String::new(),
+            ReasoningLaunch::Skip => " reasoning=(skip)".to_string(),
+            ReasoningLaunch::Effort(effort) => format!(" reasoning={effort}"),
+        };
         user_println(&format!(
-            "Launching codex with provider '{}' ({} / {})...",
-            profile.alias, profile.name, profile.model
+            "Launching Codex with provider '{}' ({}{})...",
+            profile.alias, shown_model, reasoning_note
         ));
     }
 
-    let mut child = std::process::Command::new("codex")
-        .args(&codex_args)
-        .env(env_name, env_value)
-        .env("CODEX_HOME", &isolated_home)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("Failed to start codex")?;
+    let mut child = spawn_codex(
+        &codex_args,
+        Some((env_name, env_value)),
+        json,
+        Some(&isolated_home),
+    )
+    .context("Failed to start Codex")?;
+    let pipes = take_codex_pipes(&mut child, json);
 
-    let status = child.wait().context("waiting for codex")?;
+    let status = child.wait().context("waiting for Codex")?;
+    let captured = join_codex_pipes(pipes);
     let exit_code = child_exit_code(&status);
 
     if json {
@@ -337,8 +515,10 @@ async fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool
             "alias": profile.alias,
             "action": "launched",
             "provider": profile.provider_id,
-            "model": profile.model,
+            "model": shown_model,
             "exit_code": exit_code,
+            "codex_stdout": captured.stdout,
+            "codex_stderr": captured.stderr,
         }));
     } else {
         user_println("codex exited");
@@ -520,19 +700,125 @@ mod tests {
     use std::ffi::OsString;
     use std::sync::MutexGuard;
 
-    use super::restore_launch_auth;
+    use super::{
+        chatgpt_codex_argv, ensure_codex_available, passthrough_model_value, provider_codex_argv,
+        restore_launch_auth,
+    };
     // Only the permission assertions call this, and those are unix-only, so an
     // unconditional import is dead on Windows and fails `-D warnings` there.
     #[cfg(unix)]
     use super::backup_launch_auth;
 
     #[test]
-    fn ensure_codex_available_looks_up_path_without_running_codex() {
-        assert!(
-            !super::command_is_on_path("codex-switch-definitely-not-installed"),
-            "a missing name must not be treated as present"
+    fn chatgpt_argv_puts_model_before_a_codex_subcommand() {
+        assert_eq!(
+            chatgpt_codex_argv(
+                Some("gpt-5.4"),
+                vec!["exec".into(), "--json".into(), "hi".into()]
+            ),
+            ["--model", "gpt-5.4", "exec", "--json", "hi"]
         );
-        super::ensure_codex_available().expect("codex is installed in this environment");
+    }
+
+    #[test]
+    fn ensure_codex_available_looks_up_path_without_running_codex() {
+        ensure_codex_available().expect("codex is installed in this environment");
+    }
+
+    #[test]
+    fn chatgpt_argv_without_model_is_passthrough_only() {
+        assert_eq!(
+            chatgpt_codex_argv(None, vec!["resume".into(), "--last".into()]),
+            ["resume", "--last"]
+        );
+    }
+
+    #[test]
+    fn passthrough_model_value_reads_long_short_and_equals_forms() {
+        assert_eq!(
+            passthrough_model_value(&["exec".into(), "--model".into(), "one-shot".into()]),
+            Some("one-shot".into())
+        );
+        assert_eq!(
+            passthrough_model_value(&["-m".into(), "one-shot".into(), "exec".into()]),
+            Some("one-shot".into())
+        );
+        assert_eq!(
+            passthrough_model_value(&["--model=one-shot".into(), "exec".into()]),
+            Some("one-shot".into())
+        );
+        assert_eq!(
+            passthrough_model_value(&["--".into(), "--model".into(), "not-a-flag".into()]),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_argv_keeps_overrides_in_front_of_exec() {
+        let argv = provider_codex_argv(
+            vec![
+                "-c".into(),
+                r#"model="saved""#.into(),
+                "-c".into(),
+                r#"model_provider="p""#.into(),
+            ],
+            vec!["exec".into(), "--json".into(), "do".into()],
+        );
+        assert_eq!(
+            argv,
+            [
+                "-c",
+                r#"model="saved""#,
+                "-c",
+                r#"model_provider="p""#,
+                "exec",
+                "--json",
+                "do"
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_argv_drops_per_model_overrides_when_passthrough_sets_model() {
+        let argv = provider_codex_argv(
+            vec![
+                "-c".into(),
+                r#"model_provider="p""#.into(),
+                "-c".into(),
+                r#"model="saved""#.into(),
+                "-c".into(),
+                "model_reasoning_effort=high".into(),
+                "-c".into(),
+                "web_search=disabled".into(),
+                "-c".into(),
+                r#"model_providers.p.base_url="https://example.test""#.into(),
+            ],
+            vec!["exec".into(), "--model".into(), "one-shot".into()],
+        );
+        assert_eq!(
+            argv,
+            [
+                "-c",
+                r#"model_provider="p""#,
+                "-c",
+                r#"model_providers.p.base_url="https://example.test""#,
+                "exec",
+                "--model",
+                "one-shot",
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_argv_keeps_c_model_when_double_dash_makes_model_a_prompt() {
+        let argv = provider_codex_argv(
+            vec!["-c".into(), r#"model="saved""#.into()],
+            vec!["--".into(), "--model".into(), "not-a-flag".into()],
+        );
+        assert_eq!(
+            argv,
+            ["-c", r#"model="saved""#, "--", "--model", "not-a-flag"]
+        );
     }
 
     /// Staging moves the user's live `auth.json` aside and puts a profile's

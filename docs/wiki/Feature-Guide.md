@@ -45,7 +45,7 @@ The usage model includes the main 5-hour and 7-day windows, additional model-spe
 
 Normal reads refresh only stale entries. Use `list -f` or the TUI refresh action when a fresh network read is required.
 
-The TUI has two tabs: **Accounts** (ChatGPT OAuth, quota, scoring) and **Providers** (custom API endpoints). `Tab` / `Shift+Tab` switches between them. Account keys (`Enter`, `W`, mark, filter) apply only on Accounts.
+The TUI has three tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (custom API endpoints), and **Settings** (`config.toml`). `Tab` / `Shift+Tab` cycles them. `o` launches Codex on Accounts and Providers. Account-only keys (`W`, mark, filter) stay on Accounts. Settings uses `j`/`k` for fields and `s` to save; `s` on Accounts still cycles sort. Unsaved Settings edits survive leaving the tab; while a field is being edited, `Tab` stays on Settings.
 
 The TUI account detail page is a single scrollable column with identity and organization labels, token expiry times in the local timezone, every quota pool with a pace marker, available reset cards, and the models the account may use. Model names and reasoning-effort capabilities are discovered from the authenticated service at runtime, not hardcoded. The full shortcut list is in the [command reference](Command-Reference#tui-shortcuts) and under `h` inside the TUI.
 
@@ -78,8 +78,12 @@ Switching replaces the live `$CODEX_HOME/auth.json` atomically while holding a p
 
 ```bash
 codex-switch launch work -- --model gpt-5.4
-codex-switch launch -- --full-auto
+codex-switch launch work -- exec --json "review this"
+codex-switch launch -- exec --json "do the thing"
+codex-switch launch -- -s workspace-write -a never
 ```
+
+Arguments after `--` are Codex's, not codex-switch's. A known Codex subcommand (`exec`, `resume`, …) can start the argv without `--` (`codex-switch launch exec --json "…"`). Tokens on both sides of `--` are kept. The separator is still required when the Codex argv starts with a prompt that looks like an alias, or a flag that also exists on codex-switch (`--json`, `--color`, `--model`) immediately after the alias. Current Codex has no `--full-auto`; use `-a never`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox`. `--json launch` prints one JSON object after Codex exits and captures Codex stdout/stderr into that object.
 
 The launch lock serializes overlapping launch sessions. The restore delay is configurable (`launch.restore_delay_secs`) because Codex does not expose an authentication-read handshake.
 
@@ -94,9 +98,9 @@ codex-switch provider add openrouter \
 codex-switch launch openrouter
 ```
 
-`launch <provider>` does not swap `$CODEX_HOME/auth.json` and does not read or write the user's `$CODEX_HOME`. It starts Codex with `-c` overrides that define and select the provider, injects the key into the child environment only, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, and writes a model catalog so Codex `/model` lists the provider's slugs and does not fall back to generic metadata. Launch fills that catalog from the gateway `GET /models` when the list is reachable. Auto-select (`launch` with no alias) and `use` remain ChatGPT-only.
+`launch <provider>` does not swap `$CODEX_HOME/auth.json` and does not read or write the user's `$CODEX_HOME`. It starts Codex with `-c` overrides that define and select the provider (and `launch --model` to pick a saved model), injects the key into the child environment only, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, and writes a model catalog so Codex `/model` lists the provider's slugs. Auto-select (`launch` with no alias) and `use` remain ChatGPT-only.
 
-Some models need extra Codex request settings: models that reject the built-in `web_search` server tool need `-c web_search=disabled`, and thinking models need `-c model_reasoning_effort=medium`. The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, model-specific settings, TUI add/remove, and the security contract are in [Custom API providers](Providers).
+A provider holds several models; reasoning effort and `web_search` are per model. In the TUI Providers tab, `Enter` / `o` opens a picker for a saved model, a one-shot reasoning override, and optional extra Codex argv; `e` edits the provider (including env key, wire API, and extra `-c`). The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, model-specific settings, TUI add/edit/rename, and the security contract are in [Custom API providers](Providers).
 
 ## Recover exhausted accounts
 
@@ -118,7 +122,7 @@ codex-switch warmup
 codex-switch warmup work
 ```
 
-Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Already-active or unavailable pools are skipped. Inside the TUI, `W` toggles automatic warmup for accounts whose 5-hour window has expired; the daemon has a separate `auto_warmup` setting.
+Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Already-active or unavailable pools are skipped. Inside the TUI, `W` toggles automatic warmup for accounts whose 5-hour window has expired; that session toggle is separate from `daemon.auto_warmup`. When `auto_warmup` is on and `warmup_times` is empty, the daemon warms during cache refresh. When slots are set, warmup runs only at those `HH:MM` times in `daemon.timezone` (empty = system local; see [Configuration](Configuration#timed-warmup)).
 
 ## Run the background daemon
 
@@ -131,7 +135,7 @@ codex-switch daemon status
 
 Service integration is platform-native: LaunchAgent on macOS, a systemd user service on Linux, and Task Scheduler on Windows. Windows installation requires elevated PowerShell.
 
-The daemon runs three independent timers: account polling (`poll_interval_secs`), full cache refresh with optional warmup (`cache_refresh_interval_secs`, `auto_warmup`), and proactive token refresh (`token_check_interval_secs`). A switch happens only when at least two profiles exist and the current profile's 5-hour usage reaches `switch_threshold`.
+The daemon runs four independent timers: account polling (`poll_interval_secs`), full cache refresh (`cache_refresh_interval_secs`, with warmup only when `auto_warmup` is on and `warmup_times` is empty), scheduled warmup (~60s, when `auto_warmup` is on and `warmup_times` is set), and proactive token refresh (`token_check_interval_secs`). Scheduled slots use `daemon.timezone` when set, otherwise the process local timezone. A switch happens only when at least two profiles exist and the current profile's 5-hour usage reaches `switch_threshold`.
 
 By default, a switch is deferred while an interactive Codex process (`codex`, `codex resume`, `codex exec`) is running; the daemon records the pending switch and retries on the next poll. Long-lived MCP or app-server processes do not block a switch. Operational state lives in `daemon-state.json` and is shown by `daemon status`. Daemon switches cannot ask for confirmation: an untracked live `auth.json` is replaced after the normal backup rotation, so save or import an account first if you want to keep it selectable.
 

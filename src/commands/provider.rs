@@ -12,31 +12,27 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
         ProviderCommand::Add {
             alias,
             base_url,
-            model,
-            models,
-            metadata_fallback,
-            name,
+            model: _,
             env_key,
             wire_api,
-            reasoning,
-            no_web_search,
+            reasoning: _,
+            no_web_search: _,
             set,
+            metadata_fallback,
             api_key_stdin,
         } => add(
             alias,
             base_url,
-            model,
-            models,
-            metadata_fallback,
-            name,
             env_key,
             wire_api,
-            merge_codex_config(reasoning, no_web_search, set),
+            set,
+            metadata_fallback,
             api_key_stdin,
             json,
         ),
         ProviderCommand::List => list(json),
         ProviderCommand::Show { alias } => show(&alias, json),
+        ProviderCommand::Rename { old, new } => rename(&old, &new, json),
         ProviderCommand::Remove { alias, yes } => remove(&alias, yes, json),
     }
 }
@@ -45,13 +41,10 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
 fn add(
     alias: String,
     base_url: String,
-    model: String,
-    models: Vec<String>,
-    metadata_fallback: Option<String>,
-    name: Option<String>,
     env_key: Option<String>,
     wire_api: String,
-    codex_config: Vec<String>,
+    set: Vec<String>,
+    metadata_fallback: Option<String>,
     api_key_stdin: bool,
     json: bool,
 ) -> Result<()> {
@@ -63,21 +56,23 @@ fn add(
         anyhow::bail!("'{alias}' already names a ChatGPT profile; choose a different alias");
     }
 
+    let argv: Vec<String> = std::env::args().collect();
+    let models = provider::models_from_cli_args(&argv)?;
+    if models.is_empty() {
+        anyhow::bail!("at least one --model is required");
+    }
+
     let api_key = read_api_key(&alias, api_key_stdin)?;
 
-    let profile = ProviderProfile {
-        provider_id: provider::sanitize_provider_id(&alias),
-        name: name.unwrap_or_else(|| alias.clone()),
-        base_url,
-        env_key: env_key.unwrap_or_else(|| provider::derive_env_key(&alias)),
-        model,
-        models,
-        metadata_fallback: metadata_fallback.unwrap_or_default(),
-        wire_api,
-        codex_config,
-        api_key,
-        alias: alias.clone(),
-    };
+    let mut profile = ProviderProfile::build(&alias, base_url, models, api_key);
+    if let Some(env_key) = env_key {
+        profile.env_key = env_key;
+    }
+    profile.wire_api = wire_api;
+    profile.codex_config = set;
+    if let Some(fallback) = metadata_fallback {
+        profile.metadata_fallback = fallback;
+    }
     profile.validate()?;
     provider::save(&profile)?;
 
@@ -89,8 +84,13 @@ fn add(
         });
     } else {
         user_println(&format!(
-            "Added provider '{}' ({}) -> {}",
-            profile.alias, profile.name, profile.base_url
+            "Added provider '{}' -> {}",
+            profile.alias, profile.base_url
+        ));
+        user_println(&format!(
+            "  {} model(s); default {}",
+            profile.models.len(),
+            profile.default_model
         ));
         user_println(&format!(
             "  key stored; Codex reads it from ${} at launch",
@@ -100,30 +100,8 @@ fn add(
     Ok(())
 }
 
-/// Translate the convenience `--reasoning` / `--no-web-search` flags into
-/// `codex -c KEY=VALUE` overrides, then append the raw `--set` overrides last so
-/// an explicit `--set` wins over a convenience flag for the same key (Codex
-/// takes the last `-c` when a key repeats). The convenience flags are just
-/// shortcuts; any value is passed through, and `--set` remains the escape hatch
-/// for arbitrary keys.
-fn merge_codex_config(
-    reasoning: Option<String>,
-    no_web_search: bool,
-    set: Vec<String>,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(effort) = reasoning {
-        out.push(format!("model_reasoning_effort={effort}"));
-    }
-    if no_web_search {
-        out.push("web_search=disabled".to_string());
-    }
-    out.extend(set);
-    out
-}
-
 /// Read the API key without exposing it on the command line: from stdin in
-/// `--api-key-stdin` mode, otherwise from a hidden interactive prompt. Refuses
+/// `--api-key-stdin` mode, otherwise from a hidden prompt. Refuses
 /// to run non-interactively without `--api-key-stdin` rather than echoing.
 fn read_api_key(alias: &str, stdin_mode: bool) -> Result<String> {
     let key = if stdin_mode {
@@ -148,6 +126,20 @@ fn read_api_key(alias: &str, stdin_mode: bool) -> Result<String> {
     Ok(key)
 }
 
+fn models_json(p: &ProviderProfile) -> Vec<serde_json::Value> {
+    p.models
+        .iter()
+        .map(|model| {
+            serde_json::json!({
+                "id": model.id,
+                "reasoning": model.reasoning,
+                "no_web_search": model.no_web_search,
+                "default": model.id == p.default_model,
+            })
+        })
+        .collect()
+}
+
 fn list(json: bool) -> Result<()> {
     let aliases = provider::list_providers()?;
     if json {
@@ -158,11 +150,9 @@ fn list(json: bool) -> Result<()> {
                 serde_json::json!({
                     "alias": p.alias,
                     "provider_id": p.provider_id,
-                    "name": p.name,
                     "base_url": p.base_url,
-                    "model": p.model,
-                    "models": p.models,
-                    "metadata_fallback": p.metadata_fallback,
+                    "default_model": p.default_model,
+                    "models": models_json(&p),
                     "wire_api": p.wire_api,
                     "env_key": p.env_key,
                     "codex_config": p.codex_config,
@@ -180,8 +170,10 @@ fn list(json: bool) -> Result<()> {
     for alias in aliases {
         match provider::load(&alias) {
             Ok(p) => user_println(&format!(
-                "{}  {}  {}  [{}]",
-                p.alias, p.name, p.model, p.base_url
+                "{}  {}  [{}]",
+                p.alias,
+                p.models_label(),
+                p.base_url
             )),
             Err(e) => user_println(&format!("{alias}  (error: {e})")),
         }
@@ -195,11 +187,9 @@ fn show(alias: &str, json: bool) -> Result<()> {
         print_json(&serde_json::json!({
             "alias": p.alias,
             "provider_id": p.provider_id,
-            "name": p.name,
             "base_url": p.base_url,
-            "model": p.model,
-            "models": p.models,
-            "metadata_fallback": p.metadata_fallback,
+            "default_model": p.default_model,
+            "models": models_json(&p),
             "wire_api": p.wire_api,
             "env_key": p.env_key,
             "codex_config": p.codex_config,
@@ -208,19 +198,29 @@ fn show(alias: &str, json: bool) -> Result<()> {
         return Ok(());
     }
     user_println(&format!("alias       {}", p.alias));
-    user_println(&format!("name        {}", p.name));
     user_println(&format!("provider_id {}", p.provider_id));
     user_println(&format!("base_url    {}", p.base_url));
-    user_println(&format!("model       {}", p.model));
-    if p.models.is_empty() {
-        user_println("models      (none)");
-    } else {
-        user_println(&format!("models      {}", p.models.join(", ")));
-    }
-    if p.metadata_fallback.is_empty() {
-        user_println("metadata_fallback (default OpenRouter)");
-    } else {
-        user_println(&format!("metadata_fallback {}", p.metadata_fallback));
+    user_println(&format!("default     {}", p.default_model));
+    for model in &p.models {
+        let mut extras = Vec::new();
+        if let Some(effort) = &model.reasoning {
+            extras.push(format!("reasoning {effort}"));
+        }
+        if model.no_web_search {
+            extras.push("no-web-search".to_string());
+        }
+        if model.id == p.default_model {
+            extras.push("default".to_string());
+        }
+        if extras.is_empty() {
+            user_println(&format!("model       {}", model.id));
+        } else {
+            user_println(&format!(
+                "model       {}  ({})",
+                model.id,
+                extras.join(", ")
+            ));
+        }
     }
     user_println(&format!("wire_api    {}", p.wire_api));
     user_println(&format!("env_key     {}", p.env_key));
@@ -232,6 +232,20 @@ fn show(alias: &str, json: bool) -> Result<()> {
         }
     }
     user_println(&format!("key         {}", p.redacted_key()));
+    Ok(())
+}
+
+fn rename(old: &str, new: &str, json: bool) -> Result<()> {
+    provider::rename(old, new)?;
+    if json {
+        print_json(&JsonOk {
+            ok: true,
+            alias: new.to_string(),
+            action: "provider-renamed".into(),
+        });
+    } else {
+        user_println(&format!("Renamed provider: {old} -> {new}"));
+    }
     Ok(())
 }
 
@@ -259,52 +273,4 @@ fn remove(alias: &str, yes: bool, json: bool) -> Result<()> {
         user_println(&format!("Removed provider '{alias}'"));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::merge_codex_config;
-
-    #[test]
-    fn convenience_flags_translate_to_codex_overrides() {
-        let out = merge_codex_config(Some("medium".to_string()), true, vec![]);
-        assert_eq!(
-            out,
-            vec![
-                "model_reasoning_effort=medium".to_string(),
-                "web_search=disabled".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn no_flags_yield_no_overrides() {
-        assert!(merge_codex_config(None, false, vec![]).is_empty());
-    }
-
-    #[test]
-    fn explicit_set_is_appended_last_so_it_wins_over_a_convenience_flag() {
-        let out = merge_codex_config(
-            Some("high".to_string()),
-            false,
-            vec!["model_reasoning_effort=low".to_string()],
-        );
-        // Both survive; Codex takes the last `-c` for a repeated key, so the
-        // explicit --set (last) wins.
-        assert_eq!(
-            out,
-            vec![
-                "model_reasoning_effort=high".to_string(),
-                "model_reasoning_effort=low".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn an_unknown_reasoning_value_is_passed_through_unchecked() {
-        // The effort set is Codex's to define; codex-switch must not reject a
-        // value it does not recognize.
-        let out = merge_codex_config(Some("ultra".to_string()), false, vec![]);
-        assert_eq!(out, vec!["model_reasoning_effort=ultra".to_string()]);
-    }
 }

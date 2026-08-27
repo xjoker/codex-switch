@@ -10,10 +10,11 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | `import <path> [alias]` | Validate and import one `auth.json`, or recursively scan a directory for JSON files. The alias applies to single-file imports only; directories auto-assign aliases. An account that is already saved (same file, or same `account_id` and email) is skipped instead of duplicated, so its single-use refresh token is not spent. |
 | `list [-f]` | Show profiles, usage, and availability; `-f` / `--force` bypasses the cache. |
 | `use [alias] [--consume-card]` | Switch explicitly, or omit the alias to auto-select with the unified scoring algorithm. When the pool is exhausted, `--consume-card` consumes the earliest-expiring reset card to revive an account (auto-select only; ignored when an alias is given). |
-| `launch [alias] [--consume-card] -- [args]` | Start Codex with the best (or specified) ChatGPT profile's auth, or with a custom API provider when `alias` names one. Everything after `--` is passed through to Codex. Auto-select (no alias) is ChatGPT-only. |
-| `provider add <alias> --base-url <URL> --model <id>` | Save a custom API provider. The API key is read from a hidden prompt, or from stdin with `--api-key-stdin` — never from argv. |
+| `launch [alias] [--consume-card] [--model <id>] [-- <codex-args>]` | Start Codex with the best (or specified) ChatGPT profile's auth, or with a custom API provider when `alias` names one. For a provider, `--model` before `--` selects a saved model; after `--` it is Codex's own `--model`. A known Codex subcommand (`exec`, `resume`, …) can start the argv without `--`. Tokens on both sides of `--` are kept. Auto-select (no alias) is ChatGPT-only. |
+| `provider add <alias> --base-url <URL> --model <id>` | Save a custom API provider. `--model` is repeatable; the first is the default. `--reasoning` / `--no-web-search` attach to the most recent `--model`. The API key is read from a hidden prompt, or from stdin with `--api-key-stdin` — never from argv. |
 | `provider list` | List saved providers (no keys). |
 | `provider show <alias>` | Show one provider; the key is redacted. |
+| `provider rename <old> <new>` | Rename a provider (directory + derived ids). |
 | `provider remove <alias> [-y]` | Delete a provider and its stored key; `-y` / `--yes` skips the prompt. Non-interactive and `--json` runs require `--yes`. |
 | `reset-card <alias> [-y]` | Consume the earliest-expiring reset card for a profile after confirmation; `-y` / `--yes` skips the prompt. |
 | `warmup [alias]` | Send a minimal request to activate the quota-window countdown for one or all profiles. |
@@ -32,10 +33,10 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 | Option | Environment variable | Behavior |
 |---|---|---|
-| `--json` | — | Compact structured output (supported by `list`, `use`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `daemon status`, `provider add`, `provider list`, `provider show`, `provider remove`). |
+| `--json` | — | Compact structured output (supported by `list`, `use`, `launch`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `daemon status`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`). `launch --json` prints one envelope after Codex exits; Codex stdout/stderr are fields of that envelope. |
 | `--json-pretty` | — | Indented structured output. |
 | `--proxy <URL>` | `CS_PROXY` | Override proxy configuration for this process; supports `http(s)://`, `socks4://`, `socks5://`, and `socks5h://` (remote DNS). |
-| `--color <auto\|always\|never>` | `CS_COLOR` | Control terminal color. `NO_COLOR` disables color regardless of this option. |
+| `--color <auto\|always\|never>` | `CS_COLOR` | Control CLI terminal color. `NO_COLOR` disables CLI color regardless of this option. The TUI still paints its designed palette. |
 | `--debug` | — | Emit diagnostic information (HTTP requests, API responses, cache status) to stderr; redact it before sharing. |
 | `-V`, `--version` | — | Print the binary version. |
 
@@ -43,7 +44,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 - Structured data is written to stdout; progress and diagnostics are written to stderr.
 - JSON and other non-interactive execution never consumes a reset card or deletes a profile without an explicit opt-in flag.
-- `launch` treats everything after `--` as Codex CLI arguments. When `alias` names a custom provider, Codex is started with `-c` overrides (including a generated model catalog), the key in the child environment, and `CODEX_HOME` pointed at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`; the user's `$CODEX_HOME/auth.json` is not swapped or written.
+- `launch` treats a known Codex subcommand (`exec`, `resume`, …) or a non-launch flag as the start of Codex argv, even without `--`. Tokens on both sides of `--` are kept, so `launch work exec -- --json` still runs `exec`. A prompt that looks like an alias still needs `--`. When `alias` names a custom provider, Codex is started with `-c` overrides (including a generated model catalog, in front of any Codex subcommand), the key in the child environment, and `CODEX_HOME` pointed at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`; the user's `$CODEX_HOME/auth.json` is not swapped or written. `--json launch` captures Codex stdout/stderr into the JSON envelope instead of mixing them onto stdout.
 - A manual `use` affects the next Codex process and accepts ChatGPT profile aliases only. Restart an already-running Codex process to load the new `auth.json`.
 - Update checks are manual except for the one check performed when the TUI starts.
 
@@ -52,16 +53,18 @@ Examples:
 ```bash
 codex-switch --json list
 codex-switch --json use work
+codex-switch launch work -- exec --json "review this"
+codex-switch launch work exec -- --json "review this"
+codex-switch launch exec --json "do the thing"
 codex-switch launch work -- --model gpt-5.4
 codex-switch provider add openrouter --base-url https://openrouter.ai/api/v1 --model openai/gpt-5.3-codex
-codex-switch provider add zai --base-url https://api.z.ai/api/v1 --model glm-5.3-flash --metadata-fallback none
-codex-switch launch openrouter
+codex-switch launch openrouter -- -s workspace-write -a never
 codex-switch self-update --check
 ```
 
 ## Provider
 
-`provider add` required flags are `--base-url` and `--model`. Optional `--name` defaults to the alias; `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). Repeatable `--models SLUG` adds extra ids to Codex `/model`. `--metadata-fallback URL|PATH|none` stores the catalog metadata fallback used when the gateway `/models` call misses a window (default: public OpenRouter, no login; `none` disables it). `--reasoning EFFORT` saves `model_reasoning_effort=EFFORT` (for thinking models) and `--no-web-search` saves `web_search=disabled`; `--set KEY=VALUE` (repeatable) saves any other `codex -c` override. All are applied on every launch and passed to Codex verbatim (only the `KEY=VALUE` shape is checked); an explicit `--set` wins over a convenience flag for the same key. `--api-key-stdin` is required when there is no interactive terminal. Launch writes a model catalog for `/model` unless `--set model_catalog_json=…` is already present, filling metadata from the gateway `GET /models` first and the configured fallback second.
+`provider add` required flags are `--base-url` and at least one `--model`. `--model` is repeatable; the first is `default_model`. `--reasoning EFFORT` and `--no-web-search` attach to the most recent `--model`. Optional `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). `--set KEY=VALUE` (repeatable) saves a provider-level `codex -c` override. All per-model and `--set` values are passed to Codex verbatim (only the `KEY=VALUE` shape is checked for `--set`). `--api-key-stdin` is required when there is no interactive terminal. `provider rename <old> <new>` moves the directory and re-derives `provider_id` / `env_key`. `launch <alias> --model <id>` (before `--`) selects a saved model on a provider. `launch <alias> -- --model <id>` forwards Codex's own `--model` and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
 
 The alias must not collide with a ChatGPT profile, another provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`. Removal is immediate and is not archived under `deleted-profiles/`.
 
@@ -69,7 +72,7 @@ See [Custom API providers](Providers) for OpenRouter, DeepSeek-via-gateway, stor
 
 ## TUI shortcuts
 
-Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between them. `q` and `h` are global.
+Three tabs: **Accounts**, **Providers**, and **Settings**. `Tab` / `Shift+Tab` cycles them. `q` and `h` are global.
 
 ### Accounts tab
 
@@ -88,7 +91,7 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 | `s` | Cycle sort order (name / quota / status) |
 | `Space` | Mark or unmark an account |
 | `u` (account menu) | Switch to the selected account |
-| `o` (account menu) | Launch Codex with the selected account |
+| `o` | Launch Codex with the selected account (also `o` in the account menu) |
 | `c` (account menu) | Confirm and consume the earliest-expiring reset card |
 | `w` (account menu) | Warm up the selected account |
 | `l` (account menu) | Re-login the selected account |
@@ -104,14 +107,33 @@ Two tabs: **Accounts** and **Providers**. `Tab` / `Shift+Tab` switches between t
 | Key | Action |
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
-| `a` | Add a provider (alias → base URL → model → API key; the key is masked) |
-| `l` / `Enter` | Launch Codex with the selected provider |
+| `a` | Add a provider (form dialog) |
+| `Enter` / `o` | Launch Codex: pick a saved model, reasoning, and optional extra argv |
+| `e` | Edit the selected provider |
+| `n` | Rename the selected provider |
 | `d` | Remove the selected provider (confirmation required) |
-| `Tab` | Switch to Accounts |
+| `Tab` | Next tab (Settings) |
 | `h` | Show help |
 | `q` | Quit |
 
-The Providers table never renders the stored key. Select a provider and press `l` or `Enter` to launch Codex, or run `codex-switch launch <alias>` from the shell.
+The Providers table never renders the stored key. `Enter` or `o` picks a saved model (and optionally changes reasoning or extra Codex argv for this session) then launches, or run `codex-switch launch <alias>` from the shell. `e` opens the edit form (including env key, wire API, and extra `-c`). `l` is re-login on the Accounts tab, not launch.
+
+### Settings tab
+
+Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and unknown keys are not kept). Daemon poll/token/cache intervals need a restart; `auto_warmup`, `warmup_times`, and `timezone` are re-read about once a minute.
+
+| Key | Action |
+|---|---|
+| `j` / `k` or `↑` / `↓` | Move field (`j`/`k` inside `warmup_times` move among slots) |
+| `Enter` / `Space` | Edit the focused value, or toggle a boolean |
+| `←` / `→` | Cycle `log_level` or booleans |
+| `+` / `a` | Add warmup slots (at most 10). One `HH:MM`, or paste `08:00, 13:10, 18:20`. After add, focus stays on `+ add time`. |
+| `d` / `-` | Remove the selected warmup slot |
+| `s` | Save `config.toml` |
+| `Esc` | Cancel the current field edit (does not discard other unsaved fields) |
+| `Tab` | Next tab (Accounts). Ignored while a field is being edited. Unsaved edits are kept. |
+| `h` | Show help |
+| `q` | Quit |
 
 Destructive or consumptive actions always require confirmation.
 

@@ -20,6 +20,9 @@ pub struct DaemonState {
     pub last_switch: Option<SwitchRecord>,
     pub pending_switch: Option<PendingSwitch>,
     pub last_cache_refresh_at: Option<i64>,
+    /// Last completed warmup slot identity (`YYYY-MM-DD HH:MM`), not the fire time.
+    #[serde(default)]
+    pub last_warmup_slot: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +98,7 @@ mod tests {
                 since: 195,
             }),
             last_cache_refresh_at: Some(180),
+            last_warmup_slot: Some("2026-08-26 13:10".to_string()),
         };
 
         write_at(&path, &state);
@@ -105,6 +109,7 @@ mod tests {
         assert_eq!(loaded.last_switch.as_ref().unwrap().to, "bob");
         assert_eq!(loaded.pending_switch.as_ref().unwrap().to, "carol");
         assert_eq!(loaded.backoff_until, Some(400));
+        assert_eq!(loaded.last_warmup_slot.as_deref(), Some("2026-08-26 13:10"));
     }
 
     #[test]

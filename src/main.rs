@@ -19,11 +19,12 @@ mod tui;
 mod update;
 mod usage;
 mod warmup;
+mod warmup_schedule;
 mod workspace;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::{Cli, Commands, extract_launch_passthrough, merge_launch_args};
 use output::{MessageMode, print_error, should_report_error, user_println};
 use tracing_subscriber::EnvFilter;
 
@@ -62,7 +63,9 @@ fn read_last_refresh(path: Result<std::path::PathBuf>) -> Option<String> {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let raw: Vec<String> = std::env::args().collect();
+    let (clap_argv, launch_passthrough) = extract_launch_passthrough(&raw);
+    let cli = Cli::parse_from(&clap_argv);
     let use_json = cli.json || cli.json_pretty;
     let message_mode = if matches!(&cli.command, Commands::Tui) {
         MessageMode::Silent
@@ -125,7 +128,7 @@ async fn main() {
     }
     config::set_cli_proxy(cli.proxy.clone());
 
-    let result = dispatch(cli.command, use_json).await;
+    let result = dispatch(cli.command, use_json, launch_passthrough).await;
 
     if let Err(e) = result {
         if should_report_error(&e) {
@@ -219,7 +222,11 @@ mod resync_reporting_tests {
     }
 }
 
-async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
+async fn dispatch(
+    cmd: Commands,
+    json: bool,
+    launch_passthrough: Option<Vec<String>>,
+) -> Result<()> {
     // Startup auth change detection — skip for commands that manage auth themselves
     let auth_check = if !json {
         let should_check = !matches!(
@@ -265,8 +272,13 @@ async fn dispatch(cmd: Commands, json: bool) -> Result<()> {
         Commands::Launch {
             alias,
             consume_card,
+            model,
             args,
-        } => commands::launch_cmd(alias.as_deref(), args, json, consume_card).await?,
+        } => {
+            let args = merge_launch_args(args, launch_passthrough);
+            commands::launch_cmd(alias.as_deref(), args, json, consume_card, model.as_deref())
+                .await?
+        }
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => commands::open_cmd()?,
         Commands::Provider(sub) => commands::provider_cmd(sub, json)?,

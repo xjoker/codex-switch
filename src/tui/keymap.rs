@@ -2,6 +2,13 @@
 ///
 /// Status bar and Help popup both render from this list.
 /// Adding/changing a key here updates every surface.
+///
+/// Binding rules (letter must match the verb shown in the UI):
+/// - Same action uses the same key on every tab.
+/// - `o` launches Codex. `l` is re-login on Accounts (and batch). Never bind
+///   launch to `l`: that letter already means login.
+/// - Enter opens the selected row (Accounts: action menu, Providers: launch
+///   picker). `e` edits a provider. In a dialog, Enter confirms and Esc cancels.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -10,6 +17,7 @@ pub enum Section {
     Account,
     Batch,
     Provider,
+    Settings,
     Global,
 }
 
@@ -21,6 +29,7 @@ impl Section {
             Section::Account => "Account actions  (open via Enter)",
             Section::Batch => "Batch actions  (open via Enter when accounts marked)",
             Section::Provider => "Providers tab",
+            Section::Settings => "Settings tab",
             Section::Global => "Global",
         }
     }
@@ -51,6 +60,12 @@ pub const KEYMAP: &[Binding] = &[
         in_status_bar: true,
     },
     Binding {
+        keys: "tab",
+        section: Section::Navigation,
+        label: "next tab (Accounts / Providers / Settings)",
+        in_status_bar: false,
+    },
+    Binding {
         keys: "s",
         section: Section::Navigation,
         label: "cycle sort (name / quota / status)",
@@ -79,8 +94,8 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "o",
         section: Section::Account,
-        label: "launch codex",
-        in_status_bar: false,
+        label: "launch Codex",
+        in_status_bar: true,
     },
     Binding {
         keys: "u",
@@ -145,9 +160,21 @@ pub const KEYMAP: &[Binding] = &[
     },
     // Providers tab
     Binding {
-        keys: "l / enter",
+        keys: "enter / o",
         section: Section::Provider,
-        label: "launch codex with selected provider",
+        label: "launch Codex (pick model, reasoning, extra args)",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "e",
+        section: Section::Provider,
+        label: "edit provider",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "n",
+        section: Section::Provider,
+        label: "rename provider",
         in_status_bar: false,
     },
     Binding {
@@ -162,11 +189,54 @@ pub const KEYMAP: &[Binding] = &[
         label: "remove selected provider",
         in_status_bar: false,
     },
+    // Settings tab
+    Binding {
+        keys: "j / k / ↑ ↓",
+        section: Section::Settings,
+        label: "move field",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "enter / space",
+        section: Section::Settings,
+        label: "edit or toggle the focused field",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "← / →",
+        section: Section::Settings,
+        label: "cycle log level / booleans",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "+ / a",
+        section: Section::Settings,
+        label: "add warmup HH:MM (max 10; comma-separated list ok)",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "d / -",
+        section: Section::Settings,
+        label: "remove the selected warmup slot",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "s",
+        section: Section::Settings,
+        label: "save config.toml",
+        in_status_bar: false,
+    },
+    Binding {
+        keys: "esc",
+        section: Section::Settings,
+        label: "cancel the current field edit",
+        in_status_bar: false,
+    },
     // Global
     Binding {
         keys: "enter",
         section: Section::Global,
-        label: "open menu (account or batch)",
+        label: "open selected (Accounts: menu, Providers: launch picker)",
         in_status_bar: true,
     },
     Binding {
@@ -253,6 +323,49 @@ mod tests {
             super::status_bar_items()
                 .iter()
                 .any(|(keys, label)| *keys == "i" && label.contains("detail"))
+        );
+    }
+
+    #[test]
+    fn launch_is_o_on_every_tab_and_l_is_only_login() {
+        let launch: Vec<_> = super::KEYMAP
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b.section,
+                    super::Section::Account | super::Section::Provider
+                ) && b.label.to_ascii_lowercase().contains("launch")
+            })
+            .collect();
+        assert!(
+            launch
+                .iter()
+                .all(|b| b.keys.contains('o') && !b.keys.contains('l')),
+            "launch must include o and never l: {launch:?}"
+        );
+        assert!(launch.iter().any(|b| b.section == super::Section::Account));
+        assert!(launch.iter().any(|b| b.section == super::Section::Provider));
+
+        let settings_save = super::KEYMAP
+            .iter()
+            .find(|b| b.section == super::Section::Settings && b.keys == "s")
+            .expect("Settings s is save");
+        assert!(settings_save.label.contains("save"));
+
+        let ell: Vec<_> = super::KEYMAP.iter().filter(|b| b.keys == "l").collect();
+        assert!(
+            ell.iter()
+                .all(|b| b.label.contains("login") && b.section != super::Section::Provider),
+            "l must mean login, never a Providers action: {ell:?}"
+        );
+    }
+
+    #[test]
+    fn status_bar_surfaces_launch() {
+        assert!(
+            super::status_bar_items()
+                .iter()
+                .any(|(keys, label)| *keys == "o" && label.to_ascii_lowercase().contains("launch"))
         );
     }
 }

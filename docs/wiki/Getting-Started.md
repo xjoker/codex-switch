@@ -88,6 +88,19 @@ Saved profiles, cache, configuration, and daemon state default to `~/.codex-swit
 
 Never share profile files, `auth.json`, tokens, provider API keys, proxy credentials, or unredacted `--debug` output.
 
+## Add a custom API provider (optional)
+
+If you use OpenRouter or another Responses-compatible gateway instead of ChatGPT OAuth:
+
+```bash
+codex-switch provider add openrouter \
+  --base-url https://openrouter.ai/api/v1 \
+  --model openai/gpt-5.3-codex
+codex-switch launch openrouter
+```
+
+`codex-switch tui` also has a **Providers** tab for add/edit/rename/remove and for launching Codex with a saved model. `use` and auto-select stay ChatGPT-only.
+
 ## Next steps
 
 - Learn account, quota, launch, and daemon workflows in the [Feature guide](Feature-Guide).
