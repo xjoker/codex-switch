@@ -274,24 +274,19 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// process environment under the profile's `env_key`. A generated model catalog
 /// is written under the provider directory so Codex `/model` lists the
 /// provider's slugs and has metadata for them; the gateway `GET /models` list
-/// fills context windows and display names when it is reachable. Nothing is
+/// fills context windows and display names when it is reachable, with the
+/// public OpenRouter catalog as metadata fallback. Nothing is
 /// written to `~/.codex`, so there is no backup/restore window to guard.
 async fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<i32> {
     ensure_codex_available()?;
 
-    let remote = if profile.has_explicit_model_catalog() {
-        Vec::new()
+    let (primary, fallback) = if profile.has_explicit_model_catalog() {
+        (Vec::new(), Vec::new())
     } else {
-        match provider::fetch_gateway_models(&profile).await {
-            Ok(models) => models,
-            Err(err) => {
-                tracing::debug!("provider gateway /models unavailable: {err:#}");
-                Vec::new()
-            }
-        }
+        provider::load_remote_catalog(&profile).await
     };
     let (env_name, env_value) = profile.launch_env();
-    let mut codex_args = profile.launch_config_args_from_remote(&remote)?;
+    let mut codex_args = profile.launch_config_args_from_remote(&primary, &fallback)?;
     codex_args.extend(args);
 
     if !json {

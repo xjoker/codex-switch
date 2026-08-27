@@ -13,7 +13,7 @@
 //! the process table. Because `-c` layers on top of the base config, the user's
 //! `~/.codex/config.toml` (MCP servers, skills, …) is left untouched.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -206,19 +206,22 @@ impl ProviderProfile {
     /// [`launch_config_args_from_remote`](Self::launch_config_args_from_remote).
     #[cfg(test)]
     pub fn launch_config_args(&self) -> Result<Vec<String>> {
-        self.launch_config_args_from_remote(&[])
+        self.launch_config_args_from_remote(&[], &[])
     }
 
     /// Like [`launch_config_args`](Self::launch_config_args), filling catalog
     /// rows from a gateway `/models` listing when one is available.
+    /// `fallback` is OpenRouter metadata only: it never changes which slugs
+    /// appear in `/model`.
     pub(crate) fn launch_config_args_from_remote(
         &self,
         remote: &[RemoteModel],
+        fallback: &[RemoteModel],
     ) -> Result<Vec<String>> {
         let catalog_path = if self.has_explicit_model_catalog() {
             None
         } else {
-            Some(self.write_model_catalog(remote)?)
+            Some(self.write_model_catalog(remote, fallback)?)
         };
         let catalog_utf8 = catalog_path
             .as_ref()
@@ -266,13 +269,18 @@ impl ProviderProfile {
         override_value(&self.codex_config, "model_catalog_json").is_some()
     }
 
-    fn write_model_catalog(&self, remote: &[RemoteModel]) -> Result<PathBuf> {
+    fn write_model_catalog(
+        &self,
+        remote: &[RemoteModel],
+        fallback: &[RemoteModel],
+    ) -> Result<PathBuf> {
         let dir = provider_dir(&self.alias)?;
         ensure_private_dir(&dir)?;
         let path = dir.join("models.json");
         let json = build_model_catalog(
             &self.saved_model_slugs(),
             remote,
+            fallback,
             &self.model,
             override_context_window(&self.codex_config),
             override_value(&self.codex_config, "model_reasoning_effort"),
@@ -318,6 +326,8 @@ const SMALL_REMOTE_CATALOG_LIMIT: usize = 48;
 
 const GATEWAY_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
 
+const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+
 /// Fields from a gateway `GET {base_url}/models` row that Codex's catalog uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteModel {
@@ -345,31 +355,103 @@ fn override_context_window(config: &[String]) -> Option<i64> {
 /// swallow: launch must still proceed with generated defaults.
 pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Vec<RemoteModel>> {
     let url = format!("{}/models", profile.base_url.trim_end_matches('/'));
-    let client = auth::build_http_client()?;
-    let response = client
-        .get(&url)
-        .timeout(GATEWAY_MODELS_TIMEOUT)
-        .header("Authorization", format!("Bearer {}", profile.api_key))
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-    let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .context("reading gateway /models body")?;
-    if !status.is_success() {
-        anyhow::bail!("GET {url} returned {status}");
-    }
-    let value: serde_json::Value =
-        serde_json::from_slice(&body).context("parsing gateway /models JSON")?;
-    let models = parse_gateway_models(&value);
+    let models = fetch_models_url(&url, Some(profile.api_key.as_str())).await?;
     debug!(
         "provider '{}' gateway /models returned {} entries",
         profile.alias,
         models.len()
     );
     Ok(models)
+}
+
+fn openrouter_models_url() -> String {
+    std::env::var("CODEX_SWITCH_OPENROUTER_MODELS_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OPENROUTER_MODELS_URL.to_string())
+}
+
+fn is_openrouter_base_url(base_url: &str) -> bool {
+    let Some(host) = host_from_url(base_url) else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "openrouter.ai" || host.ends_with(".openrouter.ai")
+}
+
+fn host_from_url(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let hostport = rest.split(['/', '?', '#']).next()?;
+    let host = hostport.rsplit('@').next()?;
+    if host.starts_with('[') {
+        return None;
+    }
+    host.split(':').next()
+}
+
+/// Public OpenRouter catalog, no provider key. Used only to fill metadata.
+pub(crate) async fn fetch_openrouter_models() -> Result<Vec<RemoteModel>> {
+    let url = openrouter_models_url();
+    let models = fetch_models_url(&url, None).await?;
+    debug!(
+        "OpenRouter /models fallback returned {} entries",
+        models.len()
+    );
+    Ok(models)
+}
+
+async fn fetch_models_url(url: &str, bearer: Option<&str>) -> Result<Vec<RemoteModel>> {
+    let client = auth::build_http_client()?;
+    let mut request = client.get(url).timeout(GATEWAY_MODELS_TIMEOUT);
+    if let Some(key) = bearer {
+        request = request.header("Authorization", format!("Bearer {key}"));
+    }
+    let response = request.send().await.with_context(|| format!("GET {url}"))?;
+    let status = response.status();
+    let body = response.bytes().await.context("reading /models body")?;
+    if !status.is_success() {
+        anyhow::bail!("GET {url} returned {status}");
+    }
+    let value: serde_json::Value = serde_json::from_slice(&body).context("parsing /models JSON")?;
+    Ok(parse_gateway_models(&value))
+}
+
+/// Primary gateway list plus OpenRouter metadata when the gateway did not
+/// cover every catalog slug's `context_window`. OpenRouter never decides
+/// which slugs are injected into `/model`.
+pub(crate) async fn load_remote_catalog(
+    profile: &ProviderProfile,
+) -> (Vec<RemoteModel>, Vec<RemoteModel>) {
+    let primary = match fetch_gateway_models(profile).await {
+        Ok(models) => models,
+        Err(err) => {
+            debug!("provider gateway /models unavailable: {err:#}");
+            Vec::new()
+        }
+    };
+    if !needs_openrouter_fallback(&profile.saved_model_slugs(), &primary, &profile.base_url) {
+        return (primary, Vec::new());
+    }
+    let fallback = match fetch_openrouter_models().await {
+        Ok(models) => models,
+        Err(err) => {
+            debug!("OpenRouter /models fallback unavailable: {err:#}");
+            Vec::new()
+        }
+    };
+    (primary, fallback)
+}
+
+fn needs_openrouter_fallback(saved: &[String], primary: &[RemoteModel], base_url: &str) -> bool {
+    if is_openrouter_base_url(base_url) {
+        return false;
+    }
+    select_catalog_slugs(saved, primary).iter().any(|slug| {
+        find_exact_model(primary, slug)
+            .and_then(|model| model.context_window)
+            .is_none()
+    })
 }
 
 /// OpenAI `{data:[{id,…}]}`, OpenRouter extras (`name`, `context_length`), or
@@ -461,6 +543,106 @@ fn parse_input_modalities(item: &serde_json::Value) -> Vec<String> {
     out
 }
 
+fn find_exact_model<'a>(models: &'a [RemoteModel], slug: &str) -> Option<&'a RemoteModel> {
+    models.iter().find(|model| model.slug == slug)
+}
+
+/// Strip an OpenRouter `:variant` suffix (`z-ai/glm-5.3-flash:free` →
+/// `z-ai/glm-5.3-flash`). Bare slugs without a vendor prefix are left alone.
+fn openrouter_base_id(id: &str) -> &str {
+    match id.rsplit_once(':') {
+        Some((base, variant)) if !variant.contains('/') && base.contains('/') => base,
+        _ => id,
+    }
+}
+
+/// Match a provider slug against OpenRouter ids: exact, then unique
+/// `vendor/{slug}`, preferring a row without a `:variant`. Ambiguous matches
+/// (two vendors, same model name) return none rather than guessing.
+fn lookup_fallback_model<'a>(models: &'a [RemoteModel], slug: &str) -> Option<&'a RemoteModel> {
+    if let Some(model) = find_exact_model(models, slug) {
+        return Some(model);
+    }
+    let suffix = format!("/{slug}");
+    let matches: Vec<&RemoteModel> = models
+        .iter()
+        .filter(|model| {
+            let base = openrouter_base_id(&model.slug);
+            base == slug || base.ends_with(&suffix)
+        })
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    if matches.len() == 1 {
+        return Some(matches[0]);
+    }
+    let no_variant: Vec<&RemoteModel> = matches
+        .iter()
+        .copied()
+        .filter(|model| openrouter_base_id(&model.slug) == model.slug)
+        .collect();
+    if no_variant.len() == 1 {
+        return Some(no_variant[0]);
+    }
+    let bases: HashSet<&str> = matches
+        .iter()
+        .map(|model| openrouter_base_id(&model.slug))
+        .collect();
+    if bases.len() == 1 {
+        return no_variant.into_iter().next().or(Some(matches[0]));
+    }
+    None
+}
+
+fn overlay_remote_metadata(
+    slug: &str,
+    primary: &[RemoteModel],
+    fallback: &[RemoteModel],
+) -> Option<RemoteModel> {
+    let primary = find_exact_model(primary, slug);
+    let fallback = lookup_fallback_model(fallback, slug);
+    if primary.is_none() && fallback.is_none() {
+        return None;
+    }
+    let pick_text = |primary: Option<&String>, fallback: Option<&String>| {
+        primary
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                fallback
+                    .map(String::as_str)
+                    .filter(|value| !value.is_empty())
+            })
+            .map(str::to_string)
+    };
+    let primary_modalities = primary
+        .map(|model| model.input_modalities.as_slice())
+        .unwrap_or(&[]);
+    let fallback_modalities = fallback
+        .map(|model| model.input_modalities.as_slice())
+        .unwrap_or(&[]);
+    Some(RemoteModel {
+        slug: slug.to_string(),
+        display_name: pick_text(
+            primary.and_then(|model| model.display_name.as_ref()),
+            fallback.and_then(|model| model.display_name.as_ref()),
+        ),
+        description: pick_text(
+            primary.and_then(|model| model.description.as_ref()),
+            fallback.and_then(|model| model.description.as_ref()),
+        ),
+        context_window: primary
+            .and_then(|model| model.context_window)
+            .or_else(|| fallback.and_then(|model| model.context_window)),
+        input_modalities: if primary_modalities.is_empty() {
+            fallback_modalities.to_vec()
+        } else {
+            primary_modalities.to_vec()
+        },
+    })
+}
+
 fn select_catalog_slugs(saved: &[String], remote: &[RemoteModel]) -> Vec<String> {
     let mut out = Vec::new();
     for slug in saved {
@@ -501,19 +683,17 @@ fn entry_context_window(
 fn build_model_catalog(
     saved: &[String],
     remote: &[RemoteModel],
+    fallback: &[RemoteModel],
     default_slug: &str,
     user_context: Option<i64>,
     default_reasoning: Option<&str>,
 ) -> serde_json::Value {
-    let by_slug: HashMap<&str, &RemoteModel> = remote
-        .iter()
-        .map(|model| (model.slug.as_str(), model))
-        .collect();
     let models: Vec<serde_json::Value> = select_catalog_slugs(saved, remote)
         .iter()
         .enumerate()
         .map(|(index, slug)| {
-            let meta = by_slug.get(slug.as_str()).copied();
+            let owned = overlay_remote_metadata(slug, remote, fallback);
+            let meta = owned.as_ref();
             catalog_entry(
                 slug,
                 entry_context_window(slug, default_slug, user_context, meta),
@@ -719,6 +899,7 @@ mod tests {
     ) -> serde_json::Value {
         build_model_catalog(
             &[model.to_string()],
+            &[],
             &[],
             model,
             Some(context_window),
@@ -1103,6 +1284,7 @@ mod tests {
         let catalog = build_model_catalog(
             &["glm-5.3-flash".to_string()],
             &remote,
+            &[],
             "glm-5.3-flash",
             None,
             Some("max"),
@@ -1147,6 +1329,7 @@ mod tests {
         let catalog = build_model_catalog(
             &["m3".to_string(), "m7".to_string()],
             &remote,
+            &[],
             "m3",
             None,
             None,
@@ -1169,6 +1352,7 @@ mod tests {
         let catalog = build_model_catalog(
             &["glm-5.3-flash".to_string(), "glm-5.3".to_string()],
             &remote,
+            &[],
             "glm-5.3-flash",
             Some(272_000),
             None,
@@ -1190,7 +1374,9 @@ mod tests {
             remote("glm-5.3", "GLM 5.3", 200_000, &["text"]),
             remote("glm-4.7", "GLM 4.7", 128_000, &["text"]),
         ];
-        let args = profile.launch_config_args_from_remote(&remote).unwrap();
+        let args = profile
+            .launch_config_args_from_remote(&remote, &[])
+            .unwrap();
         let catalog_path = super::provider_dir("zai").unwrap().join("models.json");
         let catalog: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&catalog_path).unwrap()).unwrap();
@@ -1207,6 +1393,108 @@ mod tests {
             !args.iter().any(|a| a.contains("sk-secret-1234")),
             "the API key must never appear in argv"
         );
+    }
+
+    #[test]
+    fn openrouter_fallback_matches_vendor_prefixed_id_and_keeps_the_provider_slug() {
+        let fallback = vec![
+            remote("z-ai/glm-5.3-flash:free", "Free Flash", 32_000, &["text"]),
+            remote(
+                "z-ai/glm-5.3-flash",
+                "Z.ai: GLM 5.3 Flash",
+                1_310_720,
+                &["text", "image"],
+            ),
+        ];
+        let found = lookup_fallback_model(&fallback, "glm-5.3-flash").unwrap();
+        assert_eq!(found.slug, "z-ai/glm-5.3-flash");
+        assert_eq!(found.context_window, Some(1_310_720));
+
+        let catalog = build_model_catalog(
+            &["glm-5.3-flash".to_string()],
+            &[],
+            &fallback,
+            "glm-5.3-flash",
+            None,
+            None,
+        );
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["models"][0]["slug"], "glm-5.3-flash");
+        assert_eq!(catalog["models"][0]["display_name"], "Z.ai: GLM 5.3 Flash");
+        assert_eq!(catalog["models"][0]["context_window"], 1_310_720);
+    }
+
+    #[test]
+    fn ambiguous_openrouter_suffix_is_not_guessed() {
+        let fallback = vec![
+            remote("z-ai/glm-5.3-flash", "Z", 1_310_720, &["text"]),
+            remote("other/glm-5.3-flash", "O", 200_000, &["text"]),
+        ];
+        assert!(lookup_fallback_model(&fallback, "glm-5.3-flash").is_none());
+    }
+
+    #[test]
+    fn openrouter_fallback_does_not_inject_its_catalog_into_the_picker() {
+        let fallback: Vec<RemoteModel> = (0..80)
+            .map(|i| remote(&format!("vendor/m{i}"), &format!("M{i}"), 8_000, &["text"]))
+            .collect();
+        let catalog = build_model_catalog(
+            &["glm-5.3-flash".to_string()],
+            &[],
+            &fallback,
+            "glm-5.3-flash",
+            None,
+            None,
+        );
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["models"][0]["slug"], "glm-5.3-flash");
+        assert_eq!(
+            catalog["models"][0]["context_window"],
+            DEFAULT_PROVIDER_CONTEXT_WINDOW
+        );
+    }
+
+    #[test]
+    fn primary_context_window_wins_over_openrouter_fallback() {
+        let primary = vec![remote("glm-5.3-flash", "Local", 999_999, &["text"])];
+        let fallback = vec![remote(
+            "z-ai/glm-5.3-flash",
+            "Z.ai: GLM 5.3 Flash",
+            1_310_720,
+            &["text", "image"],
+        )];
+        let catalog = build_model_catalog(
+            &["glm-5.3-flash".to_string()],
+            &primary,
+            &fallback,
+            "glm-5.3-flash",
+            None,
+            None,
+        );
+        assert_eq!(catalog["models"][0]["context_window"], 999_999);
+        assert_eq!(catalog["models"][0]["display_name"], "Local");
+    }
+
+    #[test]
+    fn openrouter_base_url_skips_the_public_fallback() {
+        assert!(is_openrouter_base_url("https://openrouter.ai/api/v1"));
+        assert!(is_openrouter_base_url("https://www.openrouter.ai/api/v1"));
+        assert!(!is_openrouter_base_url("https://api.z.ai/api/v1"));
+        assert!(!needs_openrouter_fallback(
+            &["openai/gpt-5.3-codex".to_string()],
+            &[],
+            "https://openrouter.ai/api/v1"
+        ));
+        assert!(needs_openrouter_fallback(
+            &["glm-5.3-flash".to_string()],
+            &[],
+            "https://api.z.ai/api/v1"
+        ));
+        assert!(!needs_openrouter_fallback(
+            &["glm-5.3-flash".to_string()],
+            &[remote("glm-5.3-flash", "Flash", 1_048_576, &["text"])],
+            "https://api.z.ai/api/v1"
+        ));
     }
 
     #[test]
@@ -1312,6 +1600,109 @@ mod tests {
             err.to_string().contains("401") || format!("{err:#}").contains("401"),
             "expected HTTP 401 in {err:#}"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn load_remote_catalog_fills_from_openrouter_without_forwarding_the_provider_key() {
+        use axum::Json;
+        use axum::extract::State;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::get;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Clone)]
+        struct MockState {
+            saw_auth_on_openrouter: Arc<AtomicBool>,
+        }
+
+        async fn zai_models() -> StatusCode {
+            StatusCode::UNAUTHORIZED
+        }
+
+        async fn openrouter_models(
+            State(state): State<MockState>,
+            headers: HeaderMap,
+        ) -> (StatusCode, Json<serde_json::Value>) {
+            if headers.contains_key(axum::http::header::AUTHORIZATION) {
+                state.saw_auth_on_openrouter.store(true, Ordering::SeqCst);
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "data": [{
+                        "id": "z-ai/glm-5.3-flash",
+                        "name": "Z.ai: GLM 5.3 Flash",
+                        "context_length": 1_310_720
+                    }]
+                })),
+            )
+        }
+
+        struct UrlGuard {
+            previous: Option<String>,
+        }
+        impl UrlGuard {
+            fn set(value: &str) -> Self {
+                let previous = std::env::var("CODEX_SWITCH_OPENROUTER_MODELS_URL").ok();
+                unsafe {
+                    std::env::set_var("CODEX_SWITCH_OPENROUTER_MODELS_URL", value);
+                }
+                Self { previous }
+            }
+        }
+        impl Drop for UrlGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.previous {
+                        Some(value) => {
+                            std::env::set_var("CODEX_SWITCH_OPENROUTER_MODELS_URL", value)
+                        }
+                        None => std::env::remove_var("CODEX_SWITCH_OPENROUTER_MODELS_URL"),
+                    }
+                }
+            }
+        }
+
+        let _home = TestHome::new();
+        let _url_lock = crate::auth::URL_ENV_LOCK.lock().await;
+        let saw_auth = Arc::new(AtomicBool::new(false));
+        let app = axum::Router::new()
+            .route("/v1/models", get(zai_models))
+            .route("/api/v1/models", get(openrouter_models))
+            .with_state(MockState {
+                saw_auth_on_openrouter: saw_auth.clone(),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let _url = UrlGuard::set(&format!("http://{addr}/api/v1/models"));
+        let mut profile = sample("zai");
+        profile.model = "glm-5.3-flash".to_string();
+        profile.base_url = format!("http://{addr}/v1");
+        save(&profile).unwrap();
+
+        let (primary, fallback) = load_remote_catalog(&profile).await;
+        assert!(primary.is_empty(), "401 gateway must not yield rows");
+        assert!(
+            !saw_auth.load(Ordering::SeqCst),
+            "OpenRouter fallback must not receive the provider key"
+        );
+        assert_eq!(fallback[0].slug, "z-ai/glm-5.3-flash");
+
+        let _args = profile
+            .launch_config_args_from_remote(&primary, &fallback)
+            .unwrap();
+        let catalog_path = super::provider_dir("zai").unwrap().join("models.json");
+        let catalog: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(catalog_path).unwrap()).unwrap();
+        assert_eq!(catalog["models"][0]["slug"], "glm-5.3-flash");
+        assert_eq!(catalog["models"][0]["context_window"], 1_310_720);
+        assert_eq!(catalog["models"][0]["display_name"], "Z.ai: GLM 5.3 Flash");
         server.abort();
     }
 
