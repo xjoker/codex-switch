@@ -95,7 +95,7 @@ When the uninstaller asks whether to remove the data directory, answer `N` to pr
 
 ## 中文摘要
 
-`dev` 是下一正式版发布前的滚动测试通道，可能继续变化。直装用户可运行 `codex-switch self-update --dev`；macOS/Linux 新装使用安装脚本的 `--dev` 参数，Windows PowerShell 设置 `$env:CS_DEV="1"` 后运行安装脚本。安装后用 `codex-switch --version` 确认版本以 `-dev` 结尾（例如 `20260827.3.0-dev`），并用 `codex-switch self-update --check --dev` 检查通道。测试结束后运行 `codex-switch self-update --stable` 回到直装正式版。
+`dev` 是下一正式版发布前的滚动测试通道，可能继续变化。直装用户可运行 `codex-switch self-update --dev`；macOS/Linux 新装使用安装脚本的 `--dev` 参数，Windows PowerShell 设置 `$env:CS_DEV="1"` 后运行安装脚本。安装后用 `codex-switch --version` 确认版本以 `-dev` 结尾（例如 `20260827.4.0-dev`），并用 `codex-switch self-update --check --dev` 检查通道。测试结束后运行 `codex-switch self-update --stable` 回到直装正式版。
 
 Homebrew 只提供正式版。切换开发版前先运行 `brew uninstall codex-switch`，再使用带 `--dev` 的直装脚本。若测试后希望恢复 Homebrew 管理，运行直装卸载脚本、在删除数据目录的询问中选择 `N`，然后执行 `brew install xjoker/tap/codex-switch`。
 
