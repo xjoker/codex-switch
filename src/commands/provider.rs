@@ -13,6 +13,7 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
             alias,
             base_url,
             model,
+            models,
             name,
             env_key,
             wire_api,
@@ -24,6 +25,7 @@ pub(crate) fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
             alias,
             base_url,
             model,
+            models,
             name,
             env_key,
             wire_api,
@@ -42,6 +44,7 @@ fn add(
     alias: String,
     base_url: String,
     model: String,
+    models: Vec<String>,
     name: Option<String>,
     env_key: Option<String>,
     wire_api: String,
@@ -65,6 +68,7 @@ fn add(
         base_url,
         env_key: env_key.unwrap_or_else(|| provider::derive_env_key(&alias)),
         model,
+        models,
         wire_api,
         codex_config,
         api_key,
@@ -153,6 +157,7 @@ fn list(json: bool) -> Result<()> {
                     "name": p.name,
                     "base_url": p.base_url,
                     "model": p.model,
+                    "models": p.models,
                     "wire_api": p.wire_api,
                     "env_key": p.env_key,
                     "codex_config": p.codex_config,
@@ -188,6 +193,7 @@ fn show(alias: &str, json: bool) -> Result<()> {
             "name": p.name,
             "base_url": p.base_url,
             "model": p.model,
+            "models": p.models,
             "wire_api": p.wire_api,
             "env_key": p.env_key,
             "codex_config": p.codex_config,
@@ -200,6 +206,11 @@ fn show(alias: &str, json: bool) -> Result<()> {
     user_println(&format!("provider_id {}", p.provider_id));
     user_println(&format!("base_url    {}", p.base_url));
     user_println(&format!("model       {}", p.model));
+    if p.models.is_empty() {
+        user_println("models      (none)");
+    } else {
+        user_println(&format!("models      {}", p.models.join(", ")));
+    }
     user_println(&format!("wire_api    {}", p.wire_api));
     user_println(&format!("env_key     {}", p.env_key));
     if p.codex_config.is_empty() {

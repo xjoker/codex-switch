@@ -13,10 +13,13 @@
 //! the process table. Because `-c` layers on top of the base config, the user's
 //! `~/.codex/config.toml` (MCP servers, skills, …) is left untouched.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::auth;
 
@@ -49,6 +52,11 @@ pub struct ProviderProfile {
     pub env_key: String,
     /// Default model id (for OpenRouter, the full slug incl. provider prefix).
     pub model: String,
+    /// Extra slugs shown in Codex `/model` besides [`model`](Self::model).
+    /// Empty means just the default, plus the gateway's full `/models` list
+    /// when that list is small enough to inject wholesale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
     #[serde(default = "default_wire_api")]
     pub wire_api: String,
     /// Extra `codex -c key=value` overrides applied at launch, stored verbatim as
@@ -193,12 +201,24 @@ impl ProviderProfile {
     /// the provider already has an explicit `model_catalog_json` override.
     ///
     /// The catalog is written under this provider's directory (not
-    /// `$CODEX_HOME`) so Codex can resolve the selected model slug.
+    /// `$CODEX_HOME`) so Codex can resolve the selected model slug. Does not
+    /// fetch the gateway; callers that have a `/models` response should use
+    /// [`launch_config_args_from_remote`](Self::launch_config_args_from_remote).
+    #[cfg(test)]
     pub fn launch_config_args(&self) -> Result<Vec<String>> {
+        self.launch_config_args_from_remote(&[])
+    }
+
+    /// Like [`launch_config_args`](Self::launch_config_args), filling catalog
+    /// rows from a gateway `/models` listing when one is available.
+    pub(crate) fn launch_config_args_from_remote(
+        &self,
+        remote: &[RemoteModel],
+    ) -> Result<Vec<String>> {
         let catalog_path = if self.has_explicit_model_catalog() {
             None
         } else {
-            Some(self.write_model_catalog()?)
+            Some(self.write_model_catalog(remote)?)
         };
         let catalog_utf8 = catalog_path
             .as_ref()
@@ -242,17 +262,19 @@ impl ProviderProfile {
             .collect()
     }
 
-    fn has_explicit_model_catalog(&self) -> bool {
+    pub(crate) fn has_explicit_model_catalog(&self) -> bool {
         override_value(&self.codex_config, "model_catalog_json").is_some()
     }
 
-    fn write_model_catalog(&self) -> Result<PathBuf> {
+    fn write_model_catalog(&self, remote: &[RemoteModel]) -> Result<PathBuf> {
         let dir = provider_dir(&self.alias)?;
         ensure_private_dir(&dir)?;
         let path = dir.join("models.json");
-        let json = model_catalog_json(
+        let json = build_model_catalog(
+            &self.saved_model_slugs(),
+            remote,
             &self.model,
-            catalog_context_window(&self.codex_config),
+            override_context_window(&self.codex_config),
             override_value(&self.codex_config, "model_reasoning_effort"),
         );
         let body =
@@ -260,6 +282,22 @@ impl ProviderProfile {
         auth::atomic_write_private(&path, &body)
             .with_context(|| format!("writing provider model catalog {}", path.display()))?;
         Ok(path)
+    }
+
+    /// Default [`model`](Self::model) first, then extra [`models`](Self::models),
+    /// de-duplicated. Empty strings are skipped.
+    fn saved_model_slugs(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for slug in
+            std::iter::once(self.model.as_str()).chain(self.models.iter().map(String::as_str))
+        {
+            let slug = slug.trim();
+            if slug.is_empty() || out.iter().any(|existing| existing == slug) {
+                continue;
+            }
+            out.push(slug.to_string());
+        }
+        out
     }
 
     /// The single environment override that hands Codex the API key under the
@@ -274,6 +312,22 @@ impl ProviderProfile {
 /// by "degrade performance".
 const DEFAULT_PROVIDER_CONTEXT_WINDOW: i64 = 1_048_576;
 
+/// Gateways at or under this size are injected wholesale into Codex `/model`.
+/// Larger catalogs (OpenRouter is hundreds) stay limited to saved slugs.
+const SMALL_REMOTE_CATALOG_LIMIT: usize = 48;
+
+const GATEWAY_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Fields from a gateway `GET {base_url}/models` row that Codex's catalog uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteModel {
+    pub slug: String,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub context_window: Option<i64>,
+    pub input_modalities: Vec<String>,
+}
+
 fn override_value<'a>(config: &'a [String], key: &str) -> Option<&'a str> {
     config.iter().rev().find_map(|entry| {
         let (k, v) = entry.split_once('=')?;
@@ -281,27 +335,222 @@ fn override_value<'a>(config: &'a [String], key: &str) -> Option<&'a str> {
     })
 }
 
-fn catalog_context_window(config: &[String]) -> i64 {
+fn override_context_window(config: &[String]) -> Option<i64> {
     override_value(config, "model_context_window")
         .and_then(|value| value.trim_matches('"').parse().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_PROVIDER_CONTEXT_WINDOW)
 }
 
-/// A Codex `model_catalog_json` body whose `slug` matches `model` exactly.
-///
-/// Codex 0.149 requires `base_instructions` (an empty string is accepted). A
-/// missing catalog entry produces the "Model metadata for … not found"
-/// fallback warning.
-fn model_catalog_json(
-    model: &str,
-    context_window: i64,
+/// `GET {base_url}/models` with the provider key. Failure is the caller's to
+/// swallow: launch must still proceed with generated defaults.
+pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Vec<RemoteModel>> {
+    let url = format!("{}/models", profile.base_url.trim_end_matches('/'));
+    let client = auth::build_http_client()?;
+    let response = client
+        .get(&url)
+        .timeout(GATEWAY_MODELS_TIMEOUT)
+        .header("Authorization", format!("Bearer {}", profile.api_key))
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .context("reading gateway /models body")?;
+    if !status.is_success() {
+        anyhow::bail!("GET {url} returned {status}");
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&body).context("parsing gateway /models JSON")?;
+    let models = parse_gateway_models(&value);
+    debug!(
+        "provider '{}' gateway /models returned {} entries",
+        profile.alias,
+        models.len()
+    );
+    Ok(models)
+}
+
+/// OpenAI `{data:[{id,…}]}`, OpenRouter extras (`name`, `context_length`), or
+/// Codex `{models:[{slug,…}]}`. Unrecognized bodies yield an empty list.
+fn parse_gateway_models(body: &serde_json::Value) -> Vec<RemoteModel> {
+    if let Some(data) = body.get("data").and_then(serde_json::Value::as_array) {
+        return data.iter().filter_map(parse_openai_model).collect();
+    }
+    if let Some(models) = body.get("models").and_then(serde_json::Value::as_array) {
+        return models.iter().filter_map(parse_named_model).collect();
+    }
+    Vec::new()
+}
+
+fn parse_openai_model(item: &serde_json::Value) -> Option<RemoteModel> {
+    let slug = nonempty_slug(item.get("id").and_then(serde_json::Value::as_str))?;
+    Some(remote_from_item(slug, item))
+}
+
+fn parse_named_model(item: &serde_json::Value) -> Option<RemoteModel> {
+    let slug = nonempty_slug(item.get("slug").and_then(serde_json::Value::as_str))
+        .or_else(|| nonempty_slug(item.get("id").and_then(serde_json::Value::as_str)))?;
+    Some(remote_from_item(slug, item))
+}
+
+fn nonempty_slug(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|slug| !slug.is_empty())
+}
+
+fn json_positive_i64(value: &serde_json::Value) -> Option<i64> {
+    let parsed = value.as_i64().or_else(|| {
+        value
+            .as_u64()
+            .and_then(|n| i64::try_from(n).ok())
+            .or_else(|| {
+                value.as_f64().and_then(|n| {
+                    (n.is_finite() && n > 0.0 && n <= i64::MAX as f64).then_some(n as i64)
+                })
+            })
+    })?;
+    (parsed > 0).then_some(parsed)
+}
+
+fn remote_from_item(slug: &str, item: &serde_json::Value) -> RemoteModel {
+    let display_name = item
+        .get("name")
+        .or_else(|| item.get("display_name"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let description = item
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let context_window = item
+        .get("context_length")
+        .or_else(|| item.get("context_window"))
+        .or_else(|| item.pointer("/top_provider/context_length"))
+        .and_then(json_positive_i64);
+    RemoteModel {
+        slug: slug.to_string(),
+        display_name,
+        description,
+        context_window,
+        input_modalities: parse_input_modalities(item),
+    }
+}
+
+fn parse_input_modalities(item: &serde_json::Value) -> Vec<String> {
+    let Some(raw) = item
+        .pointer("/architecture/input_modalities")
+        .or_else(|| item.get("input_modalities"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for value in raw {
+        let Some(name) = value.as_str() else {
+            continue;
+        };
+        if (name == "text" || name == "image") && !out.iter().any(|existing| existing == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+fn select_catalog_slugs(saved: &[String], remote: &[RemoteModel]) -> Vec<String> {
+    let mut out = Vec::new();
+    for slug in saved {
+        if !slug.is_empty() && !out.iter().any(|existing| existing == slug) {
+            out.push(slug.clone());
+        }
+    }
+    if !remote.is_empty() && remote.len() <= SMALL_REMOTE_CATALOG_LIMIT {
+        for model in remote {
+            if !out.iter().any(|existing| existing == &model.slug) {
+                out.push(model.slug.clone());
+            }
+        }
+    }
+    out
+}
+
+fn entry_context_window(
+    slug: &str,
+    default_slug: &str,
+    user_context: Option<i64>,
+    remote: Option<&RemoteModel>,
+) -> i64 {
+    if slug == default_slug
+        && let Some(value) = user_context
+    {
+        return value;
+    }
+    if let Some(value) = remote.and_then(|model| model.context_window) {
+        return value;
+    }
+    DEFAULT_PROVIDER_CONTEXT_WINDOW
+}
+
+/// A Codex `model_catalog_json` body. Each `slug` is listed with
+/// `visibility: list` so `/model` can show it. Codex 0.149 requires
+/// `base_instructions` (an empty string is accepted).
+fn build_model_catalog(
+    saved: &[String],
+    remote: &[RemoteModel],
+    default_slug: &str,
+    user_context: Option<i64>,
     default_reasoning: Option<&str>,
 ) -> serde_json::Value {
+    let by_slug: HashMap<&str, &RemoteModel> = remote
+        .iter()
+        .map(|model| (model.slug.as_str(), model))
+        .collect();
+    let models: Vec<serde_json::Value> = select_catalog_slugs(saved, remote)
+        .iter()
+        .enumerate()
+        .map(|(index, slug)| {
+            let meta = by_slug.get(slug.as_str()).copied();
+            catalog_entry(
+                slug,
+                entry_context_window(slug, default_slug, user_context, meta),
+                (slug == default_slug)
+                    .then_some(default_reasoning)
+                    .flatten(),
+                meta,
+                i64::try_from(index).unwrap_or(i64::MAX),
+            )
+        })
+        .collect();
+    serde_json::json!({ "models": models })
+}
+
+fn catalog_entry(
+    slug: &str,
+    context_window: i64,
+    default_reasoning: Option<&str>,
+    meta: Option<&RemoteModel>,
+    priority: i64,
+) -> serde_json::Value {
+    let display_name = meta
+        .and_then(|model| model.display_name.as_deref())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(slug);
+    let description = meta
+        .and_then(|model| model.description.as_deref())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(display_name);
+    let modalities: Vec<String> = meta
+        .map(|model| model.input_modalities.clone())
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec!["text".to_string(), "image".to_string()]);
     let mut entry = serde_json::json!({
-        "slug": model,
-        "display_name": model,
-        "description": model,
+        "slug": slug,
+        "display_name": display_name,
+        "description": description,
         "supported_reasoning_levels": [
             {"effort": "low", "description": "Light reasoning"},
             {"effort": "medium", "description": "Balanced"},
@@ -312,7 +561,7 @@ fn model_catalog_json(
         "shell_type": "shell_command",
         "visibility": "list",
         "supported_in_api": true,
-        "priority": 0,
+        "priority": priority,
         "base_instructions": "",
         "default_reasoning_summary": "none",
         "support_verbosity": false,
@@ -322,12 +571,12 @@ fn model_catalog_json(
         "max_context_window": context_window,
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
-        "input_modalities": ["text", "image"],
+        "input_modalities": modalities,
     });
     if let Some(effort) = default_reasoning.filter(|value| !value.is_empty()) {
         entry["default_reasoning_level"] = serde_json::Value::String(effort.to_string());
     }
-    serde_json::json!({ "models": [entry] })
+    entry
 }
 
 /// Render a string as a TOML basic (quoted) string for a `codex -c key=value`
@@ -463,6 +712,20 @@ mod tests {
         }
     }
 
+    fn model_catalog_json(
+        model: &str,
+        context_window: i64,
+        default_reasoning: Option<&str>,
+    ) -> serde_json::Value {
+        build_model_catalog(
+            &[model.to_string()],
+            &[],
+            model,
+            Some(context_window),
+            default_reasoning,
+        )
+    }
+
     fn sample(alias: &str) -> ProviderProfile {
         ProviderProfile {
             alias: alias.to_string(),
@@ -471,6 +734,7 @@ mod tests {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             env_key: derive_env_key(alias),
             model: "openai/gpt-5.3-codex".to_string(),
+            models: Vec::new(),
             wire_api: default_wire_api(),
             codex_config: Vec::new(),
             api_key: "sk-secret-1234".to_string(),
@@ -757,6 +1021,298 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(catalog_path).unwrap()).unwrap();
         assert_eq!(catalog["models"][0]["context_window"], 272000);
         assert_eq!(catalog["models"][0]["max_context_window"], 272000);
+    }
+
+    fn remote(slug: &str, display: &str, context_window: i64, modalities: &[&str]) -> RemoteModel {
+        RemoteModel {
+            slug: slug.to_string(),
+            display_name: Some(display.to_string()),
+            description: Some(format!("{display} description")),
+            context_window: Some(context_window),
+            input_modalities: modalities
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn parse_openai_and_openrouter_models_bodies() {
+        let openai = serde_json::json!({
+            "object": "list",
+            "data": [
+                {"id": "glm-5.3-flash", "object": "model"},
+                {"id": "  ", "object": "model"},
+            ]
+        });
+        let parsed = parse_gateway_models(&openai);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].slug, "glm-5.3-flash");
+        assert_eq!(parsed[0].context_window, None);
+
+        let openrouter = serde_json::json!({
+            "data": [{
+                "id": "z-ai/glm-5.3-flash",
+                "name": "Z.ai: GLM 5.3 Flash",
+                "description": "Flash",
+                "context_length": 1_310_720,
+                "supported_parameters": ["reasoning"],
+                "architecture": {"input_modalities": ["text", "image", "video"]},
+                "top_provider": {"context_length": 1_310_720}
+            }]
+        });
+        let parsed = parse_gateway_models(&openrouter);
+        assert_eq!(parsed[0].slug, "z-ai/glm-5.3-flash");
+        assert_eq!(
+            parsed[0].display_name.as_deref(),
+            Some("Z.ai: GLM 5.3 Flash")
+        );
+        assert_eq!(parsed[0].context_window, Some(1_310_720));
+        assert_eq!(parsed[0].input_modalities, vec!["text", "image"]);
+    }
+
+    #[test]
+    fn parse_codex_shaped_models_body() {
+        let body = serde_json::json!({
+            "models": [{
+                "slug": "glm-5.3",
+                "display_name": "GLM 5.3",
+                "context_window": 200000,
+                "input_modalities": ["text"]
+            }]
+        });
+        let parsed = parse_gateway_models(&body);
+        assert_eq!(parsed[0].slug, "glm-5.3");
+        assert_eq!(parsed[0].display_name.as_deref(), Some("GLM 5.3"));
+        assert_eq!(parsed[0].context_window, Some(200000));
+        assert_eq!(parsed[0].input_modalities, vec!["text"]);
+    }
+
+    #[test]
+    fn unrecognized_or_error_bodies_yield_no_remote_models() {
+        assert!(parse_gateway_models(&serde_json::json!({"code": 1001})).is_empty());
+        assert!(parse_gateway_models(&serde_json::json!({"data": "nope"})).is_empty());
+    }
+
+    #[test]
+    fn small_remote_catalog_is_injected_with_the_default_first() {
+        let remote = vec![
+            remote("glm-5.3", "GLM 5.3", 200_000, &["text"]),
+            remote("glm-5.3-flash", "GLM Flash", 1_048_576, &["text", "image"]),
+        ];
+        let catalog = build_model_catalog(
+            &["glm-5.3-flash".to_string()],
+            &remote,
+            "glm-5.3-flash",
+            None,
+            Some("max"),
+        );
+        let slugs: Vec<&str> = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["slug"].as_str().unwrap())
+            .collect();
+        assert_eq!(slugs, vec!["glm-5.3-flash", "glm-5.3"]);
+        assert_eq!(catalog["models"][0]["display_name"], "GLM Flash");
+        assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], "max");
+        assert_eq!(catalog["models"][0]["visibility"], "list");
+        assert_eq!(catalog["models"][1]["context_window"], 200_000);
+        assert!(
+            catalog["models"][1]
+                .get("default_reasoning_level")
+                .is_none()
+        );
+        assert_eq!(
+            catalog["models"][1]["input_modalities"],
+            serde_json::json!(["text"])
+        );
+    }
+
+    #[test]
+    fn large_remote_catalog_stays_limited_to_saved_slugs_but_fills_metadata() {
+        let remote: Vec<RemoteModel> = (0..=SMALL_REMOTE_CATALOG_LIMIT)
+            .map(|i| {
+                remote(
+                    &format!("m{i}"),
+                    &format!("M{i}"),
+                    32_000 + i as i64,
+                    &["text"],
+                )
+            })
+            .collect();
+        assert!(remote.len() > SMALL_REMOTE_CATALOG_LIMIT);
+
+        let catalog = build_model_catalog(
+            &["m3".to_string(), "m7".to_string()],
+            &remote,
+            "m3",
+            None,
+            None,
+        );
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["slug"], "m3");
+        assert_eq!(models[0]["display_name"], "M3");
+        assert_eq!(models[0]["context_window"], 32_003);
+        assert_eq!(models[1]["slug"], "m7");
+        assert_eq!(models[1]["context_window"], 32_007);
+    }
+
+    #[test]
+    fn user_context_window_override_wins_for_the_default_slug_only() {
+        let remote = vec![
+            remote("glm-5.3-flash", "Flash", 1_310_720, &["text", "image"]),
+            remote("glm-5.3", "GLM", 200_000, &["text"]),
+        ];
+        let catalog = build_model_catalog(
+            &["glm-5.3-flash".to_string(), "glm-5.3".to_string()],
+            &remote,
+            "glm-5.3-flash",
+            Some(272_000),
+            None,
+        );
+        assert_eq!(catalog["models"][0]["context_window"], 272_000);
+        assert_eq!(catalog["models"][1]["context_window"], 200_000);
+    }
+
+    #[test]
+    fn launch_args_write_a_multi_model_catalog_from_remote_metadata() {
+        let _home = TestHome::new();
+        let mut profile = sample("zai");
+        profile.model = "glm-5.3-flash".to_string();
+        profile.models = vec!["glm-5.3".to_string()];
+        save(&profile).unwrap();
+
+        let remote = vec![
+            remote("glm-5.3-flash", "GLM Flash", 1_310_720, &["text", "image"]),
+            remote("glm-5.3", "GLM 5.3", 200_000, &["text"]),
+            remote("glm-4.7", "GLM 4.7", 128_000, &["text"]),
+        ];
+        let args = profile.launch_config_args_from_remote(&remote).unwrap();
+        let catalog_path = super::provider_dir("zai").unwrap().join("models.json");
+        let catalog: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&catalog_path).unwrap()).unwrap();
+        let slugs: Vec<&str> = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["slug"].as_str().unwrap())
+            .collect();
+        assert_eq!(slugs, vec!["glm-5.3-flash", "glm-5.3", "glm-4.7"]);
+        assert_eq!(catalog["models"][0]["context_window"], 1_310_720);
+        assert_eq!(catalog["models"][0]["display_name"], "GLM Flash");
+        assert!(
+            !args.iter().any(|a| a.contains("sk-secret-1234")),
+            "the API key must never appear in argv"
+        );
+    }
+
+    #[test]
+    fn extra_saved_models_survive_a_save_load_round_trip() {
+        let _home = TestHome::new();
+        let mut profile = sample("zai");
+        profile.model = "glm-5.3-flash".to_string();
+        profile.models = vec!["glm-5.3".to_string()];
+        save(&profile).unwrap();
+        let loaded = load("zai").unwrap();
+        assert_eq!(loaded.model, "glm-5.3-flash");
+        assert_eq!(loaded.models, vec!["glm-5.3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn fetch_gateway_models_sends_bearer_and_parses_openrouter_shape() {
+        use axum::Json;
+        use axum::extract::State;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::get;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct MockState {
+            hits: Arc<AtomicUsize>,
+        }
+
+        async fn handler(
+            State(state): State<MockState>,
+            headers: HeaderMap,
+        ) -> (StatusCode, Json<serde_json::Value>) {
+            state.hits.fetch_add(1, Ordering::SeqCst);
+            let auth = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if auth != "Bearer sk-secret-1234" {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "bad key"})),
+                );
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "data": [
+                        {
+                            "id": "glm-5.3-flash",
+                            "name": "GLM Flash",
+                            "context_length": 1_048_576
+                        },
+                        {
+                            "id": "glm-5.3",
+                            "name": "GLM 5.3",
+                            "context_length": 200000
+                        }
+                    ]
+                })),
+            )
+        }
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route("/v1/models", get(handler))
+            .with_state(MockState { hits: hits.clone() });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut profile = sample("zai");
+        profile.base_url = format!("http://{addr}/v1");
+        profile.model = "glm-5.3-flash".to_string();
+        let fetched = fetch_gateway_models(&profile).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fetched.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(),
+            vec!["glm-5.3-flash", "glm-5.3"]
+        );
+        assert_eq!(fetched[0].context_window, Some(1_048_576));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_gateway_models_errors_on_http_failure_so_launch_can_fall_back() {
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        let app =
+            axum::Router::new().route("/v1/models", get(|| async { StatusCode::UNAUTHORIZED }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut profile = sample("zai");
+        profile.base_url = format!("http://{addr}/v1");
+        let err = fetch_gateway_models(&profile).await.unwrap_err();
+        assert!(
+            err.to_string().contains("401") || format!("{err:#}").contains("401"),
+            "expected HTTP 401 in {err:#}"
+        );
+        server.abort();
     }
 
     #[cfg(unix)]

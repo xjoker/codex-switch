@@ -1481,6 +1481,7 @@ mod tests {
             base_url: "https://openrouter.ai/api/v1".into(),
             env_key: "CODEX_SWITCH_OPENROUTER_KEY".into(),
             model: "openai/gpt-5.3-codex".into(),
+            models: Vec::new(),
             wire_api: "responses".into(),
             codex_config: Vec::new(),
             api_key: "sk-secret-1234".into(),

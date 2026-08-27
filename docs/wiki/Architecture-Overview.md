@@ -49,7 +49,7 @@ Profile identity prefers `account_id` and falls back to email when required for 
 
 [`src/provider.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/provider.rs) owns third-party API provider profiles (OpenRouter and other Responses-compatible endpoints). Each profile is a TOML file under `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` (directory `0700`, file `0600`). It carries a Codex `model_providers.<id>` definition plus a bearer key; it has no `auth.json`.
 
-[`src/launch.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/launch.rs) takes a separate path when the named alias is a provider: it does not stage `$CODEX_HOME/auth.json`. The profile is translated into `codex -c …` overrides that define and select the provider, a generated model catalog is written next to `provider.toml`, and the key is injected into the child process environment under `env_key` — never onto the command line. Because `-c` layers on the user's base `$CODEX_HOME/config.toml`, MCP servers and other Codex settings survive. Auto-select (`launch` with no alias) and `use` stay ChatGPT-only.
+[`src/launch.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/launch.rs) takes a separate path when the named alias is a provider: it does not stage `$CODEX_HOME/auth.json`. The profile is translated into `codex -c …` overrides that define and select the provider, a generated model catalog is written next to `provider.toml` (filled from the gateway `GET /models` when reachable), and the key is injected into the child process environment under `env_key` — never onto the command line. Because `-c` layers on the user's base `$CODEX_HOME/config.toml`, MCP servers and other Codex settings survive. Auto-select (`launch` with no alias) and `use` stay ChatGPT-only.
 
 The TUI isolates the two kinds of profile on separate tabs so quota/scoring bindings never mix with provider add/remove. See [Custom API providers](Providers).
 
@@ -99,7 +99,7 @@ PID-file cleanup verifies lock ownership before removal. Removing a path while a
 | `$CODEX_HOME/config.toml` | Codex configuration, including file-store requirement |
 | `$CODEX_SWITCH_HOME/profiles/<alias>/auth.json` | Saved account credentials |
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Custom API provider definition and key |
-| `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog for the provider's selected slug |
+| `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog for `/model` (saved slugs, or a small gateway list) |
 | `$CODEX_SWITCH_HOME/current` | Current alias marker |
 | `$CODEX_SWITCH_HOME/deleted-profiles/` | Recoverable profile archives |
 | `$CODEX_SWITCH_HOME/cache.json` | Usage, workspace metadata, and rejected-credential cache |

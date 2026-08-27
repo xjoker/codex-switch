@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Custom provider model catalog** — Launching a custom API provider writes `$CODEX_SWITCH_HOME/providers/<alias>/models.json` and passes it as `model_catalog_json`, so Codex has metadata for slugs it does not ship (for example `glm-5.3-flash`) instead of warning and falling back to a 272k window. `--set model_catalog_json=…` is left in place; `--set model_context_window=N` is copied into the generated catalog.
+- **Custom provider model catalog** — Launching a custom API provider writes `$CODEX_SWITCH_HOME/providers/<alias>/models.json` and passes it as `model_catalog_json`, so Codex `/model` lists the provider's slugs and has metadata instead of warning and falling back to a 272k window. Launch `GET`s `{base_url}/models` to fill `context_window`, display name, and description: a small gateway list is injected wholesale; a large catalog (OpenRouter) stays limited to `--model` plus `--models`. `--set model_catalog_json=…` is left in place; `--set model_context_window=N` still wins for the default slug. Fetch failure does not block launch.
 
 - **TUI launch** — Launch Codex from the TUI: on the Accounts tab press `o` for the selected profile, or `o` in the account menu; on the Providers tab press `l` or `Enter` for the selected custom API provider. Codex runs in the foreground and the TUI resumes when it exits.
 

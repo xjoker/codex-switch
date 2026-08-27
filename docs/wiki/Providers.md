@@ -60,7 +60,7 @@ codex-switch launch openrouter
 codex-switch launch openrouter -- --full-auto
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider, injects the API key into the child process environment under `env_key`, and writes a Codex model catalog for the selected slug under `$CODEX_SWITCH_HOME/providers/<alias>/models.json` so Codex does not fall back to generic metadata. Extra arguments after `--` are appended as Codex CLI flags.
+`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider, injects the API key into the child process environment under `env_key`, and writes a Codex model catalog under `$CODEX_SWITCH_HOME/providers/<alias>/models.json` so `/model` lists the provider's slugs and Codex does not fall back to generic metadata. Extra arguments after `--` are appended as Codex CLI flags.
 
 Some models need extra Codex request settings (disabling `web_search`, or setting a reasoning effort for thinking models) — see [Model-specific request settings](#model-specific-request-settings).
 
@@ -95,7 +95,22 @@ Codex only ships metadata for its own model slugs. A custom id such as `glm-5.3-
 warning: Model metadata for `glm-5.3-flash` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
 ```
 
-`launch` generates a catalog whose `slug` matches the provider's `--model` exactly and passes it as `model_catalog_json`. The fallback 272k window is replaced with 1,048,576 tokens unless the provider already has `--set model_context_window=N`. An explicit `--set model_catalog_json=/path/to/models.json` is left alone — that file must then include the same slug.
+`launch` generates a catalog and passes it as `model_catalog_json`. Codex `/model` reads that file as a **replacement** for the bundled OpenAI list (it does not merge). Each injected entry uses `visibility: list` so it appears in the picker.
+
+At launch, `GET {base_url}/models` (Bearer key, 8s timeout) fills `context_window`, display name, description, and input modalities when the gateway returns them:
+
+- A small list (at most 48 models, typical of a single vendor) is injected wholesale, with the provider's `--model` first.
+- A large list (OpenRouter is hundreds) is **not** dumped into `/model`. Only `--model` and any extra `--models SLUG` values are listed; matching rows still receive the fetched metadata.
+- `--set model_context_window=N` still wins for the default slug. Other slugs use the fetched window, or 1,048,576 when the gateway does not report one.
+- Fetch failure (401, timeout, unrecognized JSON) does not block launch: the generated defaults are used.
+- An explicit `--set model_catalog_json=/path/to/models.json` is left alone — that file must then include every slug you want in `/model`.
+
+```bash
+codex-switch provider add zai \
+  --base-url https://api.z.ai/api/v1 \
+  --model glm-5.3-flash \
+  --models glm-5.3
+```
 
 ### web_search server tool
 
@@ -168,7 +183,7 @@ On the Accounts tab, press `o` to launch the selected ChatGPT profile, or open t
 | Location | Purpose |
 |---|---|
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Provider definition and API key (directory `0700`, file `0600`) |
-| `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog used at launch |
+| `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog used at launch (`/model` list plus metadata) |
 
 Defaults to `~/.codex-switch/providers/`. Relocate the whole tree with `CODEX_SWITCH_HOME`; this still does not change where Codex reads `auth.json`.
 

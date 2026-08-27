@@ -43,6 +43,9 @@ pub enum ProviderCommand {
         /// Default model id (for OpenRouter, the full slug incl. provider prefix)
         #[arg(long)]
         model: String,
+        /// Extra model slugs shown in Codex `/model` besides `--model` (repeatable)
+        #[arg(long = "models", value_name = "SLUG")]
+        models: Vec<String>,
         /// Human-readable provider name (defaults to the alias)
         #[arg(long)]
         name: Option<String>,

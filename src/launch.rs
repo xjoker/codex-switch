@@ -68,7 +68,7 @@ async fn launch_interactive(
         && provider::exists(alias)
     {
         let profile = provider::load(alias)?;
-        return launch_provider(profile, args, json);
+        return launch_provider(profile, args, json).await;
     }
 
     let mut revival_hint = None;
@@ -272,14 +272,26 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// `codex -c …` overrides (which layer over the user's base config, preserving
 /// MCP servers and everything else) and the API key is injected into the child
 /// process environment under the profile's `env_key`. A generated model catalog
-/// is written under the provider directory so Codex has metadata for the
-/// selected slug; nothing is written to `~/.codex`, so there is no
-/// backup/restore window to guard.
-fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<i32> {
+/// is written under the provider directory so Codex `/model` lists the
+/// provider's slugs and has metadata for them; the gateway `GET /models` list
+/// fills context windows and display names when it is reachable. Nothing is
+/// written to `~/.codex`, so there is no backup/restore window to guard.
+async fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<i32> {
     ensure_codex_available()?;
 
+    let remote = if profile.has_explicit_model_catalog() {
+        Vec::new()
+    } else {
+        match provider::fetch_gateway_models(&profile).await {
+            Ok(models) => models,
+            Err(err) => {
+                tracing::debug!("provider gateway /models unavailable: {err:#}");
+                Vec::new()
+            }
+        }
+    };
     let (env_name, env_value) = profile.launch_env();
-    let mut codex_args = profile.launch_config_args()?;
+    let mut codex_args = profile.launch_config_args_from_remote(&remote)?;
     codex_args.extend(args);
 
     if !json {
