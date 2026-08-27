@@ -338,7 +338,7 @@ fn skip_launch_or_global_flag(argv: &[String], i: usize) -> Option<usize> {
     }
 }
 
-fn is_codex_subcommand(name: &str) -> bool {
+pub(crate) fn is_codex_subcommand(name: &str) -> bool {
     matches!(
         name,
         "agents"

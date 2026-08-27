@@ -263,27 +263,44 @@ async fn launch_interactive(
 /// Codex argv for a ChatGPT `launch`: optional `--model` is a global Codex
 /// flag, so it is placed before any subcommand in `passthrough`.
 pub(crate) fn chatgpt_codex_argv(model: Option<&str>, passthrough: Vec<String>) -> Vec<String> {
-    let mut argv = Vec::with_capacity(passthrough.len() + 2);
+    let mut extra = Vec::new();
     if let Some(model) = model.filter(|model| !model.is_empty()) {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
+        extra.push("--model".to_string());
+        extra.push(model.to_string());
     }
-    argv.extend(passthrough);
-    argv
+    splice_after_subcommand(extra, passthrough)
 }
 
-/// Codex argv for a provider `launch`: our `-c` overrides are root-level
-/// options and must stay in front of a Codex subcommand. If the caller already
-/// passed `--model` / `-m`, drop our per-model `-c` pairs (`model`,
+/// Codex argv for a provider `launch`. Codex 0.149 applies `-c` on the
+/// subcommand (`codex exec -c …`), not in front of it (`codex -c … exec` is
+/// ignored and the child talks to api.openai.com). Interactive launch has no
+/// subcommand, so overrides stay in front. If the caller already passed
+/// `--model` / `-m`, drop our per-model `-c` pairs (`model`,
 /// `model_reasoning_effort`, `web_search`) so they do not fight the one-shot
 /// model; provider definition overrides stay.
 pub(crate) fn provider_codex_argv(overrides: Vec<String>, passthrough: Vec<String>) -> Vec<String> {
-    let mut argv = overrides;
+    let mut overrides = overrides;
     if passthrough_sets_model(&passthrough) {
-        strip_c_pair(&mut argv, is_per_model_override);
+        strip_c_pair(&mut overrides, is_per_model_override);
     }
-    argv.extend(passthrough);
-    argv
+    splice_after_subcommand(overrides, passthrough)
+}
+
+fn splice_after_subcommand(overrides: Vec<String>, passthrough: Vec<String>) -> Vec<String> {
+    match passthrough.first() {
+        Some(cmd) if crate::cli::is_codex_subcommand(cmd) => {
+            let mut argv = Vec::with_capacity(overrides.len() + passthrough.len());
+            argv.push(cmd.clone());
+            argv.extend(overrides);
+            argv.extend(passthrough.into_iter().skip(1));
+            argv
+        }
+        _ => {
+            let mut argv = overrides;
+            argv.extend(passthrough);
+            argv
+        }
+    }
 }
 
 fn passthrough_sets_model(args: &[String]) -> bool {
@@ -340,12 +357,16 @@ fn spawn_codex(
     isolated_codex_home: Option<&std::path::Path>,
 ) -> std::io::Result<std::process::Child> {
     let mut cmd = std::process::Command::new("codex");
-    cmd.args(args).stdin(std::process::Stdio::inherit());
+    cmd.args(args);
     if json {
-        cmd.stdout(std::process::Stdio::piped())
+        // `--json launch` is non-interactive: inherited stdin is often a pipe
+        // (not a TTY), and Codex exec then waits to append it as extra input.
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
     } else {
-        cmd.stdout(std::process::Stdio::inherit())
+        cmd.stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
     }
     if let Some((name, value)) = extra_env {
@@ -710,13 +731,13 @@ mod tests {
     use super::backup_launch_auth;
 
     #[test]
-    fn chatgpt_argv_puts_model_before_a_codex_subcommand() {
+    fn chatgpt_argv_puts_model_after_a_codex_subcommand() {
         assert_eq!(
             chatgpt_codex_argv(
                 Some("gpt-5.4"),
                 vec!["exec".into(), "--json".into(), "hi".into()]
             ),
-            ["--model", "gpt-5.4", "exec", "--json", "hi"]
+            ["exec", "--model", "gpt-5.4", "--json", "hi"]
         );
     }
 
@@ -815,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_argv_keeps_overrides_in_front_of_exec() {
+    fn provider_argv_puts_overrides_after_exec() {
         let argv = provider_codex_argv(
             vec![
                 "-c".into(),
@@ -828,15 +849,24 @@ mod tests {
         assert_eq!(
             argv,
             [
+                "exec",
                 "-c",
                 r#"model="saved""#,
                 "-c",
                 r#"model_provider="p""#,
-                "exec",
                 "--json",
                 "do"
             ]
         );
+    }
+
+    #[test]
+    fn provider_argv_keeps_overrides_in_front_without_subcommand() {
+        let argv = provider_codex_argv(
+            vec!["-c".into(), r#"model_provider="p""#.into()],
+            vec!["-s".into(), "read-only".into()],
+        );
+        assert_eq!(argv, ["-c", r#"model_provider="p""#, "-s", "read-only"]);
     }
 
     #[test]
@@ -859,11 +889,11 @@ mod tests {
         assert_eq!(
             argv,
             [
+                "exec",
                 "-c",
                 r#"model_provider="p""#,
                 "-c",
                 r#"model_providers.p.base_url="https://example.test""#,
-                "exec",
                 "--model",
                 "one-shot",
             ]
