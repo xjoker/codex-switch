@@ -1456,6 +1456,7 @@ mod tests {
     #[test]
     fn fetch_without_a_url_reports_an_error() {
         let mut form = ProviderFormState::add();
+        form.handle_key(KeyCode::Esc);
         form.handle_key(KeyCode::Char('f'));
         assert!(
             form.error
