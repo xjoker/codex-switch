@@ -471,11 +471,13 @@ async fn daemon_scheduled_warmup_fires_in_named_timezone() {
     server.shutdown();
 }
 
+#[cfg(target_os = "linux")]
 fn login_systemd_unit_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".config/systemd/user/codex-switch-daemon.service"))
 }
 
+#[cfg(target_os = "linux")]
 fn systemd_user_unit_is_active() -> bool {
     Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", "codex-switch-daemon"])
