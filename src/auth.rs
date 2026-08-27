@@ -72,6 +72,13 @@ fn codex_home_from_values(
     Ok(home.join(".codex"))
 }
 
+/// Codex's own home (`$CODEX_HOME`, else `~/.codex`) without requiring the
+/// file credential store. Provider launch uses this only to snapshot
+/// `config.toml`; it never writes back.
+pub(crate) fn resolved_codex_home() -> Result<PathBuf> {
+    codex_home_from_values(std::env::var_os("CODEX_HOME"), dirs::home_dir())
+}
+
 fn validate_cli_auth_credentials_store(codex_home: &Path) -> Result<()> {
     let Some((config_path, config)) = load_codex_config(codex_home)? else {
         return Ok(());

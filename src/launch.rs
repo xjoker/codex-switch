@@ -269,15 +269,17 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// Launch Codex against a custom API provider profile.
 ///
 /// Unlike the ChatGPT path this stages nothing: the provider is applied as
-/// `codex -c …` overrides (which layer over the user's base config, preserving
-/// MCP servers and everything else) and the API key is injected into the child
-/// process environment under the profile's `env_key`. A generated model catalog
-/// is written under the provider directory so Codex `/model` lists the
+/// `codex -c …` overrides (which layer over a snapshot of the user's
+/// `config.toml`, preserving MCP servers) and the API key is injected into the
+/// child process environment under the profile's `env_key`. A generated model
+/// catalog is written under the provider directory so Codex `/model` lists the
 /// provider's slugs and has metadata for them; the gateway `GET /models` list
 /// fills context windows and display names when it is reachable, then a
 /// configurable metadata fallback (default: public OpenRouter, no login).
-/// Nothing is written to `~/.codex`, so there is no backup/restore window to
-/// guard.
+/// The child `CODEX_HOME` is `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`
+/// so Codex session files, sqlite, and project trust do not land in the
+/// user's `~/.codex`. `auth.json` is not copied and the live Codex home is
+/// not written.
 async fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<i32> {
     ensure_codex_available()?;
 
@@ -287,6 +289,7 @@ async fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool
         provider::load_remote_catalog(&profile).await
     };
     let (env_name, env_value) = profile.launch_env();
+    let isolated_home = provider::prepare_isolated_codex_home(&profile.alias)?;
     let mut codex_args = profile.launch_config_args_from_remote(&primary, &fallback)?;
     codex_args.extend(args);
 
@@ -300,6 +303,7 @@ async fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool
     let mut child = std::process::Command::new("codex")
         .args(&codex_args)
         .env(env_name, env_value)
+        .env("CODEX_HOME", &isolated_home)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())

@@ -43,7 +43,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 - Structured data is written to stdout; progress and diagnostics are written to stderr.
 - JSON and other non-interactive execution never consumes a reset card or deletes a profile without an explicit opt-in flag.
-- `launch` treats everything after `--` as Codex CLI arguments. When `alias` names a custom provider, Codex is started with `-c` overrides (including a generated model catalog) and the key in the child environment; `$CODEX_HOME/auth.json` is not swapped.
+- `launch` treats everything after `--` as Codex CLI arguments. When `alias` names a custom provider, Codex is started with `-c` overrides (including a generated model catalog), the key in the child environment, and `CODEX_HOME` pointed at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`; the user's `$CODEX_HOME/auth.json` is not swapped or written.
 - A manual `use` affects the next Codex process and accepts ChatGPT profile aliases only. Restart an already-running Codex process to load the new `auth.json`.
 - Update checks are manual except for the one check performed when the TUI starts.
 

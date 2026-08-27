@@ -2,7 +2,7 @@
 
 A custom API provider is a saved third-party endpoint that `codex-switch launch` can hand to Codex CLI for one session. Typical case: OpenRouter, or another gateway that speaks Codex's Responses protocol.
 
-Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores a model-provider definition plus a bearer API key under `$CODEX_SWITCH_HOME`, then at launch injects that definition as `codex -c …` overrides. Nothing is written to `~/.codex`.
+Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores a model-provider definition plus a bearer API key under `$CODEX_SWITCH_HOME`, then at launch injects that definition as `codex -c …` overrides. The Codex process is given its own `CODEX_HOME` under `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, so sessions, sqlite, and project trust do not land in `~/.codex`. `auth.json` is not copied.
 
 > Never put an API key on the command line. `provider add` reads it from a hidden prompt, or from stdin with `--api-key-stdin`. The key is stored mode `0600` and never printed, listed, or placed in argv.
 
@@ -60,11 +60,11 @@ codex-switch launch openrouter
 codex-switch launch openrouter -- --full-auto
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider, injects the API key into the child process environment under `env_key`, and writes a Codex model catalog under `$CODEX_SWITCH_HOME/providers/<alias>/models.json` so `/model` lists the provider's slugs and Codex does not fall back to generic metadata. Extra arguments after `--` are appended as Codex CLI flags.
+`launch` does **not** replace `$CODEX_HOME/auth.json` and does not write into the user's `$CODEX_HOME`. It starts `codex` with `-c` overrides that define and select the provider, injects the API key into the child process environment under `env_key`, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, and writes a Codex model catalog next to `provider.toml` so `/model` lists the provider's slugs and Codex does not fall back to generic metadata. Extra arguments after `--` are appended as Codex CLI flags.
 
 Some models need extra Codex request settings (disabling `web_search`, or setting a reasoning effort for thinking models) — see [Model-specific request settings](#model-specific-request-settings).
 
-Because `-c` layers on top of `$CODEX_HOME/config.toml`, MCP servers, skills, and other Codex settings in that file stay in effect for the session.
+On first launch, `config.toml` is copied from the user's `$CODEX_HOME` into that isolated home so MCP servers and other settings still apply. Later launches keep the isolated copy (delete `codex-home/config.toml` to pick up a newer user config). `auth.json` is never copied. Codex session files, sqlite, and project trust stay in the isolated home.
 
 `codex-switch use` does not accept a provider alias. A provider is applied only for the launched Codex process; a later bare `codex` invocation is unchanged.
 
@@ -192,6 +192,7 @@ On the Accounts tab, press `o` to launch the selected ChatGPT profile, or open t
 |---|---|
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Provider definition and API key (directory `0700`, file `0600`) |
 | `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog used at launch (`/model` list plus metadata) |
+| `$CODEX_SWITCH_HOME/providers/<alias>/codex-home/` | Isolated Codex runtime (`CODEX_HOME` for that launch). First launch may snapshot the user's `config.toml` here. |
 
 Defaults to `~/.codex-switch/providers/`. Relocate the whole tree with `CODEX_SWITCH_HOME`; this still does not change where Codex reads `auth.json`.
 
@@ -200,7 +201,7 @@ Security contract:
 - The key is never a CLI argument, so it does not appear in the process table as argv.
 - At launch it exists only in the Codex child environment, under a codex-switch-owned variable (`CODEX_SWITCH_<ALIAS>_KEY` by default) rather than a vendor's conventional name, so a pre-exported `OPENAI_API_KEY` or `OPENROUTER_API_KEY` is not reused by accident.
 - `list`, `show`, JSON output, and the TUI print a redacted form only.
-- Launch writes nothing under `$CODEX_HOME`. ChatGPT `use` / `launch` locking and `auth.json` backup/restore do not apply.
+- Launch writes nothing under the user's `$CODEX_HOME`. Codex runtime files for that session go to `providers/<alias>/codex-home`. ChatGPT `use` / `launch` locking and `auth.json` backup/restore do not apply.
 
 Do not commit `provider.toml`, paste keys into issues, or share unredacted `--debug` output.
 
