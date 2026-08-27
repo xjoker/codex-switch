@@ -60,7 +60,7 @@ codex-switch launch openrouter
 codex-switch launch openrouter -- --full-auto
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider, and injects the API key into the child process environment under `env_key`. Extra arguments after `--` are appended as Codex CLI flags.
+`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider, injects the API key into the child process environment under `env_key`, and writes a Codex model catalog for the selected slug under `$CODEX_SWITCH_HOME/providers/<alias>/models.json` so Codex does not fall back to generic metadata. Extra arguments after `--` are appended as Codex CLI flags.
 
 Some models need extra Codex request settings (disabling `web_search`, or setting a reasoning effort for thinking models) — see [Model-specific request settings](#model-specific-request-settings).
 
@@ -86,6 +86,16 @@ Pick the slug from the gateway's catalog. If Codex rejects the model, the usual 
 ## Model-specific request settings
 
 Codex always sends the same Responses request shape (including its built-in `web_search` server tool). Whether a given model accepts it depends on the model, not on luck — the behavior is consistent per model, not intermittent.
+
+### Model metadata
+
+Codex only ships metadata for its own model slugs. A custom id such as `glm-5.3-flash` otherwise produces:
+
+```
+warning: Model metadata for `glm-5.3-flash` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+```
+
+`launch` generates a catalog whose `slug` matches the provider's `--model` exactly and passes it as `model_catalog_json`. The fallback 272k window is replaced with 1,048,576 tokens unless the provider already has `--set model_context_window=N`. An explicit `--set model_catalog_json=/path/to/models.json` is left alone — that file must then include the same slug.
 
 ### web_search server tool
 
@@ -158,6 +168,7 @@ On the Accounts tab, press `o` to launch the selected ChatGPT profile, or open t
 | Location | Purpose |
 |---|---|
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Provider definition and API key (directory `0700`, file `0600`) |
+| `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog used at launch |
 
 Defaults to `~/.codex-switch/providers/`. Relocate the whole tree with `CODEX_SWITCH_HOME`; this still does not change where Codex reads `auth.json`.
 

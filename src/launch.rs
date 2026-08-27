@@ -271,13 +271,15 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// Unlike the ChatGPT path this stages nothing: the provider is applied as
 /// `codex -c …` overrides (which layer over the user's base config, preserving
 /// MCP servers and everything else) and the API key is injected into the child
-/// process environment under the profile's `env_key`. Nothing is written to
-/// `~/.codex`, so there is no backup/restore window to guard.
+/// process environment under the profile's `env_key`. A generated model catalog
+/// is written under the provider directory so Codex has metadata for the
+/// selected slug; nothing is written to `~/.codex`, so there is no
+/// backup/restore window to guard.
 fn launch_provider(profile: ProviderProfile, args: Vec<String>, json: bool) -> Result<i32> {
     ensure_codex_available()?;
 
     let (env_name, env_value) = profile.launch_env();
-    let mut codex_args = profile.codex_config_args();
+    let mut codex_args = profile.launch_config_args()?;
     codex_args.extend(args);
 
     if !json {

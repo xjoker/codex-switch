@@ -43,7 +43,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 - Structured data is written to stdout; progress and diagnostics are written to stderr.
 - JSON and other non-interactive execution never consumes a reset card or deletes a profile without an explicit opt-in flag.
-- `launch` treats everything after `--` as Codex CLI arguments. When `alias` names a custom provider, Codex is started with `-c` overrides and the key in the child environment; `$CODEX_HOME/auth.json` is not swapped.
+- `launch` treats everything after `--` as Codex CLI arguments. When `alias` names a custom provider, Codex is started with `-c` overrides (including a generated model catalog) and the key in the child environment; `$CODEX_HOME/auth.json` is not swapped.
 - A manual `use` affects the next Codex process and accepts ChatGPT profile aliases only. Restart an already-running Codex process to load the new `auth.json`.
 - Update checks are manual except for the one check performed when the TUI starts.
 
@@ -60,7 +60,7 @@ codex-switch self-update --check
 
 ## Provider
 
-`provider add` required flags are `--base-url` and `--model`. Optional `--name` defaults to the alias; `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). `--reasoning EFFORT` saves `model_reasoning_effort=EFFORT` (for thinking models) and `--no-web-search` saves `web_search=disabled`; `--set KEY=VALUE` (repeatable) saves any other `codex -c` override. All are applied on every launch and passed to Codex verbatim (only the `KEY=VALUE` shape is checked); an explicit `--set` wins over a convenience flag for the same key. `--api-key-stdin` is required when there is no interactive terminal.
+`provider add` required flags are `--base-url` and `--model`. Optional `--name` defaults to the alias; `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). `--reasoning EFFORT` saves `model_reasoning_effort=EFFORT` (for thinking models) and `--no-web-search` saves `web_search=disabled`; `--set KEY=VALUE` (repeatable) saves any other `codex -c` override. All are applied on every launch and passed to Codex verbatim (only the `KEY=VALUE` shape is checked); an explicit `--set` wins over a convenience flag for the same key. `--api-key-stdin` is required when there is no interactive terminal. Launch also writes a model catalog for the selected slug unless `--set model_catalog_json=…` is already present.
 
 The alias must not collide with a ChatGPT profile, another provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`. Removal is immediate and is not archived under `deleted-profiles/`.
 

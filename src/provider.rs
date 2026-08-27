@@ -181,15 +181,37 @@ impl ProviderProfile {
         redact_key(&self.api_key)
     }
 
-    /// The `codex -c …` override arguments that define and select this provider
-    /// for a single launch. These layer on top of the user's base
-    /// `~/.codex/config.toml` (so MCP servers and other settings are preserved)
-    /// and nothing is written to disk.
-    ///
-    /// The API key is intentionally **not** here — it is handed to Codex through
-    /// the environment (see [`launch_env`](Self::launch_env)) so it never appears
-    /// in argv or the process table.
+    /// The provider-defining `-c` overrides without writing a catalog. Tests
+    /// use this when they want argv shape without filesystem side effects.
+    /// Launch uses [`launch_config_args`](Self::launch_config_args).
+    #[cfg(test)]
     pub fn codex_config_args(&self) -> Vec<String> {
+        self.config_pairs(None)
+    }
+
+    /// Launch-time `-c` overrides, including a generated model catalog unless
+    /// the provider already has an explicit `model_catalog_json` override.
+    ///
+    /// The catalog is written under this provider's directory (not
+    /// `$CODEX_HOME`) so Codex can resolve the selected model slug.
+    pub fn launch_config_args(&self) -> Result<Vec<String>> {
+        let catalog_path = if self.has_explicit_model_catalog() {
+            None
+        } else {
+            Some(self.write_model_catalog()?)
+        };
+        let catalog_utf8 = catalog_path
+            .as_ref()
+            .map(|path| {
+                path.to_str().map(str::to_string).with_context(|| {
+                    format!("model catalog path {} is not valid UTF-8", path.display())
+                })
+            })
+            .transpose()?;
+        Ok(self.config_pairs(catalog_utf8.as_deref()))
+    }
+
+    fn config_pairs(&self, catalog_path: Option<&str>) -> Vec<String> {
         let id = &self.provider_id;
         let mut pairs = vec![
             format!("model_providers.{id}.name={}", toml_string(&self.name)),
@@ -208,6 +230,9 @@ impl ProviderProfile {
             format!("model_provider={}", toml_string(id)),
             format!("model={}", toml_string(&self.model)),
         ];
+        if let Some(path) = catalog_path {
+            pairs.push(format!("model_catalog_json={}", toml_string(path)));
+        }
         // Provider-saved overrides layer on top, after the model is selected, and
         // pass through verbatim (the user is responsible for their TOML form).
         pairs.extend(self.codex_config.iter().cloned());
@@ -217,11 +242,92 @@ impl ProviderProfile {
             .collect()
     }
 
+    fn has_explicit_model_catalog(&self) -> bool {
+        override_value(&self.codex_config, "model_catalog_json").is_some()
+    }
+
+    fn write_model_catalog(&self) -> Result<PathBuf> {
+        let dir = provider_dir(&self.alias)?;
+        ensure_private_dir(&dir)?;
+        let path = dir.join("models.json");
+        let json = model_catalog_json(
+            &self.model,
+            catalog_context_window(&self.codex_config),
+            override_value(&self.codex_config, "model_reasoning_effort"),
+        );
+        let body =
+            serde_json::to_vec_pretty(&json).context("serializing provider model catalog")?;
+        auth::atomic_write_private(&path, &body)
+            .with_context(|| format!("writing provider model catalog {}", path.display()))?;
+        Ok(path)
+    }
+
     /// The single environment override that hands Codex the API key under the
     /// profile's `env_key`. Injected into the child process only.
     pub fn launch_env(&self) -> (String, String) {
         (self.env_key.clone(), self.api_key.clone())
     }
+}
+
+/// Codex's fallback for an unknown slug is a 272k window. Custom models such as
+/// GLM-5.3 Flash are 1M; using the fallback is what the metadata warning means
+/// by "degrade performance".
+const DEFAULT_PROVIDER_CONTEXT_WINDOW: i64 = 1_048_576;
+
+fn override_value<'a>(config: &'a [String], key: &str) -> Option<&'a str> {
+    config.iter().rev().find_map(|entry| {
+        let (k, v) = entry.split_once('=')?;
+        (k.trim() == key).then_some(v.trim())
+    })
+}
+
+fn catalog_context_window(config: &[String]) -> i64 {
+    override_value(config, "model_context_window")
+        .and_then(|value| value.trim_matches('"').parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PROVIDER_CONTEXT_WINDOW)
+}
+
+/// A Codex `model_catalog_json` body whose `slug` matches `model` exactly.
+///
+/// Codex 0.149 requires `base_instructions` (an empty string is accepted). A
+/// missing catalog entry produces the "Model metadata for … not found"
+/// fallback warning.
+fn model_catalog_json(
+    model: &str,
+    context_window: i64,
+    default_reasoning: Option<&str>,
+) -> serde_json::Value {
+    let mut entry = serde_json::json!({
+        "slug": model,
+        "display_name": model,
+        "description": model,
+        "supported_reasoning_levels": [
+            {"effort": "low", "description": "Light reasoning"},
+            {"effort": "medium", "description": "Balanced"},
+            {"effort": "high", "description": "Enhanced reasoning"},
+            {"effort": "xhigh", "description": "Extra high reasoning"},
+            {"effort": "max", "description": "Deep reasoning"},
+        ],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 0,
+        "base_instructions": "",
+        "default_reasoning_summary": "none",
+        "support_verbosity": false,
+        "apply_patch_tool_type": "freeform",
+        "truncation_policy": {"mode": "bytes", "limit": 10000},
+        "context_window": context_window,
+        "max_context_window": context_window,
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": [],
+        "input_modalities": ["text", "image"],
+    });
+    if let Some(effort) = default_reasoning.filter(|value| !value.is_empty()) {
+        entry["default_reasoning_level"] = serde_json::Value::String(effort.to_string());
+    }
+    serde_json::json!({ "models": [entry] })
 }
 
 /// Render a string as a TOML basic (quoted) string for a `codex -c key=value`
@@ -559,6 +665,98 @@ mod tests {
     fn toml_string_quotes_and_escapes() {
         assert_eq!(toml_string("OpenRouter"), r#""OpenRouter""#);
         assert_eq!(toml_string(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
+
+    #[test]
+    fn generated_catalog_slug_matches_the_selected_model_exactly() {
+        let catalog = model_catalog_json("glm-5.3-flash", 1_048_576, None);
+        let models = catalog["models"].as_array().expect("models array");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "glm-5.3-flash");
+        assert_eq!(models[0]["base_instructions"], "");
+        assert_eq!(models[0]["context_window"], 1_048_576);
+        assert_eq!(models[0]["max_context_window"], 1_048_576);
+        assert!(models[0].get("default_reasoning_level").is_none());
+    }
+
+    #[test]
+    fn generated_catalog_copies_reasoning_effort_when_set() {
+        let catalog = model_catalog_json("glm-5.3-flash", 1_048_576, Some("max"));
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], "max");
+    }
+
+    #[test]
+    fn launch_args_write_a_catalog_for_an_unknown_slug() {
+        let _home = TestHome::new();
+        let mut profile = sample("zai");
+        profile.model = "glm-5.3-flash".to_string();
+        save(&profile).unwrap();
+
+        let args = profile.launch_config_args().unwrap();
+        let joined = args.join(" ");
+        assert!(
+            joined.contains("model_catalog_json="),
+            "launch must point Codex at a catalog, got: {joined}"
+        );
+        assert!(
+            joined.contains(r#"model="glm-5.3-flash""#),
+            "the selected slug must be passed through, got: {joined}"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("sk-secret-1234")),
+            "the API key must never appear in argv"
+        );
+
+        let catalog_path = super::provider_dir("zai").unwrap().join("models.json");
+        let catalog: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&catalog_path).unwrap()).unwrap();
+        assert_eq!(catalog["models"][0]["slug"], "glm-5.3-flash");
+        assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
+        let expected_path = toml_string(catalog_path.to_str().unwrap());
+        assert!(
+            args.iter()
+                .any(|a| a == &format!("model_catalog_json={expected_path}")),
+            "the generated catalog path must be on argv, got: {joined}"
+        );
+    }
+
+    #[test]
+    fn launch_args_honour_an_explicit_catalog_and_do_not_write_one() {
+        let _home = TestHome::new();
+        let mut profile = sample("zai");
+        profile.model = "glm-5.3-flash".to_string();
+        profile.codex_config = vec![r#"model_catalog_json="/tmp/custom-models.json""#.to_string()];
+        save(&profile).unwrap();
+
+        let args = profile.launch_config_args().unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains(r#"model_catalog_json="/tmp/custom-models.json""#));
+        assert!(
+            !joined.contains("providers/zai/models.json"),
+            "an explicit catalog must not be replaced, got: {joined}"
+        );
+        assert!(
+            !super::provider_dir("zai")
+                .unwrap()
+                .join("models.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn launch_catalog_uses_a_saved_context_window_override() {
+        let _home = TestHome::new();
+        let mut profile = sample("zai");
+        profile.model = "glm-5.3-flash".to_string();
+        profile.codex_config = vec!["model_context_window=272000".to_string()];
+        save(&profile).unwrap();
+
+        let _args = profile.launch_config_args().unwrap();
+        let catalog_path = super::provider_dir("zai").unwrap().join("models.json");
+        let catalog: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(catalog_path).unwrap()).unwrap();
+        assert_eq!(catalog["models"][0]["context_window"], 272000);
+        assert_eq!(catalog["models"][0]["max_context_window"], 272000);
     }
 
     #[cfg(unix)]

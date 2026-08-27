@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Custom provider model catalog** — Launching a custom API provider writes `$CODEX_SWITCH_HOME/providers/<alias>/models.json` and passes it as `model_catalog_json`, so Codex has metadata for slugs it does not ship (for example `glm-5.3-flash`) instead of warning and falling back to a 272k window. `--set model_catalog_json=…` is left in place; `--set model_context_window=N` is copied into the generated catalog.
+
 - **TUI launch** — Launch Codex from the TUI: on the Accounts tab press `o` for the selected profile, or `o` in the account menu; on the Providers tab press `l` or `Enter` for the selected custom API provider. Codex runs in the foreground and the TUI resumes when it exits.
 
 - **Custom API providers** — Save an OpenRouter-style endpoint under `$CODEX_SWITCH_HOME/providers/` and start Codex with `codex-switch launch <alias>`. The API key is read from a hidden prompt or `--api-key-stdin`, stored mode `0600`, and injected into the child environment; it never appears on the command line, and `$CODEX_HOME` is not written. `use` and auto-select stay ChatGPT-only. The TUI adds a Providers tab (`Tab` to switch; `a` / `d` to add or remove). Codex currently speaks only `wire_api = "responses"`, so Chat Completions-only vendors (including DeepSeek's official API) must be reached through a Responses-capable gateway. See [Custom API providers](wiki/Providers.md).
