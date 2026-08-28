@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v20260828.3.0 — 2026-08-28
+
 - **Provider launch keeps user MCP and prompts** — Isolated `CODEX_HOME` still holds sessions and catalog for that provider, but `launch` now copies `mcp_servers`, `developer_instructions`, `AGENTS.md`, `prompts/`, and `skills/` from the user's `$CODEX_HOME` so `/mcp` and custom prompts work. `auth.json` is not copied; the user home is not written.
 
 ## v20260828.2.0 — 2026-08-28
