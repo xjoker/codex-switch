@@ -13,17 +13,16 @@
 
 use crossterm::event::KeyCode;
 use ratatui::{
+    Frame,
     layout::Rect,
     text::{Line, Span},
-    Frame,
 };
 
 use super::popup::{self, PopupState};
-use super::theme::{base, dim, header, key, C_GREEN, C_RED};
+use super::theme::{C_GREEN, C_RED, base, dim, header, key};
 use crate::provider::{
-    apply_fetched_models, apply_picked_models, chat_slugs_from_gateway,
-    fetch_gateway_models_blocking, ProviderModel, ProviderProfile, RemoteModel,
-    SMALL_REMOTE_CATALOG_LIMIT,
+    ProviderModel, ProviderProfile, RemoteModel, SMALL_REMOTE_CATALOG_LIMIT, apply_fetched_models,
+    apply_picked_models, chat_slugs_from_gateway, fetch_gateway_models_blocking,
 };
 
 /// Reasoning-effort presets. Index 0 skips the override; the rest are saved as
@@ -1667,7 +1666,7 @@ mod tests {
 
     #[test]
     fn confirm_remove_popup_names_the_model() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
 
         let original = ProviderProfile::build(
             "demo",
@@ -1711,7 +1710,7 @@ mod tests {
 
     #[test]
     fn form_renders_the_add_model_row() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
 
         let original = ProviderProfile::build(
             "demo",
@@ -1754,7 +1753,7 @@ mod tests {
     }
 
     fn render_form_text(form: &mut ProviderFormState, width: u16, height: u16) -> String {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
 
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2042,7 +2041,7 @@ mod tests {
 
     #[test]
     fn picker_renders_gateway_slugs() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
 
         let original = ProviderProfile::build(
             "or",

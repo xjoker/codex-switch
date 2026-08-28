@@ -3,14 +3,14 @@
 /// Centers a bordered box on screen, clamps to terminal bounds,
 /// and supports vertical scrolling when content exceeds available height.
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
 };
 
-use super::theme::{base, dim, header, BG, C_RED};
+use super::theme::{BG, C_RED, base, dim, header};
 
 /// Minimum terminal size below which we abort popup rendering.
 const MIN_TERM_W: u16 = 20;
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn popup_paints_the_designed_dark_background() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
 
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).unwrap();
