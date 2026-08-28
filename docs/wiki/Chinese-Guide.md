@@ -167,7 +167,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 - **新增**：打开后直接输入 Alias；`Enter` 提交当前字段并进入下一项（Alias → URL → Key → Models；env key / wire API / extra `-c` 保持默认）。
 - **编辑**：从 Base URL 的导航态开始（避免 `s` 被当成输入字符）；`Enter` 进入当前格编辑。
-- `Tab` 走遍每一栏，包括 Env key、Wire API、Extra `-c`；在 Models 内用 `j` / `k` 移动。 Extra `-c` 是 `KEY=VALUE`，值里的逗号会保留。
+- `Tab` 走遍每一栏，包括 Env key、Wire API、Extra `-c`；在 Models 内用 `j` / `k` 移动。模型很多时表头和底栏帮助钉住，只滚动模型视口并跟着光标；超出一屏时标题显示 `n/N`。 Extra `-c` 是 `KEY=VALUE`，值里的逗号会保留。
 - 模型列表最后一行是 **`+ add model`**：`Enter` 或 `+` / `=` / `a` 添加模型并输入 id。导航态按 `f` 从接入站 `GET /models` 拉取对话模型（去掉 embedding / reranker；超过 48 条打开选择器：`/` 过滤，`space` 勾选，`Enter` 应用）。
 - `←` / `→` 切换该模型的 reasoning；`w` 开关 `web_search`；`*` 标为默认模型。
 - `d` / `-` / `Delete` 删除模型前会弹出确认（`y` 删除，`n` 或 `Esc` 取消且**不关闭整张表单**）。至少保留一个模型，**最后一条不能删**。
@@ -175,7 +175,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 - `s` 保存；`Esc` 取消整张表单。
 - 改名在列表按 `n`，表单里没有第二个「显示名」字段。
 
-启动选择器（Providers 上 `Enter` / `o`）：`←` / `→` 只改**本次会话**的 reasoning，不写回配置文件。`Tab` 编辑本次额外的 Codex argv（空白拆分）。
+启动选择器（Providers 上 `Enter` / `o`）：`←` / `→` 只改**本次会话**的 reasoning，不写回配置文件。选 `(skip)` 时会清掉该提供方隔离 `CODEX_HOME` 里上次留下的思考等级，避免 Codex 0.150 仍显示 `high` 并向网关带上 `reasoning.effort`。`Tab` 编辑本次额外的 Codex argv（空白拆分）。
 
 Codex 在前台运行；退出后回到 TUI。
 
@@ -183,7 +183,7 @@ Codex 在前台运行；退出后回到 TUI。
 
 开发版属于滚动 prerelease 通道。安装、验证、回退和问题反馈步骤见 [Testing development releases](Development-Releases)，其中附有中文摘要。
 
-当前滚动开发版示例：`codex-switch self-update --dev`，版本号形如 `20260827.4.0-dev`。
+当前滚动开发版示例：`codex-switch self-update --dev`，版本号形如 `20260828.1.0-dev`。
 
 ## 常用入口（英文正文）
 

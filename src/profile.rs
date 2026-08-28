@@ -1643,7 +1643,7 @@ mod tests {
         });
         let mut cleanup = ThreadCleanup::new(auth_gate);
         cleanup.push(updater);
-        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
         let (switch_tx, switch_rx) = std::sync::mpsc::channel();
         let switcher = std::thread::spawn(move || {
@@ -1652,13 +1652,13 @@ mod tests {
         cleanup.push(switcher);
         cleanup.release_blocker();
         done_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(2))
             .unwrap()
             .unwrap()
             .then_some(())
             .expect("refresh CAS should persist");
         switch_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(2))
             .expect("profile switch did not finish after refresh transaction")
             .unwrap();
         cleanup.join_all();

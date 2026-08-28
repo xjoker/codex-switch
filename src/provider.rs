@@ -110,7 +110,8 @@ pub struct ProviderProfile {
 pub enum ReasoningLaunch {
     /// Use the selected model's saved `reasoning`.
     Saved,
-    /// Omit `model_reasoning_effort` even if the model saved one.
+    /// Do not send `model_reasoning_effort`, even if the model or extras saved
+    /// one. Codex 0.150 still applies a leftover value from the isolated home.
     Skip,
     /// Force this effort for this launch only.
     Effort(String),
@@ -412,7 +413,17 @@ impl ProviderProfile {
         }
         // Provider-saved extras layer on top, after the selected model, and
         // pass through verbatim (the user is responsible for their TOML form).
-        pairs.extend(self.codex_config.iter().cloned());
+        // Skip must also drop a leftover `--set model_reasoning_effort=…`, or
+        // that extra re-injects the thinking level this launch opted out of.
+        pairs.extend(
+            self.codex_config
+                .iter()
+                .filter(|entry| {
+                    !matches!(reasoning, ReasoningLaunch::Skip)
+                        || !is_reasoning_effort_override(entry)
+                })
+                .cloned(),
+        );
         Ok(pairs
             .into_iter()
             .flat_map(|kv| ["-c".to_string(), kv])
@@ -529,6 +540,12 @@ fn override_value<'a>(config: &'a [String], key: &str) -> Option<&'a str> {
         let (k, v) = entry.split_once('=')?;
         (k.trim() == key).then_some(v.trim())
     })
+}
+
+fn is_reasoning_effort_override(entry: &str) -> bool {
+    entry
+        .split_once('=')
+        .is_some_and(|(key, _)| key.trim() == "model_reasoning_effort")
 }
 
 fn override_context_window(config: &[String]) -> Option<i64> {
@@ -1349,33 +1366,32 @@ fn catalog_entry(
         .filter(|values| !values.is_empty())
         .unwrap_or_else(|| vec!["text".to_string(), "image".to_string()]);
     let thinking = thinking_effort(reasoning);
-    let mut levels: Vec<serde_json::Value> = if thinking.is_some() {
-        THINKING_REASONING_LEVELS
-            .iter()
-            .map(|(effort, description)| {
-                serde_json::json!({ "effort": effort, "description": description })
-            })
-            .collect()
-    } else {
-        vec![serde_json::json!({
-            "effort": "none",
-            "description": "No reasoning",
-        })]
+    // Codex 0.150 always puts `reasoning.effort` on POST /responses when the
+    // catalog has a default (including `none`). Skip/plain-chat slugs must
+    // advertise no levels and omit the default so the field stays off the wire.
+    let levels: Vec<serde_json::Value> = match thinking {
+        Some(effort) => {
+            let mut levels: Vec<serde_json::Value> = THINKING_REASONING_LEVELS
+                .iter()
+                .map(|(level, description)| {
+                    serde_json::json!({ "effort": level, "description": description })
+                })
+                .collect();
+            if !levels.iter().any(|level| level["effort"] == effort) {
+                levels.insert(
+                    0,
+                    serde_json::json!({ "effort": effort, "description": effort }),
+                );
+            }
+            levels
+        }
+        None => Vec::new(),
     };
-    if let Some(effort) = thinking
-        && !levels.iter().any(|level| level["effort"] == effort)
-    {
-        levels.insert(
-            0,
-            serde_json::json!({ "effort": effort, "description": effort }),
-        );
-    }
-    serde_json::json!({
+    let mut entry = serde_json::json!({
         "slug": slug,
         "display_name": display_name,
         "description": description,
         "supported_reasoning_levels": levels,
-        "default_reasoning_level": thinking.unwrap_or("none"),
         "supports_reasoning_summaries": thinking.is_some(),
         "shell_type": "shell_command",
         "visibility": "list",
@@ -1391,7 +1407,11 @@ fn catalog_entry(
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
         "input_modalities": modalities,
-    })
+    });
+    if let Some(effort) = thinking {
+        entry["default_reasoning_level"] = serde_json::Value::String(effort.to_string());
+    }
+    entry
 }
 /// Render a string as a TOML basic (quoted) string for a `codex -c key=value`
 /// override, escaping the characters TOML requires. Codex parses the value part
@@ -1449,6 +1469,37 @@ pub(crate) fn prepare_isolated_codex_home(alias: &str) -> Result<PathBuf> {
     let dest = isolated_codex_home(alias)?;
     ensure_private_dir(&dest)?;
     Ok(dest)
+}
+
+/// Drop a leftover `model_reasoning_effort` from the isolated Codex home.
+///
+/// Codex writes that key into `config.toml` when `/model` changes effort, and
+/// 0.150 sends it on `POST /responses` even if this launch omitted `-c`. Skip
+/// (and models with no saved effort) would otherwise keep showing `high` and
+/// 404 on gateways that reject a thinking level. This launch's `-c` is the
+/// only source that should put the key back.
+pub(crate) fn clear_isolated_reasoning_effort(home: &Path) -> Result<()> {
+    let path = home.join("config.toml");
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading isolated Codex config {}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    let mut value: toml::Value = toml::from_str(&raw)
+        .with_context(|| format!("parsing isolated Codex config {}", path.display()))?;
+    let Some(table) = value.as_table_mut() else {
+        return Ok(());
+    };
+    if table.remove("model_reasoning_effort").is_none() {
+        return Ok(());
+    }
+    let serialized = toml::to_string(&value)
+        .context("serializing isolated Codex config after clearing leftover reasoning")?;
+    crate::auth::atomic_write_private(&path, serialized.as_bytes())
+        .with_context(|| format!("writing isolated Codex config {}", path.display()))
 }
 
 /// List saved provider aliases (directories holding a `provider.toml`), sorted.
@@ -1908,6 +1959,33 @@ api_key = "sk-legacy-key"
     }
 
     #[test]
+    fn skip_drops_a_provider_extra_reasoning_override() {
+        let mut p = sample("openrouter");
+        p.codex_config = vec![
+            "model_reasoning_effort=high".to_string(),
+            "foo=bar".to_string(),
+        ];
+        let skipped = p
+            .codex_config_args_with(None, ReasoningLaunch::Skip)
+            .unwrap();
+        assert!(
+            !skipped
+                .iter()
+                .any(|a| a.starts_with("model_reasoning_effort=")),
+            "skip must not let extras put thinking back on the wire: {skipped:?}"
+        );
+        assert!(skipped.iter().any(|a| a == "foo=bar"));
+
+        let saved = p
+            .codex_config_args_with(None, ReasoningLaunch::Saved)
+            .unwrap();
+        assert!(
+            saved.iter().any(|a| a == "model_reasoning_effort=high"),
+            "saved extras still apply when this launch did not skip"
+        );
+    }
+
+    #[test]
     fn unknown_launch_model_is_rejected() {
         let p = sample("openrouter");
         assert!(p.codex_config_args(Some("missing")).is_err());
@@ -2050,6 +2128,48 @@ api_key = "sk-legacy-key"
     }
 
     #[test]
+    fn isolated_home_drops_a_leftover_reasoning_effort_and_keeps_other_keys() {
+        let _home = TestHome::new();
+        save(&sample("zai")).unwrap();
+        let isolated = prepare_isolated_codex_home("zai").unwrap();
+        let config = isolated.join("config.toml");
+        std::fs::write(
+            &config,
+            "model = \"glm-5.3-flash\"\nmodel_reasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+
+        clear_isolated_reasoning_effort(&isolated).unwrap();
+
+        let raw = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            !raw.contains("model_reasoning_effort"),
+            "leftover high must not survive skip: {raw}"
+        );
+        assert!(
+            raw.contains("glm-5.3-flash"),
+            "other keys must remain: {raw}"
+        );
+    }
+
+    #[test]
+    fn isolated_home_without_config_or_effort_is_a_noop() {
+        let _home = TestHome::new();
+        save(&sample("zai")).unwrap();
+        let isolated = prepare_isolated_codex_home("zai").unwrap();
+        clear_isolated_reasoning_effort(&isolated).unwrap();
+        assert!(!isolated.join("config.toml").exists());
+
+        let config = isolated.join("config.toml");
+        std::fs::write(&config, "model = \"glm-5.3-flash\"\n").unwrap();
+        clear_isolated_reasoning_effort(&isolated).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "model = \"glm-5.3-flash\"\n"
+        );
+    }
+
+    #[test]
     fn launch_args_write_a_catalog_for_an_unknown_slug() {
         let _home = TestHome::new();
         let mut profile = sample("zai");
@@ -2068,7 +2188,13 @@ api_key = "sk-legacy-key"
         assert_eq!(catalog["models"][0]["visibility"], "list");
         assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
         assert_eq!(catalog["models"][0]["base_instructions"], "");
-        assert_eq!(catalog["models"][0]["default_reasoning_level"], "none");
+        assert!(catalog["models"][0]["default_reasoning_level"].is_null());
+        assert!(
+            catalog["models"][0]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
     }
 
@@ -2129,18 +2255,13 @@ api_key = "sk-legacy-key"
         assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
         assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
         assert_eq!(catalog["models"][0]["display_name"], "GLM Flash");
-        assert_eq!(catalog["models"][0]["default_reasoning_level"], "none");
+        assert!(catalog["models"][0]["default_reasoning_level"].is_null());
         assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
-        assert_eq!(
-            catalog["models"][0]["supported_reasoning_levels"][0]["effort"],
-            "none"
-        );
-        assert_eq!(
+        assert!(
             catalog["models"][0]["supported_reasoning_levels"]
                 .as_array()
                 .unwrap()
-                .len(),
-            1
+                .is_empty()
         );
     }
 
@@ -2158,9 +2279,38 @@ api_key = "sk-legacy-key"
         let levels = catalog["models"][0]["supported_reasoning_levels"]
             .as_array()
             .unwrap();
-        assert_eq!(levels.len(), 1);
-        assert_eq!(levels[0]["effort"], "none");
-        assert_eq!(catalog["models"][0]["default_reasoning_level"], "none");
+        assert!(
+            levels.is_empty(),
+            "a none default still puts reasoning.effort on Codex 0.150 requests: {levels:?}"
+        );
+        assert!(catalog["models"][0]["default_reasoning_level"].is_null());
+        assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+    }
+
+    #[test]
+    fn skip_catalog_does_not_advertise_a_saved_thinking_level() {
+        let models = vec![ProviderModel {
+            id: "deepseek-v4-flash".into(),
+            reasoning: Some("high".into()),
+            no_web_search: false,
+        }];
+        let catalog = build_model_catalog(
+            &["deepseek-v4-flash".into()],
+            &models,
+            &[],
+            &[],
+            "deepseek-v4-flash",
+            None,
+            None,
+        );
+        assert!(catalog["models"][0]["default_reasoning_level"].is_null());
+        assert!(
+            catalog["models"][0]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "skip must not leave a default Codex 0.150 can send"
+        );
         assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
     }
 
@@ -2184,7 +2334,13 @@ api_key = "sk-legacy-key"
             None,
         );
         assert_eq!(catalog["models"][0]["slug"], "composer-2.5");
-        assert_eq!(catalog["models"][0]["default_reasoning_level"], "none");
+        assert!(catalog["models"][0]["default_reasoning_level"].is_null());
+        assert!(
+            catalog["models"][0]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(catalog["models"][1]["slug"], "glm-5.3-flash");
         assert_eq!(catalog["models"][1]["default_reasoning_level"], "high");
         assert_eq!(catalog["models"][1]["supports_reasoning_summaries"], true);
