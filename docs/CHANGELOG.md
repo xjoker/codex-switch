@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Provider form model list follows the cursor** — Alias through Extra `-c` and the help line stay pinned. Only the model rows scroll, so a 47-slug catalog no longer clips the selection below the dialog. The heading shows `n/N` (or `+` on the add row) when the list is taller than the form.
+
 ## v20260827.4.0 — 2026-08-27
 
 - **Pick models from a large gateway catalog** — OpenRouter-sized `GET /models` lists are not imported wholesale. `provider add --fetch-models --model …` and `provider fetch-models <alias> --model …` keep only those slugs (and must exist on the gateway). TUI `f` opens a filterable picker (`space` toggle, `/` filter, Enter apply). Small catalogs still import every chat slug.

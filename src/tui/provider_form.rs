@@ -4,6 +4,8 @@
 //! continues into the next one (Alias → URL → Key → Models). Tab always
 //! moves between every field, including env key, wire API, and extra `-c`.
 //! `j`/`k` move inside Models, which includes a visible `+ add model` row.
+//! Long catalogs pin Alias…Extra and the help line; only the model viewport
+//! scrolls, and it follows the cursor.
 //! `+` adds and `d`/`-` remove from navigation mode. `f` GETs `{base_url}/models`
 //! and fills chat slugs (embedding/reranker omitted). Catalogs larger than 48
 //! open a picker (`space` toggle, `/` filter, Enter apply). Edit starts on Base URL
@@ -11,16 +13,17 @@
 
 use crossterm::event::KeyCode;
 use ratatui::{
-    Frame,
     layout::Rect,
     text::{Line, Span},
+    Frame,
 };
 
 use super::popup::{self, PopupState};
-use super::theme::{C_GREEN, C_RED, base, dim, header, key};
+use super::theme::{base, dim, header, key, C_GREEN, C_RED};
 use crate::provider::{
-    ProviderModel, ProviderProfile, RemoteModel, SMALL_REMOTE_CATALOG_LIMIT, apply_fetched_models,
-    apply_picked_models, chat_slugs_from_gateway, fetch_gateway_models_blocking,
+    apply_fetched_models, apply_picked_models, chat_slugs_from_gateway,
+    fetch_gateway_models_blocking, ProviderModel, ProviderProfile, RemoteModel,
+    SMALL_REMOTE_CATALOG_LIMIT,
 };
 
 /// Reasoning-effort presets. Index 0 skips the override; the rest are saved as
@@ -153,6 +156,7 @@ pub struct ProviderFormState {
     extra_sets: String,
     models: Vec<ModelDraft>,
     model_idx: usize,
+    model_scroll: usize,
     default_idx: usize,
     input: String,
     cursor: usize,
@@ -183,6 +187,7 @@ impl ProviderFormState {
             extra_sets: String::new(),
             models: vec![empty_model_draft()],
             model_idx: 0,
+            model_scroll: 0,
             default_idx: 0,
             input: String::new(),
             cursor: 0,
@@ -229,6 +234,7 @@ impl ProviderFormState {
                 models
             },
             model_idx: default_idx.min(profile.models.len().saturating_sub(1)),
+            model_scroll: 0,
             default_idx,
             input: String::new(),
             cursor: 0,
@@ -999,6 +1005,30 @@ fn field_value<'a>(
 
 const PICK_LIST_ROWS: usize = 12;
 
+/// Keep `cursor` inside a `vis`-row window of a `len`-item list.
+fn clamp_list_scroll(scroll: usize, cursor: usize, len: usize, vis: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let vis = vis.max(1).min(len);
+    let max_scroll = len - vis;
+    let scroll = scroll.min(max_scroll);
+    if cursor < scroll {
+        cursor
+    } else if cursor >= scroll + vis {
+        cursor.saturating_add(1).saturating_sub(vis).min(max_scroll)
+    } else {
+        scroll
+    }
+}
+
+fn list_viewport_rows(inner_h: usize, header_len: usize, footer_len: usize) -> usize {
+    inner_h
+        .saturating_sub(header_len)
+        .saturating_sub(footer_len)
+        .max(1)
+}
+
 fn render_pick(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
     let Some(pick) = form.pick.as_ref() else {
         return;
@@ -1167,70 +1197,27 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
         Span::styled("  (KEY=VALUE, comma-separated)", dim()),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("Models ({})", form.models.len()),
-        if form.focus == Focus::Models {
-            header()
-        } else {
-            dim()
-        },
-    )));
-    for (idx, model) in form.models.iter().enumerate() {
-        let selected = form.focus == Focus::Models && idx == form.model_idx;
-        let marker = if selected { "▶ " } else { "  " };
-        let default = if idx == form.default_idx { " ●" } else { "" };
-        let id = if form.editing && selected {
-            let mut shown = form.input.clone();
-            let byte = char_to_byte(&shown, form.cursor);
-            shown.insert(byte, '#');
-            shown
-        } else if model.id.is_empty() {
-            "(id)".to_string()
-        } else {
-            model.id.clone()
-        };
-        let reasoning = draft_reasoning_label(model);
-        let search = if model.no_web_search {
-            "no-search"
-        } else {
-            "search"
-        };
-        let row_style = if selected {
-            base().add_modifier(ratatui::style::Modifier::BOLD)
-        } else {
-            label
-        };
-        lines.push(Line::from(vec![
-            Span::styled(marker, base().fg(C_GREEN)),
-            Span::styled(format!("{id}{default}"), row_style),
-            Span::styled(format!("  {reasoning}  {search}"), dim()),
-        ]));
-    }
-    let add_selected = form.is_add_row();
-    lines.push(Line::from(vec![
-        Span::styled(if add_selected { "▶ " } else { "  " }, base().fg(C_GREEN)),
-        Span::styled("+ add model", if add_selected { header() } else { dim() }),
-        Span::styled("   d/- remove   f fetch", dim()),
-    ]));
+
+    let mut footer: Vec<Line<'static>> = Vec::new();
     if let Some(error) = &form.error {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
+        footer.push(Line::from(""));
+        footer.push(Line::from(Span::styled(
             error.clone(),
             base()
                 .fg(C_RED)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         )));
     }
-    lines.push(Line::from(""));
+    footer.push(Line::from(""));
     if form.editing {
-        lines.push(Line::from(vec![
+        footer.push(Line::from(vec![
             Span::styled("enter", key()),
             Span::styled(" next  ", dim()),
             Span::styled("esc", key()),
             Span::styled(" cancel edit", dim()),
         ]));
     } else {
-        lines.push(Line::from(vec![
+        footer.push(Line::from(vec![
             Span::styled("tab", key()),
             Span::styled(" field  ", dim()),
             Span::styled("j/k", key()),
@@ -1262,6 +1249,78 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             Span::styled(" cancel", dim()),
         ]));
     }
+
+    let heading_style = if form.focus == Focus::Models {
+        header()
+    } else {
+        dim()
+    };
+    let list_len = form.models.len() + 1;
+    let inner_h = popup::max_inner_height(area) as usize;
+    let vis = list_viewport_rows(inner_h, lines.len() + 1, footer.len());
+    if form.focus == Focus::Models {
+        form.model_scroll = clamp_list_scroll(form.model_scroll, form.model_idx, list_len, vis);
+    } else {
+        form.model_scroll = form.model_scroll.min(list_len.saturating_sub(vis));
+    }
+    let start = form.model_scroll;
+    let end = (start + vis).min(list_len);
+    let mut heading = vec![Span::styled(
+        format!("Models ({})", form.models.len()),
+        heading_style,
+    )];
+    if list_len > vis {
+        let pos = if form.model_idx >= form.models.len() {
+            "+".to_string()
+        } else {
+            format!("{}/{}", form.model_idx + 1, form.models.len())
+        };
+        heading.push(Span::styled(format!("  {pos}"), dim()));
+    }
+    lines.push(Line::from(heading));
+    for idx in start..end {
+        if idx < form.models.len() {
+            let model = &form.models[idx];
+            let selected = form.focus == Focus::Models && idx == form.model_idx;
+            let marker = if selected { "▶ " } else { "  " };
+            let default = if idx == form.default_idx { " ●" } else { "" };
+            let id = if form.editing && selected {
+                let mut shown = form.input.clone();
+                let byte = char_to_byte(&shown, form.cursor);
+                shown.insert(byte, '#');
+                shown
+            } else if model.id.is_empty() {
+                "(id)".to_string()
+            } else {
+                model.id.clone()
+            };
+            let reasoning = draft_reasoning_label(model);
+            let search = if model.no_web_search {
+                "no-search"
+            } else {
+                "search"
+            };
+            let row_style = if selected {
+                base().add_modifier(ratatui::style::Modifier::BOLD)
+            } else {
+                label
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, base().fg(C_GREEN)),
+                Span::styled(format!("{id}{default}"), row_style),
+                Span::styled(format!("  {reasoning}  {search}"), dim()),
+            ]));
+        } else {
+            let add_selected = form.is_add_row();
+            lines.push(Line::from(vec![
+                Span::styled(if add_selected { "▶ " } else { "  " }, base().fg(C_GREEN)),
+                Span::styled("+ add model", if add_selected { header() } else { dim() }),
+                Span::styled("   d/- remove   f fetch", dim()),
+            ]));
+        }
+    }
+    lines.extend(footer);
+    form.popup.scroll = 0;
     popup::render_popup(f, form.title(), &lines, &mut form.popup, area);
     if form.confirm_remove {
         let confirm_lines = vec![
@@ -1608,7 +1667,7 @@ mod tests {
 
     #[test]
     fn confirm_remove_popup_names_the_model() {
-        use ratatui::{Terminal, backend::TestBackend};
+        use ratatui::{backend::TestBackend, Terminal};
 
         let original = ProviderProfile::build(
             "demo",
@@ -1652,7 +1711,7 @@ mod tests {
 
     #[test]
     fn form_renders_the_add_model_row() {
-        use ratatui::{Terminal, backend::TestBackend};
+        use ratatui::{backend::TestBackend, Terminal};
 
         let original = ProviderProfile::build(
             "demo",
@@ -1686,6 +1745,128 @@ mod tests {
             .join("\n");
         assert!(joined.contains("+ add model"), "{joined}");
         assert!(joined.contains("d/-"), "{joined}");
+    }
+
+    fn numbered_models(n: usize) -> Vec<ProviderModel> {
+        (0..n)
+            .map(|i| ProviderModel::from_id(format!("model-{i:02}")))
+            .collect()
+    }
+
+    fn render_form_text(form: &mut ProviderFormState, width: u16, height: u16) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_provider_form(frame, form, frame.area()))
+            .unwrap();
+        let area = terminal.backend().buffer().area;
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        terminal
+                            .backend()
+                            .buffer()
+                            .cell((x, y))
+                            .expect("cell")
+                            .symbol()
+                            .to_string()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn clamp_list_scroll_keeps_the_cursor_inside_the_window() {
+        assert_eq!(clamp_list_scroll(0, 0, 10, 3), 0);
+        assert_eq!(clamp_list_scroll(0, 2, 10, 3), 0);
+        assert_eq!(clamp_list_scroll(0, 3, 10, 3), 1);
+        assert_eq!(clamp_list_scroll(0, 9, 10, 3), 7);
+        assert_eq!(clamp_list_scroll(5, 2, 10, 3), 2);
+        assert_eq!(clamp_list_scroll(100, 0, 10, 3), 0);
+        assert_eq!(clamp_list_scroll(4, 4, 4, 10), 0);
+        assert_eq!(clamp_list_scroll(0, 0, 0, 3), 0);
+    }
+
+    #[test]
+    fn list_viewport_rows_leaves_at_least_one_row() {
+        assert_eq!(list_viewport_rows(20, 8, 2), 10);
+        assert_eq!(list_viewport_rows(8, 8, 2), 1);
+    }
+
+    #[test]
+    fn long_model_list_follows_the_cursor_and_keeps_the_form_header() {
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            numbered_models(47),
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Models;
+        form.model_idx = 30;
+
+        let joined = render_form_text(&mut form, 80, 24);
+        assert!(joined.contains("Alias"), "{joined}");
+        assert!(joined.contains("Base URL"), "{joined}");
+        assert!(joined.contains("model-30"), "{joined}");
+        assert!(joined.contains("31/47"), "{joined}");
+        assert!(
+            !joined.contains("model-00"),
+            "top of the list must scroll away\n{joined}"
+        );
+        assert!(
+            !joined.contains("model-46"),
+            "bottom of the list stays below the viewport\n{joined}"
+        );
+        assert!(joined.contains("tab"), "{joined}");
+        assert!(joined.contains("j/k"), "{joined}");
+    }
+
+    #[test]
+    fn long_model_list_shows_the_add_row_when_selected() {
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            numbered_models(47),
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Models;
+        form.model_idx = form.models.len();
+
+        let joined = render_form_text(&mut form, 80, 24);
+        assert!(joined.contains("Alias"), "{joined}");
+        assert!(joined.contains("+ add model"), "{joined}");
+        assert!(joined.contains("Models (47)  +"), "{joined}");
+        assert!(
+            !joined.contains("model-00"),
+            "add row must scroll the list\n{joined}"
+        );
+    }
+
+    #[test]
+    fn long_model_list_keeps_the_first_row_at_the_top() {
+        let original = ProviderProfile::build(
+            "demo",
+            "https://openrouter.ai/api/v1",
+            numbered_models(47),
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Models;
+        form.model_idx = 0;
+
+        let joined = render_form_text(&mut form, 80, 24);
+        assert!(joined.contains("model-00"), "{joined}");
+        assert!(
+            !joined.contains("+ add model"),
+            "add row stays below a top-aligned window\n{joined}"
+        );
     }
 
     #[test]
@@ -1861,7 +2042,7 @@ mod tests {
 
     #[test]
     fn picker_renders_gateway_slugs() {
-        use ratatui::{Terminal, backend::TestBackend};
+        use ratatui::{backend::TestBackend, Terminal};
 
         let original = ProviderProfile::build(
             "or",

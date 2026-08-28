@@ -3,18 +3,28 @@
 /// Centers a bordered box on screen, clamps to terminal bounds,
 /// and supports vertical scrolling when content exceeds available height.
 use ratatui::{
-    Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
+    Frame,
 };
 
-use super::theme::{BG, C_RED, base, dim, header};
+use super::theme::{base, dim, header, BG, C_RED};
 
 /// Minimum terminal size below which we abort popup rendering.
 const MIN_TERM_W: u16 = 20;
 const MIN_TERM_H: u16 = 6;
+
+/// Inner line count of a popup that fills `screen` (2-row margin, 2-row border).
+/// Returns 0 when the screen is below the popup minimum.
+pub fn max_inner_height(screen: Rect) -> u16 {
+    if screen.width < MIN_TERM_W || screen.height < MIN_TERM_H {
+        return 0;
+    }
+    let max_h = screen.height.saturating_sub(2).max(MIN_TERM_H);
+    max_h.saturating_sub(2)
+}
 
 pub struct PopupState {
     pub scroll: u16,
@@ -269,6 +279,14 @@ mod tests {
     }
 
     #[test]
+    fn max_inner_height_matches_render_popup_layout() {
+        assert_eq!(max_inner_height(Rect::new(0, 0, 80, 24)), 20);
+        assert_eq!(max_inner_height(Rect::new(0, 0, 80, 12)), 8);
+        assert_eq!(max_inner_height(Rect::new(0, 0, 80, 6)), 4);
+        assert_eq!(max_inner_height(Rect::new(0, 0, 10, 24)), 0);
+    }
+
+    #[test]
     fn truncate_line_returns_original_when_shorter_or_exact_width() {
         let short = Line::from("abc");
         let exact = Line::from("abcd");
@@ -312,7 +330,7 @@ mod tests {
 
     #[test]
     fn popup_paints_the_designed_dark_background() {
-        use ratatui::{Terminal, backend::TestBackend};
+        use ratatui::{backend::TestBackend, Terminal};
 
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).unwrap();
