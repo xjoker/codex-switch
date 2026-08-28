@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Skip no longer keeps a leftover thinking level** — Codex 0.150 sends `reasoning.effort` whenever isolated `config.toml` or the catalog has a level, including `none`. A previous `/model` or launch could leave `high` in the provider home, so the picker `(skip)` still showed `high` and some gateways 404'd `{base_url}/responses`. Launch now removes `model_reasoning_effort` from that isolated home, drops the same key from extras on skip, and catalogs non-thinking slugs with an empty level list and no default.
+- **Provider form model list follows the cursor** — Alias through Extra `-c` and the help line stay pinned. Only the model rows scroll, so a 47-slug catalog no longer clips the selection below the dialog. The heading shows `n/N` (or `+` on the add row) when the list is taller than the form.
 
 ## v20260827.4.0 — 2026-08-27
 
