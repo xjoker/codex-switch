@@ -40,6 +40,7 @@ pub(crate) async fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()>
         ProviderCommand::Rename { old, new } => rename(&old, &new, json),
         ProviderCommand::Remove { alias, yes } => remove(&alias, yes, json),
         ProviderCommand::FetchModels { alias, model } => refresh_models(&alias, model, json).await,
+        ProviderCommand::Probe { alias, model } => probe(&alias, model.as_deref(), json).await,
     }
 }
 
@@ -153,6 +154,41 @@ async fn refresh_models(alias: &str, picks: Vec<String>, json: bool) -> Result<(
             "  {count} model(s); default {}",
             profile.default_model
         ));
+    }
+    Ok(())
+}
+
+async fn probe(alias: &str, model: Option<&str>, json: bool) -> Result<()> {
+    let profile = provider::load(alias)?;
+    let results = provider::probe_provider_models(&profile, model).await?;
+    if json {
+        print_json(&serde_json::json!({
+            "ok": true,
+            "alias": profile.alias,
+            "action": "provider-probed",
+            "results": results.iter().map(provider::ResponsesProbe::to_json).collect::<Vec<_>>(),
+        }));
+        return Ok(());
+    }
+    if results.is_empty() {
+        user_println(&format!("provider '{alias}' has no models to probe"));
+        return Ok(());
+    }
+    for probe in &results {
+        user_println(&format!(
+            "{}  {}  {}",
+            probe.model,
+            probe.support.as_str(),
+            probe.summary()
+        ));
+    }
+    if results
+        .iter()
+        .any(|probe| probe.support == provider::ResponsesSupport::Unsupported)
+    {
+        user_println(
+            "unsupported: listed on the gateway but POST /responses 404s; Codex cannot use it.",
+        );
     }
     Ok(())
 }

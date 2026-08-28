@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Provider Responses probe** — `POST {base_url}/responses` with only `model` (no `input`) tells whether Codex can use a saved slug without generating tokens. HTTP 400 at validation means the Responses handler ran; HTTP 404 `bad_response_status_code` means Chat Completions only. `codex-switch provider probe <alias> [--model <id>]` prints the verdict; provider `launch` refuses an unsupported slug instead of opening Codex onto a 404. An inconclusive probe (auth, timeout) warns and still launches.
+
 ## v20260827.4.0 — 2026-08-27
 
 - **Pick models from a large gateway catalog** — OpenRouter-sized `GET /models` lists are not imported wholesale. `provider add --fetch-models --model …` and `provider fetch-models <alias> --model …` keep only those slugs (and must exist on the gateway). TUI `f` opens a filterable picker (`space` toggle, `/` filter, Enter apply). Small catalogs still import every chat slug.

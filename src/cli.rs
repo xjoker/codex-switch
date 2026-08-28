@@ -105,6 +105,15 @@ pub enum ProviderCommand {
         #[arg(long, action = clap::ArgAction::Append)]
         model: Vec<String>,
     },
+    /// Probe whether saved models speak Codex's Responses API (no `input`, so a
+    /// supporting endpoint 400s at validation without generating tokens).
+    Probe {
+        /// Provider alias
+        alias: String,
+        /// Probe this saved model only (default: every saved model)
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Parser)]
@@ -116,7 +125,7 @@ pub enum ProviderCommand {
     after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, launch, reset-card, rename, delete, login, import, self-update, daemon status, provider add/list/show/rename/remove/fetch-models)
+    /// Output as compact JSON (supported by list, use, launch, reset-card, rename, delete, login, import, self-update, daemon status, provider add/list/show/rename/remove/fetch-models/probe)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -508,6 +517,26 @@ mod tests {
                 assert_eq!(model, ["openai/gpt-4.1-nano", "deepseek/deepseek-r1-0528"]);
             }
             _ => panic!("expected provider fetch-models"),
+        }
+    }
+
+    #[test]
+    fn provider_probe_subcommand_parses() {
+        let cli = Cli::try_parse_from([
+            "codex-switch",
+            "provider",
+            "probe",
+            "AI-KR",
+            "--model",
+            "deepseek-v4-flash",
+        ])
+        .expect("probe subcommand");
+        match cli.command {
+            Commands::Provider(ProviderCommand::Probe { alias, model }) => {
+                assert_eq!(alias, "AI-KR");
+                assert_eq!(model.as_deref(), Some("deepseek-v4-flash"));
+            }
+            _ => panic!("expected provider probe"),
         }
     }
 

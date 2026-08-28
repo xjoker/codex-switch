@@ -94,6 +94,8 @@ codex-switch provider remove openrouter    # 非交互须加 --yes
 # 启动（不写 ~/.codex；`--model` 在 `--` 前须是已保存的模型 id）
 codex-switch launch openrouter
 codex-switch launch openrouter --model deepseek/deepseek-r1-0528
+codex-switch provider probe openrouter
+codex-switch provider probe openrouter --model deepseek/deepseek-r1-0528
 codex-switch launch openrouter -- exec --json "review this"
 codex-switch launch openrouter -- -s workspace-write -a never
 ```
@@ -107,7 +109,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 限制：
 
-- Codex 目前只支持 `wire_api = "responses"`；DeepSeek 官方 Chat Completions API 不能直连，须走 OpenRouter 等网关。
+- Codex 目前只支持 `wire_api = "responses"`；DeepSeek 官方 Chat Completions API 不能直连，须走 OpenRouter 等网关。同一网关上 `/models` 有 slug 也不等于 `/responses` 能用。`provider probe` 只 POST `{"model":"..."}`（不带 `input`），不走补全。
 - `use` 与无别名的 `launch` 自动选号**仅面向 ChatGPT**，不会自动选提供方。
 - 提供方别名不能与 ChatGPT profile、其他提供方或 Codex 保留 id（`openai` / `ollama` / `lmstudio`）冲突。
 - 删除提供方**不可恢复**（不像 ChatGPT profile 会进 `deleted-profiles/`）。

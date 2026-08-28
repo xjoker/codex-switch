@@ -15,6 +15,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | `provider list` | List saved providers (no keys). |
 | `provider show <alias>` | Show one provider; the key is redacted. |
 | `provider fetch-models <alias> [--model <id>]` | Replace saved models with chat slugs from the provider's `GET /models`. Matching ids keep reasoning / `web_search`. Large catalogs require `--model`. |
+| `provider probe <alias> [--model <id>]` | `POST {base_url}/responses` with only `model` (no `input`) to see if Codex can use the slug. Does not generate tokens. Default: every saved model. |
 | `provider rename <old> <new>` | Rename a provider (directory + derived ids). |
 | `provider remove <alias> [-y]` | Delete a provider and its stored key; `-y` / `--yes` skips the prompt. Non-interactive and `--json` runs require `--yes`. |
 | `reset-card <alias> [-y]` | Consume the earliest-expiring reset card for a profile after confirmation; `-y` / `--yes` skips the prompt. |
@@ -34,7 +35,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 | Option | Environment variable | Behavior |
 |---|---|---|
-| `--json` | — | Compact structured output (supported by `list`, `use`, `launch`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `daemon status`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`, `provider fetch-models`). `launch --json` prints one envelope after Codex exits; Codex stdout/stderr are fields of that envelope. |
+| `--json` | — | Compact structured output (supported by `list`, `use`, `launch`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `daemon status`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`, `provider fetch-models`, `provider probe`). `launch --json` prints one envelope after Codex exits; Codex stdout/stderr are fields of that envelope. |
 | `--json-pretty` | — | Indented structured output. |
 | `--proxy <URL>` | `CS_PROXY` | Override proxy configuration for this process; supports `http(s)://`, `socks4://`, `socks5://`, and `socks5h://` (remote DNS). |
 | `--color <auto\|always\|never>` | `CS_COLOR` | Control CLI terminal color. `NO_COLOR` disables CLI color regardless of this option. The TUI still paints its designed palette. |
@@ -62,12 +63,14 @@ codex-switch provider add openrouter --base-url https://openrouter.ai/api/v1 --m
 codex-switch provider add zai --base-url https://api.example/v1 --fetch-models
 codex-switch provider fetch-models zai
 codex-switch launch openrouter -- -s workspace-write -a never
+codex-switch provider probe AI-KR
+codex-switch provider probe AI-KR --model deepseek-v4-flash
 codex-switch self-update --check
 ```
 
 ## Provider
 
-`provider add` required flags are `--base-url` and either `--fetch-models` or at least one `--model`. `--model` is repeatable; the first is `default_model`. `--fetch-models` GETs `{base_url}/models` and saves chat slugs (embedding/reranker omitted; more than 48 chat models must be picked with `--model`, or with TUI `f`). `--reasoning EFFORT` and `--no-web-search` attach to the most recent `--model`. Optional `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). `--set KEY=VALUE` (repeatable) saves a provider-level `codex -c` override. All per-model and `--set` values are passed to Codex verbatim (only the `KEY=VALUE` shape is checked for `--set`). `--api-key-stdin` is required when there is no interactive terminal. `provider fetch-models <alias>` replaces the saved list from the gateway; matching ids keep their settings. On a large catalog pass `--model` (repeatable). `provider rename <old> <new>` moves the directory and re-derives `provider_id` / `env_key`. `launch <alias> --model <id>` (before `--`) selects a saved model on a provider. `launch <alias> -- --model <id>` forwards Codex's own `--model` and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
+`provider add` required flags are `--base-url` and either `--fetch-models` or at least one `--model`. `--model` is repeatable; the first is `default_model`. `--fetch-models` GETs `{base_url}/models` and saves chat slugs (embedding/reranker omitted; more than 48 chat models must be picked with `--model`, or with TUI `f`). `--reasoning EFFORT` and `--no-web-search` attach to the most recent `--model`. Optional `--env-key` defaults to `CODEX_SWITCH_<ALIAS>_KEY`; `--wire-api` defaults to `responses` (the only protocol current Codex accepts). `--set KEY=VALUE` (repeatable) saves a provider-level `codex -c` override. All per-model and `--set` values are passed to Codex verbatim (only the `KEY=VALUE` shape is checked for `--set`). `--api-key-stdin` is required when there is no interactive terminal. `provider fetch-models <alias>` replaces the saved list from the gateway; matching ids keep their settings. On a large catalog pass `--model` (repeatable). `provider probe <alias>` POSTs `{base_url}/responses` with only `model` (no `input`) so a supporting handler 400s at validation without generating tokens; `--model` probes one saved slug. `provider rename <old> <new>` moves the directory and re-derives `provider_id` / `env_key`. `launch <alias> --model <id>` (before `--`) selects a saved model on a provider. `launch <alias> -- --model <id>` forwards Codex's own `--model` and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`). Provider `launch` refuses a slug whose probe is unsupported.
 
 The alias must not collide with a ChatGPT profile, another provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`. Removal is immediate and is not archived under `deleted-profiles/`.
 

@@ -69,7 +69,7 @@ codex-switch provider remove openrouter
 
 `show` prints a redacted key (`…` plus the last four characters). Rename moves the on-disk directory and re-derives `provider_id` / `env_key` from the new alias. Removal deletes the stored key immediately; unlike ChatGPT profile deletion, it is not archived under `deleted-profiles/`. Non-interactive and `--json` runs require `--yes`.
 
-`--json` is supported on `provider add`, `list`, `show`, `rename`, `remove`, and `fetch-models`. JSON never includes the raw key.
+`--json` is supported on `provider add`, `list`, `show`, `rename`, `remove`, `fetch-models`, and `probe`. JSON never includes the raw key.
 
 Older single-`model` files still load: the model becomes the only `[[models]]` entry, and a provider-level `model_reasoning_effort` / `web_search=disabled` is moved onto that model.
 
@@ -106,7 +106,16 @@ codex-switch provider add openrouter \
 
 Codex currently speaks only `wire_api = "responses"`. DeepSeek's official API is Chat Completions, so pointing `--base-url` at DeepSeek directly will not work. Route DeepSeek (or any other Chat Completions-only vendor) through OpenRouter or another Responses-capable gateway.
 
-Pick the slug from the gateway's catalog. If Codex rejects the model, the usual cause is a Chat Completions-only endpoint rather than a missing key.
+Pick the slug from the gateway's catalog. If Codex rejects the model, the usual cause is a Chat Completions-only endpoint rather than a missing key. `GET /models` listing the id is not enough: the same New API host can serve Chat Completions for one slug and 404 `/responses` for another.
+
+To check without generating tokens:
+
+```bash
+codex-switch provider probe AI-KR
+codex-switch provider probe AI-KR --model deepseek-v4-flash
+```
+
+That POSTs `{base_url}/responses` with only `{"model":"<slug>"}` (no `input`). A supporting Responses handler returns HTTP 400 at validation. HTTP 404 `bad_response_status_code` / `Not Found` means Chat Completions only — Codex cannot use it. Provider `launch` runs the same probe and refuses an unsupported slug instead of opening the Codex TUI onto that 404.
 
 ## Model-specific request settings
 

@@ -657,6 +657,206 @@ async fn fetch_models_url(url: &str, bearer: Option<&str>) -> Result<Vec<RemoteM
     Ok(parse_gateway_models(&value))
 }
 
+/// Whether `{base_url}/responses` will accept this slug for Codex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponsesSupport {
+    /// The Responses handler ran (typically HTTP 400 missing `input`).
+    Supported,
+    /// Gateway listed the slug, but POSTing `/responses` 404s (Chat Completions only).
+    Unsupported,
+    /// Auth, rate limit, transport, or an unclassified status. Do not block launch.
+    Unknown,
+}
+
+impl ResponsesSupport {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Result of a zero-token Responses probe: `POST {base}/responses` with only `model`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResponsesProbe {
+    pub model: String,
+    pub url: String,
+    pub support: ResponsesSupport,
+    pub status: u16,
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl ResponsesProbe {
+    pub(crate) fn summary(&self) -> String {
+        match (&self.code, self.message.is_empty()) {
+            (Some(code), false) => format!("{} {}: {}", self.status, code, self.message),
+            (Some(code), true) => format!("{} {code}", self.status),
+            (None, false) => format!("{} {}", self.status, self.message),
+            (None, true) => self.status.to_string(),
+        }
+    }
+
+    pub(crate) fn refusal_message(&self, alias: &str) -> String {
+        format!(
+            "Model '{}' on provider '{alias}' has no Codex Responses channel. \
+             POST {} returned {}. Chat Completions may still work, but current \
+             Codex only speaks /responses. Probe saved models with \
+             `codex-switch provider probe {alias}`.",
+            self.model,
+            self.url,
+            self.summary()
+        )
+    }
+
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "model": self.model,
+            "url": self.url,
+            "support": self.support.as_str(),
+            "status": self.status,
+            "code": self.code,
+            "message": self.message,
+        })
+    }
+}
+
+/// `POST {base_url}/responses` with `{"model": slug}` and no `input`.
+///
+/// A supporting Responses handler rejects that at validation (HTTP 400) without
+/// generating tokens. New API returns 404 `bad_response_status_code` when the
+/// slug exists only as Chat Completions. Never send `input`: a 200 would bill.
+pub(crate) async fn probe_responses_support(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) -> Result<ResponsesProbe> {
+    let url = format!("{}/responses", base_url.trim_end_matches('/'));
+    let client = auth::build_http_client()?;
+    let response = client
+        .post(&url)
+        .timeout(GATEWAY_MODELS_TIMEOUT)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .bytes()
+        .await
+        .context("reading /responses probe body")?;
+    let body_text = String::from_utf8_lossy(&body);
+    let (message, error_type, code) = openai_error_fields(&body_text);
+    let support = classify_responses_probe(
+        status,
+        code.as_deref(),
+        error_type.as_deref(),
+        message.as_deref(),
+    );
+    debug!(
+        model,
+        status,
+        support = support.as_str(),
+        code = code.as_deref().unwrap_or(""),
+        "responses probe"
+    );
+    Ok(ResponsesProbe {
+        model: model.to_string(),
+        url,
+        support,
+        status,
+        code,
+        message: message.unwrap_or_default(),
+    })
+}
+
+pub(crate) async fn probe_provider_models(
+    profile: &ProviderProfile,
+    model: Option<&str>,
+) -> Result<Vec<ResponsesProbe>> {
+    let slugs: Vec<String> = match model {
+        Some(id) => {
+            let selected = profile.resolve_model(Some(id))?;
+            vec![selected.id.clone()]
+        }
+        None => profile.models.iter().map(|m| m.id.clone()).collect(),
+    };
+    let mut results = Vec::with_capacity(slugs.len());
+    for slug in slugs {
+        results.push(probe_responses_support(&profile.base_url, &profile.api_key, &slug).await?);
+    }
+    Ok(results)
+}
+
+fn openai_error_fields(body: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let trimmed = body.trim();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        if trimmed.is_empty() {
+            return (None, None, None);
+        }
+        let preview: String = trimmed.chars().take(200).collect();
+        return (Some(preview), None, None);
+    };
+    let err = match value.get("error") {
+        Some(err) => err,
+        None => return (None, None, None),
+    };
+    if let Some(message) = err.as_str() {
+        let code = value
+            .get("code")
+            .and_then(|c| c.as_str().map(str::to_string));
+        return (Some(message.to_string()), None, code);
+    }
+    let message = err
+        .get("message")
+        .and_then(|m| m.as_str())
+        .map(str::to_string);
+    let error_type = err.get("type").and_then(|t| t.as_str()).map(str::to_string);
+    let code = err.get("code").and_then(|c| {
+        c.as_str()
+            .map(str::to_string)
+            .or_else(|| c.as_i64().map(|n| n.to_string()))
+    });
+    (message, error_type, code)
+}
+
+fn classify_responses_probe(
+    status: u16,
+    code: Option<&str>,
+    error_type: Option<&str>,
+    message: Option<&str>,
+) -> ResponsesSupport {
+    let blob = format!(
+        "{} {} {}",
+        code.unwrap_or(""),
+        error_type.unwrap_or(""),
+        message.unwrap_or("")
+    )
+    .to_ascii_lowercase();
+
+    if status == 404
+        || status == 405
+        || blob.contains("bad_response_status_code")
+        || ((400..500).contains(&status) && blob.contains("not found"))
+    {
+        return ResponsesSupport::Unsupported;
+    }
+    if matches!(status, 400 | 422) {
+        if blob.contains("model_not_found") || blob.contains("model not found") {
+            return ResponsesSupport::Unsupported;
+        }
+        return ResponsesSupport::Supported;
+    }
+    if status == 200 {
+        return ResponsesSupport::Supported;
+    }
+    ResponsesSupport::Unknown
+}
+
 /// Primary gateway list plus fallback metadata when the gateway did not cover
 /// every catalog slug's `context_window`. Fallback never decides which slugs
 /// are injected into `/model`.
@@ -2013,6 +2213,129 @@ api_key = "sk-legacy-key"
                 .any(|a| a.starts_with("model_reasoning_effort=")),
             "effort none must not be sent: {args:?}"
         );
+    }
+
+    #[test]
+    fn classify_new_api_404_as_unsupported() {
+        let (message, error_type, code) = openai_error_fields(
+            r#"{"error":{"message":"Not Found","type":"bad_response_status_code","param":"","code":"bad_response_status_code"}}"#,
+        );
+        assert_eq!(message.as_deref(), Some("Not Found"));
+        assert_eq!(error_type.as_deref(), Some("bad_response_status_code"));
+        assert_eq!(code.as_deref(), Some("bad_response_status_code"));
+        assert_eq!(
+            classify_responses_probe(
+                404,
+                code.as_deref(),
+                error_type.as_deref(),
+                message.as_deref()
+            ),
+            ResponsesSupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn classify_missing_input_400_as_supported() {
+        let (message, error_type, code) = openai_error_fields(
+            r#"{"error":{"message":"Missing required parameter: 'input'.","type":"invalid_request_error","param":"input","code":"missing_required_parameter"}}"#,
+        );
+        assert_eq!(
+            classify_responses_probe(
+                400,
+                code.as_deref(),
+                error_type.as_deref(),
+                message.as_deref()
+            ),
+            ResponsesSupport::Supported
+        );
+    }
+
+    #[test]
+    fn classify_auth_failure_as_unknown() {
+        assert_eq!(
+            classify_responses_probe(401, Some("unauthorized"), None, Some("Invalid API key")),
+            ResponsesSupport::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_posts_model_only_and_treats_new_api_404_as_unsupported() {
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use serde_json::{Value, json};
+
+        let app = Router::new().route(
+            "/v1/responses",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body, json!({"model": "deepseek-v4-flash"}));
+                assert!(body.get("input").is_none());
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": {
+                            "message": "Not Found",
+                            "type": "bad_response_status_code",
+                            "param": "",
+                            "code": "bad_response_status_code"
+                        }
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let probe =
+            probe_responses_support(&format!("http://{addr}/v1"), "sk-test", "deepseek-v4-flash")
+                .await
+                .unwrap();
+        assert_eq!(probe.support, ResponsesSupport::Unsupported);
+        assert_eq!(probe.status, 404);
+        assert_eq!(probe.code.as_deref(), Some("bad_response_status_code"));
+        assert_eq!(probe.message, "Not Found");
+        assert!(probe.refusal_message("AI-KR").contains("deepseek-v4-flash"));
+    }
+
+    #[tokio::test]
+    async fn probe_treats_missing_input_as_supported() {
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use serde_json::{Value, json};
+
+        let app = Router::new().route(
+            "/v1/responses",
+            post(|Json(body): Json<Value>| async move {
+                assert!(body.get("input").is_none());
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": "Missing required parameter: 'input'.",
+                            "type": "invalid_request_error",
+                            "param": "input",
+                            "code": "missing_required_parameter"
+                        }
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let probe =
+            probe_responses_support(&format!("http://{addr}/v1"), "sk-test", "glm-5.3-flash")
+                .await
+                .unwrap();
+        assert_eq!(probe.support, ResponsesSupport::Supported);
+        assert_eq!(probe.status, 400);
     }
 
     #[test]

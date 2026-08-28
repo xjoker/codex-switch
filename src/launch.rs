@@ -507,6 +507,31 @@ async fn launch_provider(
     ensure_codex_available()?;
 
     let selected = profile.resolve_model(model)?.clone();
+    let shown_model = passthrough_model_value(&args).unwrap_or_else(|| selected.id.clone());
+    match provider::probe_responses_support(&profile.base_url, &profile.api_key, &shown_model).await
+    {
+        Ok(probe) => match probe.support {
+            provider::ResponsesSupport::Unsupported => {
+                anyhow::bail!("{}", probe.refusal_message(&profile.alias));
+            }
+            provider::ResponsesSupport::Unknown => {
+                if !json {
+                    user_println(&format!(
+                        "Warning: could not confirm Responses support for '{shown_model}' ({}); launching anyway.",
+                        probe.summary()
+                    ));
+                }
+            }
+            provider::ResponsesSupport::Supported => {}
+        },
+        Err(err) => {
+            if !json {
+                user_println(&format!(
+                    "Warning: Responses probe failed ({err:#}); launching anyway."
+                ));
+            }
+        }
+    }
     let (primary, fallback) = if profile.has_explicit_model_catalog() {
         (Vec::new(), Vec::new())
     } else {
@@ -517,7 +542,6 @@ async fn launch_provider(
     let overrides =
         profile.codex_config_args_from_remote(model, reasoning.clone(), &primary, &fallback)?;
     let codex_args = provider_codex_argv(overrides, args.clone());
-    let shown_model = passthrough_model_value(&args).unwrap_or_else(|| selected.id.clone());
 
     if !json {
         let reasoning_note = match &reasoning {
