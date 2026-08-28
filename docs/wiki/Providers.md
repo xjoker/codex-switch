@@ -2,7 +2,7 @@
 
 A custom API provider is a saved third-party endpoint that `codex-switch launch` can hand to Codex CLI for one session. Typical case: OpenRouter, or another gateway that speaks Codex's Responses protocol.
 
-Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores one endpoint plus a bearer API key under `$CODEX_SWITCH_HOME`, and a list of models. Each model can carry its own reasoning effort and `web_search` setting. At launch those become `codex -c …` overrides for **model and endpoint only**. The child keeps the user's `$CODEX_HOME` (normally `~/.codex`), so `/mcp`, prompts, skills, and `AGENTS.md` are the same files. Edits you make during that session are the real files. `auth.json` is not swapped.
+Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores one endpoint plus a bearer API key under `$CODEX_SWITCH_HOME`, and a list of models. Each model can carry its own reasoning effort and `web_search` setting. At launch those become `codex -c …` overrides for **model and endpoint only**. Each launch uses its own Codex home so concurrent models do not share sqlite or rewrite ChatGPT keys in `config.toml`. `prompts/`, `skills/`, and `AGENTS.md` are linked to the user's `$CODEX_HOME` (normally `~/.codex`); MCP and other non-model keys are copied into the run config and merged back on exit. `auth.json` is not swapped.
 
 The alias is the only name. Codex's required `model_providers.<id>.name` is set to the alias.
 
@@ -84,11 +84,11 @@ codex-switch launch openrouter -- exec --json "review this"
 codex-switch launch openrouter -- -s workspace-write -a never
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, keeps the user's `$CODEX_HOME`, and writes a Codex model catalog next to `provider.toml` so `/model` lists the **saved** provider slugs. Codex 0.149 applies those `-c` flags on the subcommand (`codex exec -c …`); putting them in front of `exec` is ignored. `launch` therefore places overrides after the subcommand and also moves user flags that preceded it (so `launch or -- -m one-shot exec hi` becomes `codex exec -c … -m one-shot hi`). Interactive launch has no subcommand, so the flags stay in front. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
+`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, points `CODEX_HOME` at a per-launch run directory (prompts/skills/`AGENTS.md` linked to the user home), and writes a Codex model catalog next to `provider.toml` so `/model` lists the **saved** provider slugs. Codex 0.149 applies those `-c` flags on the subcommand (`codex exec -c …`); putting them in front of `exec` is ignored. `launch` therefore places overrides after the subcommand and also moves user flags that preceded it (so `launch or -- -m one-shot exec hi` becomes `codex exec -c … -m one-shot hi`). Interactive launch has no subcommand, so the flags stay in front. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
 
 Put `--` before any Codex argv that could be mistaken for a codex-switch alias or flag (`exec`, `--json`, `--color`, a prompt that looks like a name). `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile; it cannot target a provider.
 
-Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are stored on the provider and passed as `-c`. For the duration of the child, `launch` lifts `model`, `model_provider`, `model_reasoning_effort`, `model_providers`, `model_catalog_json`, and `web_search` out of the user's `config.toml` so a leftover thinking level cannot ride along; those keys are restored when Codex exits. MCP servers, prompts, skills, and `AGENTS.md` are not copied or replaced.
+Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are stored on the provider and passed as `-c`. The run `config.toml` omits `model`, `model_provider`, `model_reasoning_effort`, `model_providers`, `model_catalog_json`, and `web_search` so a leftover thinking level cannot ride along; the user's file keeps those ChatGPT keys for the whole session. Several launches can overlap: each merge on exit keeps the other's MCP servers.
 
 `codex-switch use` does not accept a provider alias. A provider is applied only for the launched Codex process; a later bare `codex` invocation is unchanged.
 
@@ -204,7 +204,7 @@ Security contract:
 - The key is never a CLI argument, so it does not appear in the process table as argv.
 - At launch it exists only in the Codex child environment, under a codex-switch-owned variable (`CODEX_SWITCH_<ALIAS>_KEY` by default) rather than a vendor's conventional name, so a pre-exported `OPENAI_API_KEY` or `OPENROUTER_API_KEY` is not reused by accident.
 - `list`, `show`, JSON output, and the TUI print a redacted form only.
-- Launch does not swap `$CODEX_HOME/auth.json`. The child uses the user's `$CODEX_HOME`, so MCP and prompt edits persist. Provider model/endpoint come from `-c`; those keys are lifted from `config.toml` for the process and restored afterwards. ChatGPT `use` / `launch` locking and `auth.json` backup/restore do not apply.
+- Launch does not swap `$CODEX_HOME/auth.json`. The child uses a per-launch Codex home; prompts/skills/`AGENTS.md` are the user files via links, and MCP is merged back on exit. Provider model/endpoint come from `-c`. ChatGPT `use` / `launch` locking and `auth.json` backup/restore do not apply.
 
 Do not commit `provider.toml`, paste keys into issues, or share unredacted `--debug` output.
 

@@ -13,13 +13,18 @@
 //! (`$CODEX_SWITCH_HOME/providers/<alias>/provider.toml`, mode `0600`). At
 //! launch the profile is translated into `codex -c …` overrides (model and
 //! endpoint) while the key is injected into the child process environment
-//! under `env_key` — never onto the command line. The child keeps the user's
-//! `$CODEX_HOME`, so MCP servers, prompts, skills, and `AGENTS.md` are the
-//! same files as a normal Codex session. `auth.json` is not swapped.
+//! under `env_key` — never onto the command line. Each launch gets its own
+//! Codex home under `$CODEX_SWITCH_HOME/providers/<alias>/runs/` so concurrent
+//! models do not share sqlite or rewrite the user's `config.toml` model keys.
+//! `prompts/`, `skills/`, and `AGENTS.md` are linked to the user home; MCP and
+//! other non-model keys are copied into the run `config.toml` and three-way
+//! merged back on exit. `auth.json` is not swapped. Model and endpoint come
+//! from `-c`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1456,9 +1461,8 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Keys that provider `launch` supplies via `codex -c`. They are lifted out of
-/// the user's `config.toml` for the child and put back afterwards so a leftover
-/// thinking level cannot ride along, while MCP / prompts stay the same files.
+/// Keys that provider `launch` supplies via `codex -c`. They stay in the user's
+/// `config.toml` (ChatGPT) and are omitted from the per-launch Codex home.
 const PROVIDER_SESSION_KEYS: [&str; 6] = [
     "model",
     "model_provider",
@@ -1468,30 +1472,40 @@ const PROVIDER_SESSION_KEYS: [&str; 6] = [
     "web_search",
 ];
 
-/// Temporarily strip provider-owned keys from the user's Codex `config.toml`.
+const USER_PROMPT_LINKS: [&str; 3] = ["AGENTS.md", "prompts", "skills"];
+
+/// Per-launch Codex home for a custom provider.
 ///
-/// The child uses the real `$CODEX_HOME` (MCP, prompts, skills, `AGENTS.md`).
-/// Model and endpoint come from `-c`. On restore, those session keys go back;
-/// MCP and prompt edits made during the session are kept.
-pub(crate) struct ProviderSessionConfig {
-    path: PathBuf,
-    before: Option<toml::Value>,
+/// Concurrent `launch` processes must not share sqlite or rewrite the user's
+/// `config.toml` model keys. Each run directory links `prompts/`, `skills/`,
+/// and `AGENTS.md` to the user home, copies non-model config (MCP, …), and
+/// three-way-merges those keys back on exit.
+pub(crate) struct ProviderCodexHome {
+    pub path: PathBuf,
+    user_config_path: PathBuf,
+    base_config: Option<toml::Value>,
     restored: bool,
 }
 
-impl ProviderSessionConfig {
-    pub(crate) fn begin() -> Result<Self> {
-        let path = auth::user_codex_home()?.join("config.toml");
-        let before = load_toml_if_present(&path)?;
-        if let Some(value) = &before {
-            let mut live = value.clone();
-            if strip_provider_session_keys(&mut live) {
-                write_codex_config(&path, &live)?;
-            }
+impl ProviderCodexHome {
+    pub(crate) fn begin(alias: &str) -> Result<Self> {
+        let user_home = auth::user_codex_home()?;
+        let user_config_path = user_home.join("config.toml");
+        let base_config = load_toml_if_present(&user_config_path)?;
+        let path = unique_run_dir(alias)?;
+        ensure_private_dir(&path)?;
+        for name in USER_PROMPT_LINKS {
+            link_user_entry(&user_home.join(name), &path.join(name))?;
+        }
+        if let Some(base) = &base_config {
+            let mut live = base.clone();
+            strip_provider_session_keys(&mut live);
+            write_codex_config(&path.join("config.toml"), &live)?;
         }
         Ok(Self {
             path,
-            before,
+            user_config_path,
+            base_config,
             restored: false,
         })
     }
@@ -1500,27 +1514,47 @@ impl ProviderSessionConfig {
         if self.restored {
             return Ok(());
         }
-        restore_provider_session_keys(&self.path, self.before.as_ref())?;
+        merge_isolated_config_into_user(
+            &self.user_config_path,
+            self.base_config.as_ref(),
+            &self.path.join("config.toml"),
+        )?;
         self.restored = true;
         Ok(())
     }
 }
 
-impl Drop for ProviderSessionConfig {
+impl Drop for ProviderCodexHome {
     fn drop(&mut self) {
         if self.restored {
             return;
         }
-        if let Err(err) = restore_provider_session_keys(&self.path, self.before.as_ref()) {
+        if let Err(err) = merge_isolated_config_into_user(
+            &self.user_config_path,
+            self.base_config.as_ref(),
+            &self.path.join("config.toml"),
+        ) {
             tracing::error!(
                 error = %err,
-                path = %self.path.display(),
-                "failed to restore Codex config after provider launch"
+                path = %self.user_config_path.display(),
+                "failed to merge Codex config after provider launch"
             );
         } else {
             self.restored = true;
         }
     }
+}
+
+fn unique_run_dir(alias: &str) -> Result<PathBuf> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    Ok(provider_dir(alias)?
+        .join("runs")
+        .join(format!("{}-{nanos}-{seq}", std::process::id())))
 }
 
 fn load_toml_if_present(path: &Path) -> Result<Option<toml::Value>> {
@@ -1544,41 +1578,175 @@ fn write_codex_config(path: &Path, value: &toml::Value) -> Result<()> {
         .with_context(|| format!("writing Codex config {}", path.display()))
 }
 
-fn strip_provider_session_keys(value: &mut toml::Value) -> bool {
+fn strip_provider_session_keys(value: &mut toml::Value) {
     let Some(table) = value.as_table_mut() else {
-        return false;
+        return;
     };
-    let mut changed = false;
     for key in PROVIDER_SESSION_KEYS {
-        if table.remove(key).is_some() {
-            changed = true;
-        }
+        table.remove(key);
     }
-    changed
 }
 
-fn restore_provider_session_keys(path: &Path, before: Option<&toml::Value>) -> Result<()> {
-    let after = load_toml_if_present(path)?;
-    match (before, after) {
-        (None, None) => Ok(()),
-        (Some(before), None) => write_codex_config(path, before),
-        (before, Some(mut after)) => {
-            let Some(dest) = after.as_table_mut() else {
-                anyhow::bail!("Codex config is not a table: {}", path.display());
-            };
-            for key in PROVIDER_SESSION_KEYS {
-                match before.and_then(|value| value.get(key)) {
-                    Some(value) => {
-                        dest.insert(key.to_string(), value.clone());
-                    }
-                    None => {
-                        dest.remove(key);
-                    }
-                }
-            }
-            write_codex_config(path, &after)
+fn link_user_entry(src: &Path, dest: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    if dest.exists() || dest.symlink_metadata().is_ok() {
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        ensure_private_dir(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, dest)
+            .with_context(|| format!("linking {} -> {}", dest.display(), src.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        let linked = if src.is_dir() {
+            std::os::windows::fs::symlink_dir(src, dest)
+        } else {
+            std::os::windows::fs::symlink_file(src, dest)
+        };
+        if linked.is_err() {
+            copy_tree(src, dest)
+                .with_context(|| format!("copying {} -> {}", src.display(), dest.display()))?;
         }
     }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
+    if src.is_dir() {
+        ensure_private_dir(dest)?;
+        for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+            let entry = entry.with_context(|| format!("reading entry in {}", src.display()))?;
+            copy_tree(&entry.path(), &dest.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        ensure_private_dir(parent)?;
+    }
+    std::fs::copy(src, dest)
+        .with_context(|| format!("copying {} -> {}", src.display(), dest.display()))?;
+    Ok(())
+}
+
+fn merge_isolated_config_into_user(
+    user_config_path: &Path,
+    base: Option<&toml::Value>,
+    isolated_config_path: &Path,
+) -> Result<()> {
+    let ours = load_toml_if_present(isolated_config_path)?;
+    if base.is_none() && ours.is_none() {
+        return Ok(());
+    }
+    let _lock = crate::profile::lock_codex_config_merge()?;
+    let theirs = load_toml_if_present(user_config_path)?;
+    let merged = merge_user_config(base, ours.as_ref(), theirs.as_ref());
+    match merged {
+        None => Ok(()),
+        Some(value)
+            if value.as_table().is_some_and(toml::map::Map::is_empty)
+                && !user_config_path.exists() =>
+        {
+            Ok(())
+        }
+        Some(value) => write_codex_config(user_config_path, &value),
+    }
+}
+
+fn merge_user_config(
+    base: Option<&toml::Value>,
+    ours: Option<&toml::Value>,
+    theirs: Option<&toml::Value>,
+) -> Option<toml::Value> {
+    let empty = toml::map::Map::new();
+    let base_table = base.and_then(toml::Value::as_table).unwrap_or(&empty);
+    let ours_table = ours.and_then(toml::Value::as_table).unwrap_or(&empty);
+    let theirs_table = theirs.and_then(toml::Value::as_table).unwrap_or(&empty);
+    let mut keys = HashSet::new();
+    keys.extend(base_table.keys().cloned());
+    keys.extend(ours_table.keys().cloned());
+    keys.extend(theirs_table.keys().cloned());
+    let mut out = theirs_table.clone();
+    for key in keys {
+        if PROVIDER_SESSION_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        match three_way_merge(
+            base_table.get(&key),
+            ours_table.get(&key),
+            theirs_table.get(&key),
+        ) {
+            Some(value) => {
+                out.insert(key, value);
+            }
+            None => {
+                out.remove(&key);
+            }
+        }
+    }
+    if out.is_empty() && theirs.is_none() && ours.is_none() {
+        return None;
+    }
+    Some(toml::Value::Table(out))
+}
+
+fn three_way_merge(
+    base: Option<&toml::Value>,
+    ours: Option<&toml::Value>,
+    theirs: Option<&toml::Value>,
+) -> Option<toml::Value> {
+    if ours == theirs {
+        return ours.cloned().or_else(|| theirs.cloned());
+    }
+    if ours == base {
+        return theirs.cloned();
+    }
+    if theirs == base {
+        return ours.cloned();
+    }
+    match (base, ours, theirs) {
+        (
+            Some(toml::Value::Table(base)),
+            Some(toml::Value::Table(ours)),
+            Some(toml::Value::Table(theirs)),
+        ) => Some(toml::Value::Table(merge_maps(base, ours, theirs))),
+        (Some(toml::Value::Table(base)), Some(toml::Value::Table(ours)), None) => Some(
+            toml::Value::Table(merge_maps(base, ours, &toml::map::Map::new())),
+        ),
+        (Some(toml::Value::Table(base)), None, Some(toml::Value::Table(theirs))) => Some(
+            toml::Value::Table(merge_maps(base, &toml::map::Map::new(), theirs)),
+        ),
+        (_, ours, _) => ours.cloned(),
+    }
+}
+
+fn merge_maps(
+    base: &toml::map::Map<String, toml::Value>,
+    ours: &toml::map::Map<String, toml::Value>,
+    theirs: &toml::map::Map<String, toml::Value>,
+) -> toml::map::Map<String, toml::Value> {
+    let mut keys = HashSet::new();
+    keys.extend(base.keys().cloned());
+    keys.extend(ours.keys().cloned());
+    keys.extend(theirs.keys().cloned());
+    let mut out = theirs.clone();
+    for key in keys {
+        match three_way_merge(base.get(&key), ours.get(&key), theirs.get(&key)) {
+            Some(value) => {
+                out.insert(key, value);
+            }
+            None => {
+                out.remove(&key);
+            }
+        }
+    }
+    out
 }
 
 /// List saved provider aliases (directories holding a `provider.toml`), sorted.
@@ -2177,81 +2345,115 @@ api_key = "sk-legacy-key"
     }
 
     #[test]
-    fn provider_session_uses_the_user_home_and_keeps_mcp_edits() {
+    fn provider_home_leaves_user_model_keys_and_links_prompts() {
         let _home = TestHome::new();
         let home = crate::auth::user_codex_home().unwrap();
-        std::fs::write(
-            home.join("config.toml"),
-            "model = \"gpt-5.3-codex\"\nmodel_reasoning_effort = \"high\"\ndeveloper_instructions = \"be terse\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n",
-        )
-        .unwrap();
+        let original = "model = \"gpt-5.3-codex\"\nmodel_reasoning_effort = \"high\"\ndeveloper_instructions = \"be terse\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n";
+        std::fs::write(home.join("config.toml"), original).unwrap();
         std::fs::write(home.join("auth.json"), "{\"tokens\":{}}\n").unwrap();
         std::fs::write(home.join("AGENTS.md"), "# house rules\n").unwrap();
         std::fs::create_dir_all(home.join("prompts")).unwrap();
         std::fs::write(home.join("prompts/review.md"), "review this\n").unwrap();
 
-        let mut session = ProviderSessionConfig::begin().unwrap();
-        let live = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let mut session = ProviderCodexHome::begin("or").unwrap();
+        let user_live = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert_eq!(
+            user_live, original,
+            "concurrent launches must not rewrite the user config.toml while Codex runs"
+        );
+
+        let isolated = std::fs::read_to_string(session.path.join("config.toml")).unwrap();
         assert!(
-            !live.contains("model_reasoning_effort"),
-            "leftover thinking must not be visible to the child: {live}"
+            !isolated.contains("model_reasoning_effort") && !isolated.contains("gpt-5.3-codex"),
+            "isolated home must not carry leftover ChatGPT model/thinking: {isolated}"
         );
         assert!(
-            !live.contains("gpt-5.3-codex"),
-            "ChatGPT model must come from -c, not config.toml: {live}"
-        );
-        assert!(
-            live.contains("demo") && live.contains("be terse"),
-            "MCP and prompts stay on the user home: {live}"
+            isolated.contains("demo") && isolated.contains("be terse"),
+            "isolated home must keep MCP and prompts config: {isolated}"
         );
         assert_eq!(
-            std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
+            std::fs::read_to_string(session.path.join("AGENTS.md")).unwrap(),
             "# house rules\n"
         );
         assert_eq!(
-            std::fs::read_to_string(home.join("prompts/review.md")).unwrap(),
+            std::fs::read_to_string(session.path.join("prompts/review.md")).unwrap(),
             "review this\n"
         );
+        assert!(!session.path.join("auth.json").exists());
         assert_eq!(
             std::fs::read_to_string(home.join("auth.json")).unwrap(),
             "{\"tokens\":{}}\n"
         );
 
-        std::fs::write(
-            home.join("config.toml"),
-            "model = \"glm-5.3-flash\"\ndeveloper_instructions = \"be terse\"\n\n[mcp_servers.fresh]\ncommand = \"false\"\n",
-        )
-        .unwrap();
-        std::fs::write(home.join("prompts/review.md"), "updated prompt\n").unwrap();
-        session.restore().unwrap();
+        let prompts_link = session.path.join("prompts");
+        if prompts_link
+            .symlink_metadata()
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            std::fs::write(prompts_link.join("review.md"), "updated prompt\n").unwrap();
+            assert_eq!(
+                std::fs::read_to_string(home.join("prompts/review.md")).unwrap(),
+                "updated prompt\n",
+                "prompt edits through the run dir must land in the user home"
+            );
+        }
 
+        session.restore().unwrap();
         let restored = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(
             restored.contains("gpt-5.3-codex") && restored.contains("high"),
-            "ChatGPT model/reasoning must return after the session: {restored}"
+            "ChatGPT model/reasoning must stay in the user config: {restored}"
         );
         assert!(
-            restored.contains("fresh") && !restored.contains("demo"),
-            "MCP edits during the third-party session must persist: {restored}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(home.join("prompts/review.md")).unwrap(),
-            "updated prompt\n"
+            restored.contains("demo") && restored.contains("be terse"),
+            "MCP must remain after restore: {restored}"
         );
     }
 
     #[test]
-    fn provider_session_without_config_is_a_noop_then_drops_codex_model_keys() {
+    fn overlapping_provider_homes_merge_disjoint_mcp_servers() {
         let _home = TestHome::new();
         let home = crate::auth::user_codex_home().unwrap();
-        let mut session = ProviderSessionConfig::begin().unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "model = \"gpt-5.3-codex\"\nmodel_reasoning_effort = \"high\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n",
+        )
+        .unwrap();
+
+        let mut first = ProviderCodexHome::begin("or").unwrap();
+        let mut second = ProviderCodexHome::begin("or").unwrap();
+        assert_ne!(first.path, second.path);
+
+        upsert_mcp_server(&first.path.join("config.toml"), "alpha", "true");
+        upsert_mcp_server(&second.path.join("config.toml"), "beta", "false");
+
+        first.restore().unwrap();
+        second.restore().unwrap();
+
+        let restored = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(
+            restored.contains("gpt-5.3-codex") && restored.contains("high"),
+            "ChatGPT model/reasoning must survive overlapping launches: {restored}"
+        );
+        assert!(
+            restored.contains("demo") && restored.contains("alpha") && restored.contains("beta"),
+            "each session's MCP server must merge in: {restored}"
+        );
+    }
+
+    #[test]
+    fn provider_home_without_config_is_a_noop_then_keeps_mcp_not_gateway_model() {
+        let _home = TestHome::new();
+        let home = crate::auth::user_codex_home().unwrap();
+        let mut session = ProviderCodexHome::begin("or").unwrap();
         assert!(!home.join("config.toml").exists());
         session.restore().unwrap();
         assert!(!home.join("config.toml").exists());
 
-        let mut session = ProviderSessionConfig::begin().unwrap();
+        let mut session = ProviderCodexHome::begin("or").unwrap();
         std::fs::write(
-            home.join("config.toml"),
+            session.path.join("config.toml"),
             "model = \"glm-5.3-flash\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n",
         )
         .unwrap();
@@ -2259,12 +2461,33 @@ api_key = "sk-legacy-key"
         let restored = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(
             restored.contains("demo"),
-            "MCP added during the session must remain: {restored}"
+            "MCP added in the isolated home must merge back: {restored}"
         );
         assert!(
             !restored.contains("glm-5.3-flash"),
             "gateway model must not stick in the user config: {restored}"
         );
+    }
+
+    fn upsert_mcp_server(path: &Path, name: &str, command: &str) {
+        let mut root: toml::Value = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| toml::from_str(&raw).ok())
+            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+        let table = root
+            .as_table_mut()
+            .expect("isolated config must be a table");
+        let servers = table
+            .entry("mcp_servers".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let servers = servers.as_table_mut().expect("mcp_servers must be a table");
+        let mut server = toml::map::Map::new();
+        server.insert(
+            "command".to_string(),
+            toml::Value::String(command.to_string()),
+        );
+        servers.insert(name.to_string(), toml::Value::Table(server));
+        std::fs::write(path, toml::to_string(&root).unwrap()).unwrap();
     }
 
     #[test]

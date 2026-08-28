@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Concurrent provider launches** — Each `launch` gets its own Codex home under `$CODEX_SWITCH_HOME/providers/<alias>/runs/`. `prompts/`, `skills/`, and `AGENTS.md` are linked to the user home so edits are the real files. MCP and other non-model keys are copied into that run `config.toml` and three-way-merged back on exit (short lock). ChatGPT `model` / `model_reasoning_effort` in the user `config.toml` are left alone for the whole session, so overlapping models cannot restore over each other.
+
 ## v20260828.4.0 — 2026-08-28
 
 - **Provider launch only changes model and endpoint** — The Codex child keeps the user's `$CODEX_HOME`. `/mcp`, prompts, skills, and `AGENTS.md` are the same files, so edits during a third-party session persist. `launch` supplies model and base URL as `-c`, and for that process lifts leftover `model` / `model_provider` / `model_reasoning_effort` / `model_providers` / `web_search` out of `config.toml` then restores them on exit so ChatGPT is not stuck on the gateway model.

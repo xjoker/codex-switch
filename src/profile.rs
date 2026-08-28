@@ -110,6 +110,16 @@ pub fn lock_live_auth() -> Result<File> {
     acquire_file_lock(&path, LOCK_WAIT_TIMEOUT, "auth")
 }
 
+/// Serialize short writes that merge provider-session Codex config back into
+/// the user's `$CODEX_HOME/config.toml`. Not held for the Codex process.
+pub(crate) fn lock_codex_config_merge() -> Result<File> {
+    acquire_file_lock(
+        &app_home()?.join("codex-config.lock"),
+        LOCK_WAIT_TIMEOUT,
+        "codex config merge",
+    )
+}
+
 /// Serialize the short launch staging window without holding the auth write
 /// lock while Codex starts and reads the staged credentials.
 pub fn lock_launch_session() -> Result<File> {

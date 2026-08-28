@@ -2,7 +2,7 @@
 
 > 英文 Wiki 是 `codex-switch` 的主文档与行为依据。本页提供中文快速入口与常用操作摘要；细节、标志位与边界条件以英文页面为准（尤其 [Providers](Providers)、[Command reference](Command-Reference)）。
 
-`codex-switch` 用于管理本机多个 OpenAI Codex CLI 登录、查看额度，并在新会话前选择合适账号。它也会保存自定义 API 提供方（如 OpenRouter），通过 `launch` 把**模型和地址**交给 Codex；MCP、提示词、skills 仍用原来的 `$CODEX_HOME`，第三方会话里改的就是原文件。请勿分享 profile、`auth.json`、提供方 API 密钥、代理凭据或未脱敏的 debug 输出。
+`codex-switch` 用于管理本机多个 OpenAI Codex CLI 登录、查看额度，并在新会话前选择合适账号。它也会保存自定义 API 提供方（如 OpenRouter），通过 `launch` 把**模型和地址**交给 Codex。每次 launch 用独立运行目录（可同时开多个模型）；`prompts/`、`skills/`、`AGENTS.md` 链到原来的 `$CODEX_HOME`，MCP 等非模型配置在退出时合并回去。请勿分享 profile、`auth.json`、提供方 API 密钥、代理凭据或未脱敏的 debug 输出。
 
 ## 快速开始
 
@@ -110,7 +110,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 限制：
 
 - Codex 目前只支持 `wire_api = "responses"`；DeepSeek 官方 Chat Completions API 不能直连，须走 OpenRouter 等网关。同一网关上 `/models` 有 slug 也不等于 `/responses` 能用。`provider probe` 只 POST `{"model":"..."}`（不带 `input`），不走补全。
-- 提供方 `launch` 不换 `CODEX_HOME`，只改本次请求的模型和地址。在第三方模型里改 MCP / 提示词就是改 `~/.codex`。
+- 提供方 `launch` 用独立运行目录（不改用户 `config.toml` 里的 ChatGPT 模型键），只改本次请求的模型和地址。提示词经符号链接写回 `~/.codex`；MCP 在退出时合并。可同时开多个模型。
 - `use` 与无别名的 `launch` 自动选号**仅面向 ChatGPT**，不会自动选提供方。
 - 提供方别名不能与 ChatGPT profile、其他提供方或 Codex 保留 id（`openai` / `ollama` / `lmstudio`）冲突。
 - 删除提供方**不可恢复**（不像 ChatGPT profile 会进 `deleted-profiles/`）。
