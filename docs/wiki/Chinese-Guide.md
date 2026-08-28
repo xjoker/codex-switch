@@ -181,7 +181,7 @@ Codex 在前台运行；退出后回到 TUI。
 
 开发版属于滚动 prerelease 通道。安装、验证、回退和问题反馈步骤见 [Testing development releases](Development-Releases)，其中附有中文摘要。
 
-当前滚动开发版示例：`codex-switch self-update --dev`，版本号形如 `20260827.4.0-dev`。
+当前滚动开发版示例：`codex-switch self-update --dev`，版本号形如 `20260828.1.0-dev`。
 
 ## 常用入口（英文正文）
 
