@@ -10,15 +10,12 @@
 //! user-facing name (Codex's required `model_providers.<id>.name` is the alias).
 //!
 //! Storage lives entirely under codex-switch's own home
-//! (`$CODEX_SWITCH_HOME/providers/<alias>/provider.toml`, mode `0600`) so nothing
-//! is written into `~/.codex`. At launch the profile is translated into
-//! `codex -c …` overrides while the key is injected into the child process
-//! environment under `env_key` — never onto the command line — so it stays out of
-//! the process table. The Codex child also gets its own `CODEX_HOME` under
-//! `providers/<alias>/codex-home`, so sessions, sqlite, and project trust stay
-//! in `$CODEX_SWITCH_HOME` rather than the user's `~/.codex`. MCP servers,
-//! `AGENTS.md`, custom prompts, and skills are copied from the user's Codex
-//! home at each launch so `/mcp` and prompts still work; `auth.json` is not.
+//! (`$CODEX_SWITCH_HOME/providers/<alias>/provider.toml`, mode `0600`). At
+//! launch the profile is translated into `codex -c …` overrides (model and
+//! endpoint) while the key is injected into the child process environment
+//! under `env_key` — never onto the command line. The child keeps the user's
+//! `$CODEX_HOME`, so MCP servers, prompts, skills, and `AGENTS.md` are the
+//! same files as a normal Codex session. `auth.json` is not swapped.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1459,164 +1456,129 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Codex runtime dir for one provider. Sessions, sqlite, and project trust
-/// live here so `launch` does not write them into the user's `$CODEX_HOME`.
-pub(crate) fn isolated_codex_home(alias: &str) -> Result<PathBuf> {
-    Ok(provider_dir(alias)?.join("codex-home"))
-}
+/// Keys that provider `launch` supplies via `codex -c`. They are lifted out of
+/// the user's `config.toml` for the child and put back afterwards so a leftover
+/// thinking level cannot ride along, while MCP / prompts stay the same files.
+const PROVIDER_SESSION_KEYS: [&str; 6] = [
+    "model",
+    "model_provider",
+    "model_reasoning_effort",
+    "model_catalog_json",
+    "model_providers",
+    "web_search",
+];
 
-/// Create the isolated Codex home under `$CODEX_SWITCH_HOME`.
+/// Temporarily strip provider-owned keys from the user's Codex `config.toml`.
 ///
-/// Sessions, sqlite, and project trust stay in this tree so `launch` does not
-/// write them into the user's `$CODEX_HOME`. MCP servers, `AGENTS.md`, custom
-/// prompts, and skills are copied from that user home each launch; `auth.json`
-/// is not.
-pub(crate) fn prepare_isolated_codex_home(alias: &str) -> Result<PathBuf> {
-    let dest = isolated_codex_home(alias)?;
-    ensure_private_dir(&dest)?;
-    let user_home = auth::user_codex_home()?;
-    if !same_path(&user_home, &dest) {
-        overlay_user_codex_into_isolated(&user_home, &dest)?;
-    }
-    Ok(dest)
+/// The child uses the real `$CODEX_HOME` (MCP, prompts, skills, `AGENTS.md`).
+/// Model and endpoint come from `-c`. On restore, those session keys go back;
+/// MCP and prompt edits made during the session are kept.
+pub(crate) struct ProviderSessionConfig {
+    path: PathBuf,
+    before: Option<toml::Value>,
+    restored: bool,
 }
 
-/// Config keys Codex reads from `$CODEX_HOME/config.toml` that are not
-/// provider-specific. Overlaying these keeps `/mcp` and inline instructions
-/// working when the child uses the isolated home.
-const USER_CODEX_OVERLAY_KEYS: [&str; 3] = ["mcp_servers", "developer_instructions", "skills"];
-
-/// Files and directories under `$CODEX_HOME` that hold prompts / skills.
-const USER_CODEX_OVERLAY_PATHS: [&str; 3] = ["AGENTS.md", "prompts", "skills"];
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
-}
-
-fn overlay_user_codex_into_isolated(user_home: &Path, isolated: &Path) -> Result<()> {
-    overlay_user_config_keys(user_home, isolated)?;
-    for name in USER_CODEX_OVERLAY_PATHS {
-        copy_codex_entry(&user_home.join(name), &isolated.join(name))?;
-    }
-    Ok(())
-}
-
-fn overlay_user_config_keys(user_home: &Path, isolated: &Path) -> Result<()> {
-    let user_config_path = user_home.join("config.toml");
-    if !user_config_path.exists() {
-        return Ok(());
-    }
-    let raw = std::fs::read_to_string(&user_config_path)
-        .with_context(|| format!("reading user Codex config {}", user_config_path.display()))?;
-    if raw.trim().is_empty() {
-        return Ok(());
-    }
-    let user_value: toml::Value = toml::from_str(&raw)
-        .with_context(|| format!("parsing user Codex config {}", user_config_path.display()))?;
-    let Some(user_table) = user_value.as_table() else {
-        return Ok(());
-    };
-
-    let isolated_path = isolated.join("config.toml");
-    let mut isolated_value = if isolated_path.exists() {
-        let isolated_raw = std::fs::read_to_string(&isolated_path).with_context(|| {
-            format!("reading isolated Codex config {}", isolated_path.display())
-        })?;
-        if isolated_raw.trim().is_empty() {
-            toml::Value::Table(toml::map::Map::new())
-        } else {
-            toml::from_str(&isolated_raw).with_context(|| {
-                format!("parsing isolated Codex config {}", isolated_path.display())
-            })?
+impl ProviderSessionConfig {
+    pub(crate) fn begin() -> Result<Self> {
+        let path = auth::user_codex_home()?.join("config.toml");
+        let before = load_toml_if_present(&path)?;
+        if let Some(value) = &before {
+            let mut live = value.clone();
+            if strip_provider_session_keys(&mut live) {
+                write_codex_config(&path, &live)?;
+            }
         }
-    } else {
-        toml::Value::Table(toml::map::Map::new())
-    };
-    let Some(dest_table) = isolated_value.as_table_mut() else {
-        anyhow::bail!(
-            "isolated Codex config is not a table: {}",
-            isolated_path.display()
-        );
-    };
+        Ok(Self {
+            path,
+            before,
+            restored: false,
+        })
+    }
 
+    pub(crate) fn restore(&mut self) -> Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        restore_provider_session_keys(&self.path, self.before.as_ref())?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl Drop for ProviderSessionConfig {
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        if let Err(err) = restore_provider_session_keys(&self.path, self.before.as_ref()) {
+            tracing::error!(
+                error = %err,
+                path = %self.path.display(),
+                "failed to restore Codex config after provider launch"
+            );
+        } else {
+            self.restored = true;
+        }
+    }
+}
+
+fn load_toml_if_present(path: &Path) -> Result<Option<toml::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading Codex config {}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let value =
+        toml::from_str(&raw).with_context(|| format!("parsing Codex config {}", path.display()))?;
+    Ok(Some(value))
+}
+
+fn write_codex_config(path: &Path, value: &toml::Value) -> Result<()> {
+    let serialized =
+        toml::to_string(value).context("serializing Codex config for provider launch")?;
+    crate::auth::atomic_write_private(path, serialized.as_bytes())
+        .with_context(|| format!("writing Codex config {}", path.display()))
+}
+
+fn strip_provider_session_keys(value: &mut toml::Value) -> bool {
+    let Some(table) = value.as_table_mut() else {
+        return false;
+    };
     let mut changed = false;
-    for key in USER_CODEX_OVERLAY_KEYS {
-        let Some(value) = user_table.get(key) else {
-            continue;
-        };
-        if dest_table.get(key) != Some(value) {
-            dest_table.insert(key.to_string(), value.clone());
+    for key in PROVIDER_SESSION_KEYS {
+        if table.remove(key).is_some() {
             changed = true;
         }
     }
-    if !changed {
-        return Ok(());
-    }
-    let serialized = toml::to_string(&isolated_value)
-        .context("serializing isolated Codex config after overlaying user MCP/prompts")?;
-    crate::auth::atomic_write_private(&isolated_path, serialized.as_bytes())
-        .with_context(|| format!("writing isolated Codex config {}", isolated_path.display()))
+    changed
 }
 
-fn copy_codex_entry(src: &Path, dest: &Path) -> Result<()> {
-    if !src.exists() {
-        return Ok(());
+fn restore_provider_session_keys(path: &Path, before: Option<&toml::Value>) -> Result<()> {
+    let after = load_toml_if_present(path)?;
+    match (before, after) {
+        (None, None) => Ok(()),
+        (Some(before), None) => write_codex_config(path, before),
+        (before, Some(mut after)) => {
+            let Some(dest) = after.as_table_mut() else {
+                anyhow::bail!("Codex config is not a table: {}", path.display());
+            };
+            for key in PROVIDER_SESSION_KEYS {
+                match before.and_then(|value| value.get(key)) {
+                    Some(value) => {
+                        dest.insert(key.to_string(), value.clone());
+                    }
+                    None => {
+                        dest.remove(key);
+                    }
+                }
+            }
+            write_codex_config(path, &after)
+        }
     }
-    if same_path(src, dest) {
-        return Ok(());
-    }
-    if src.is_dir() {
-        return copy_codex_dir(src, dest);
-    }
-    if let Some(parent) = dest.parent() {
-        ensure_private_dir(parent)?;
-    }
-    std::fs::copy(src, dest)
-        .with_context(|| format!("copying {} -> {}", src.display(), dest.display()))?;
-    Ok(())
-}
-
-fn copy_codex_dir(src: &Path, dest: &Path) -> Result<()> {
-    ensure_private_dir(dest)?;
-    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
-        let entry = entry.with_context(|| format!("reading entry in {}", src.display()))?;
-        copy_codex_entry(&entry.path(), &dest.join(entry.file_name()))?;
-    }
-    Ok(())
-}
-
-/// Drop a leftover `model_reasoning_effort` from the isolated Codex home.
-///
-/// Codex writes that key into `config.toml` when `/model` changes effort, and
-/// 0.150 sends it on `POST /responses` even if this launch omitted `-c`. Skip
-/// (and models with no saved effort) would otherwise keep showing `high` and
-/// 404 on gateways that reject a thinking level. This launch's `-c` is the
-/// only source that should put the key back.
-pub(crate) fn clear_isolated_reasoning_effort(home: &Path) -> Result<()> {
-    let path = home.join("config.toml");
-    if !path.exists() {
-        return Ok(());
-    }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading isolated Codex config {}", path.display()))?;
-    if raw.trim().is_empty() {
-        return Ok(());
-    }
-    let mut value: toml::Value = toml::from_str(&raw)
-        .with_context(|| format!("parsing isolated Codex config {}", path.display()))?;
-    let Some(table) = value.as_table_mut() else {
-        return Ok(());
-    };
-    if table.remove("model_reasoning_effort").is_none() {
-        return Ok(());
-    }
-    let serialized = toml::to_string(&value)
-        .context("serializing isolated Codex config after clearing leftover reasoning")?;
-    crate::auth::atomic_write_private(&path, serialized.as_bytes())
-        .with_context(|| format!("writing isolated Codex config {}", path.display()))
 }
 
 /// List saved provider aliases (directories holding a `provider.toml`), sorted.
@@ -2215,175 +2177,93 @@ api_key = "sk-legacy-key"
     }
 
     #[test]
-    fn isolated_codex_home_copies_mcp_and_prompts_but_not_auth() {
+    fn provider_session_uses_the_user_home_and_keeps_mcp_edits() {
         let _home = TestHome::new();
-        let user_codex = tempfile::tempdir().unwrap();
+        let home = crate::auth::user_codex_home().unwrap();
         std::fs::write(
-            user_codex.path().join("config.toml"),
-            "developer_instructions = \"be terse\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n",
+            home.join("config.toml"),
+            "model = \"gpt-5.3-codex\"\nmodel_reasoning_effort = \"high\"\ndeveloper_instructions = \"be terse\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n",
         )
         .unwrap();
-        std::fs::write(user_codex.path().join("auth.json"), "{\"tokens\":{}}\n").unwrap();
-        std::fs::write(user_codex.path().join("AGENTS.md"), "# house rules\n").unwrap();
-        std::fs::create_dir_all(user_codex.path().join("prompts")).unwrap();
-        std::fs::write(user_codex.path().join("prompts/review.md"), "review this\n").unwrap();
-        std::fs::create_dir_all(user_codex.path().join("skills/demo")).unwrap();
-        std::fs::write(
-            user_codex.path().join("skills/demo/SKILL.md"),
-            "# demo skill\n",
-        )
-        .unwrap();
+        std::fs::write(home.join("auth.json"), "{\"tokens\":{}}\n").unwrap();
+        std::fs::write(home.join("AGENTS.md"), "# house rules\n").unwrap();
+        std::fs::create_dir_all(home.join("prompts")).unwrap();
+        std::fs::write(home.join("prompts/review.md"), "review this\n").unwrap();
 
-        let previous = std::env::var_os("CODEX_HOME");
-        unsafe {
-            std::env::set_var("CODEX_HOME", user_codex.path());
-        }
-        struct Restore(Option<OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(value) => std::env::set_var("CODEX_HOME", value),
-                        None => std::env::remove_var("CODEX_HOME"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(previous);
-
-        save(&sample("zai")).unwrap();
-        let isolated_dir = isolated_codex_home("zai").unwrap();
-        std::fs::create_dir_all(&isolated_dir).unwrap();
-        std::fs::write(
-            isolated_dir.join("config.toml"),
-            "model = \"glm-5.3-flash\"\nmodel_reasoning_effort = \"high\"\n",
-        )
-        .unwrap();
-
-        let isolated = prepare_isolated_codex_home("zai").unwrap();
-        assert!(isolated.starts_with(crate::auth::app_home().unwrap()));
-        assert!(isolated.ends_with(std::path::Path::new("providers/zai/codex-home")));
-
-        let isolated_config = std::fs::read_to_string(isolated.join("config.toml")).unwrap();
+        let mut session = ProviderSessionConfig::begin().unwrap();
+        let live = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(
-            isolated_config.contains("mcp_servers") && isolated_config.contains("demo"),
-            "MCP must be visible to the isolated Codex home: {isolated_config}"
+            !live.contains("model_reasoning_effort"),
+            "leftover thinking must not be visible to the child: {live}"
         );
         assert!(
-            isolated_config.contains("be terse"),
-            "developer_instructions must be copied: {isolated_config}"
+            !live.contains("gpt-5.3-codex"),
+            "ChatGPT model must come from -c, not config.toml: {live}"
         );
         assert!(
-            isolated_config.contains("glm-5.3-flash"),
-            "leftover provider keys must remain: {isolated_config}"
+            live.contains("demo") && live.contains("be terse"),
+            "MCP and prompts stay on the user home: {live}"
         );
-        assert!(!isolated.join("auth.json").exists());
         assert_eq!(
-            std::fs::read_to_string(isolated.join("AGENTS.md")).unwrap(),
+            std::fs::read_to_string(home.join("AGENTS.md")).unwrap(),
             "# house rules\n"
         );
         assert_eq!(
-            std::fs::read_to_string(isolated.join("prompts/review.md")).unwrap(),
+            std::fs::read_to_string(home.join("prompts/review.md")).unwrap(),
             "review this\n"
         );
         assert_eq!(
-            std::fs::read_to_string(isolated.join("skills/demo/SKILL.md")).unwrap(),
-            "# demo skill\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(user_codex.path().join("config.toml")).unwrap(),
-            "developer_instructions = \"be terse\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(user_codex.path().join("auth.json")).unwrap(),
+            std::fs::read_to_string(home.join("auth.json")).unwrap(),
             "{\"tokens\":{}}\n"
         );
-    }
 
-    #[test]
-    fn isolated_codex_home_refreshes_mcp_from_the_user_home() {
-        let _home = TestHome::new();
-        let user_codex = tempfile::tempdir().unwrap();
         std::fs::write(
-            user_codex.path().join("config.toml"),
-            "[mcp_servers.old]\ncommand = \"true\"\n",
+            home.join("config.toml"),
+            "model = \"glm-5.3-flash\"\ndeveloper_instructions = \"be terse\"\n\n[mcp_servers.fresh]\ncommand = \"false\"\n",
         )
         .unwrap();
-        let previous = std::env::var_os("CODEX_HOME");
-        unsafe {
-            std::env::set_var("CODEX_HOME", user_codex.path());
-        }
-        struct Restore(Option<OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(value) => std::env::set_var("CODEX_HOME", value),
-                        None => std::env::remove_var("CODEX_HOME"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(previous);
+        std::fs::write(home.join("prompts/review.md"), "updated prompt\n").unwrap();
+        session.restore().unwrap();
 
-        save(&sample("zai")).unwrap();
-        prepare_isolated_codex_home("zai").unwrap();
-        std::fs::write(
-            user_codex.path().join("config.toml"),
-            "[mcp_servers.fresh]\ncommand = \"false\"\n",
-        )
-        .unwrap();
-        let isolated = prepare_isolated_codex_home("zai").unwrap();
-        let isolated_config = std::fs::read_to_string(isolated.join("config.toml")).unwrap();
+        let restored = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(
-            isolated_config.contains("fresh"),
-            "next launch must pick up MCP added in ~/.codex: {isolated_config}"
+            restored.contains("gpt-5.3-codex") && restored.contains("high"),
+            "ChatGPT model/reasoning must return after the session: {restored}"
         );
         assert!(
-            !isolated_config.contains("old"),
-            "replaced MCP names must not linger: {isolated_config}"
+            restored.contains("fresh") && !restored.contains("demo"),
+            "MCP edits during the third-party session must persist: {restored}"
         );
-    }
-
-    #[test]
-    fn isolated_home_drops_a_leftover_reasoning_effort_and_keeps_other_keys() {
-        let _home = TestHome::new();
-        save(&sample("zai")).unwrap();
-        let isolated = prepare_isolated_codex_home("zai").unwrap();
-        let config = isolated.join("config.toml");
-        std::fs::write(
-            &config,
-            "model = \"glm-5.3-flash\"\nmodel_reasoning_effort = \"high\"\n",
-        )
-        .unwrap();
-
-        clear_isolated_reasoning_effort(&isolated).unwrap();
-
-        let raw = std::fs::read_to_string(&config).unwrap();
-        assert!(
-            !raw.contains("model_reasoning_effort"),
-            "leftover high must not survive skip: {raw}"
-        );
-        assert!(
-            raw.contains("glm-5.3-flash"),
-            "other keys must remain: {raw}"
-        );
-    }
-
-    #[test]
-    fn isolated_home_without_config_or_effort_is_a_noop() {
-        let _home = TestHome::new();
-        save(&sample("zai")).unwrap();
-        let isolated = prepare_isolated_codex_home("zai").unwrap();
-        clear_isolated_reasoning_effort(&isolated).unwrap();
-        assert!(!isolated.join("config.toml").exists());
-
-        let config = isolated.join("config.toml");
-        std::fs::write(&config, "model = \"glm-5.3-flash\"\n").unwrap();
-        clear_isolated_reasoning_effort(&isolated).unwrap();
         assert_eq!(
-            std::fs::read_to_string(&config).unwrap(),
-            "model = \"glm-5.3-flash\"\n"
+            std::fs::read_to_string(home.join("prompts/review.md")).unwrap(),
+            "updated prompt\n"
+        );
+    }
+
+    #[test]
+    fn provider_session_without_config_is_a_noop_then_drops_codex_model_keys() {
+        let _home = TestHome::new();
+        let home = crate::auth::user_codex_home().unwrap();
+        let mut session = ProviderSessionConfig::begin().unwrap();
+        assert!(!home.join("config.toml").exists());
+        session.restore().unwrap();
+        assert!(!home.join("config.toml").exists());
+
+        let mut session = ProviderSessionConfig::begin().unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "model = \"glm-5.3-flash\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n",
+        )
+        .unwrap();
+        session.restore().unwrap();
+        let restored = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(
+            restored.contains("demo"),
+            "MCP added during the session must remain: {restored}"
+        );
+        assert!(
+            !restored.contains("glm-5.3-flash"),
+            "gateway model must not stick in the user config: {restored}"
         );
     }
 

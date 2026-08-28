@@ -2,7 +2,7 @@
 
 > 英文 Wiki 是 `codex-switch` 的主文档与行为依据。本页提供中文快速入口与常用操作摘要；细节、标志位与边界条件以英文页面为准（尤其 [Providers](Providers)、[Command reference](Command-Reference)）。
 
-`codex-switch` 用于管理本机多个 OpenAI Codex CLI 登录、查看额度，并在新会话前选择合适账号。它也会保存自定义 API 提供方（如 OpenRouter），通过 `launch` 把端点与密钥交给 Codex。提供方会话使用隔离的 `CODEX_HOME`，但会从你原来的 `$CODEX_HOME` 复制 MCP、`AGENTS.md`、prompts 和 skills；不会改写或删除原文件。请勿分享 profile、`auth.json`、提供方 API 密钥、代理凭据或未脱敏的 debug 输出。
+`codex-switch` 用于管理本机多个 OpenAI Codex CLI 登录、查看额度，并在新会话前选择合适账号。它也会保存自定义 API 提供方（如 OpenRouter），通过 `launch` 把**模型和地址**交给 Codex；MCP、提示词、skills 仍用原来的 `$CODEX_HOME`，第三方会话里改的就是原文件。请勿分享 profile、`auth.json`、提供方 API 密钥、代理凭据或未脱敏的 debug 输出。
 
 ## 快速开始
 
@@ -110,7 +110,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 限制：
 
 - Codex 目前只支持 `wire_api = "responses"`；DeepSeek 官方 Chat Completions API 不能直连，须走 OpenRouter 等网关。同一网关上 `/models` 有 slug 也不等于 `/responses` 能用。`provider probe` 只 POST `{"model":"..."}`（不带 `input`），不走补全。
-- 提供方 `launch` 使用隔离 `CODEX_HOME`，但会从原来的 `$CODEX_HOME` 复制 MCP / `AGENTS.md` / prompts / skills；`/mcp` 为空时先确认本机版本，原 `~/.codex` 里的配置还在。
+- 提供方 `launch` 不换 `CODEX_HOME`，只改本次请求的模型和地址。在第三方模型里改 MCP / 提示词就是改 `~/.codex`。
 - `use` 与无别名的 `launch` 自动选号**仅面向 ChatGPT**，不会自动选提供方。
 - 提供方别名不能与 ChatGPT profile、其他提供方或 Codex 保留 id（`openai` / `ollama` / `lmstudio`）冲突。
 - 删除提供方**不可恢复**（不像 ChatGPT profile 会进 `deleted-profiles/`）。
@@ -176,7 +176,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 - `s` 保存；`Esc` 取消整张表单。
 - 改名在列表按 `n`，表单里没有第二个「显示名」字段。
 
-启动选择器（Providers 上 `Enter` / `o`）：`←` / `→` 只改**本次会话**的 reasoning，不写回配置文件。选 `(skip)` 时会清掉该提供方隔离 `CODEX_HOME` 里上次留下的思考等级，避免 Codex 0.150 仍显示 `high` 并向网关带上 `reasoning.effort`。`Tab` 编辑本次额外的 Codex argv（空白拆分）。
+启动选择器（Providers 上 `Enter` / `o`）：`←` / `→` 只改**本次会话**的 reasoning，不写回提供方配置。选 `(skip)` 时会暂时拿掉用户 `config.toml` 里上次留下的思考等级，避免 Codex 0.150 仍显示 `high` 并向网关带上 `reasoning.effort`；退出后还原。`Tab` 编辑本次额外的 Codex argv（空白拆分）。
 
 Codex 在前台运行；退出后回到 TUI。
 

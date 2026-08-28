@@ -49,7 +49,7 @@ Profile identity prefers `account_id` and falls back to email when required for 
 
 [`src/provider.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/provider.rs) owns third-party API provider profiles (OpenRouter and other Responses-compatible endpoints). Each profile is a TOML file under `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` (directory `0700`, file `0600`). It carries a Codex `model_providers.<id>` definition, a bearer key, and a list of models with per-model reasoning / `web_search`; it has no `auth.json`. The alias is the only user-facing name.
 
-[`src/launch.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/launch.rs) takes a separate path when the named alias is a provider: it does not stage `$CODEX_HOME/auth.json`. The profile is translated into `codex -c …` overrides that define and select the provider and a saved model (`--model` or `default_model`), a generated model catalog is written next to `provider.toml`, and the key is injected into the child process environment under `env_key` — never onto the command line. The child's `CODEX_HOME` is `$CODEX_SWITCH_HOME/providers/<alias>/codex-home` so Codex runtime files stay in the switch tree. MCP servers, `AGENTS.md`, prompts, and skills are copied from the user's `$CODEX_HOME` into that isolated tree at launch; `auth.json` is not, and the user home is not written. Auto-select (`launch` with no alias) and `use` stay ChatGPT-only. Provider launch probes `POST /responses` with only `model` before spawn and refuses a Chat Completions-only slug.
+[`src/launch.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/launch.rs) takes a separate path when the named alias is a provider: it does not stage `$CODEX_HOME/auth.json`. The profile is translated into `codex -c …` overrides that define and select the provider and a saved model (`--model` or `default_model`), a generated model catalog is written next to `provider.toml`, and the key is injected into the child process environment under `env_key` — never onto the command line. The child keeps the user's `$CODEX_HOME`, so MCP, prompts, and skills are the same files; only model and endpoint change. Auto-select (`launch` with no alias) and `use` stay ChatGPT-only. Provider launch probes `POST /responses` with only `model` before spawn and refuses a Chat Completions-only slug.
 
 The TUI isolates the two kinds of profile on separate tabs so quota/scoring bindings never mix with provider add/edit/rename/remove. See [Custom API providers](Providers).
 
@@ -100,7 +100,6 @@ PID-file cleanup verifies lock ownership before removal. Removing a path while a
 | `$CODEX_SWITCH_HOME/profiles/<alias>/auth.json` | Saved account credentials |
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Custom API provider definition and key |
 | `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog for `/model` |
-| `$CODEX_SWITCH_HOME/providers/<alias>/codex-home/` | Isolated Codex runtime for a custom provider launch |
 | `$CODEX_SWITCH_HOME/current` | Current alias marker |
 | `$CODEX_SWITCH_HOME/deleted-profiles/` | Recoverable profile archives |
 | `$CODEX_SWITCH_HOME/cache.json` | Usage, workspace metadata, and rejected-credential cache |

@@ -2,7 +2,7 @@
 
 A custom API provider is a saved third-party endpoint that `codex-switch launch` can hand to Codex CLI for one session. Typical case: OpenRouter, or another gateway that speaks Codex's Responses protocol.
 
-Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores one endpoint plus a bearer API key under `$CODEX_SWITCH_HOME`, and a list of models. Each model can carry its own reasoning effort and `web_search` setting. At launch those become `codex -c …` overrides. The Codex process is given its own `CODEX_HOME` under `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. Catalog, sessions, sqlite, and project trust all stay in that tree so they do not mix with ChatGPT. At each launch, MCP servers, `developer_instructions`, `AGENTS.md`, `prompts/`, and `skills/` are copied from the user's `$CODEX_HOME` (normally `~/.codex`) into that isolated home. `auth.json` is not. The user's Codex home is not written.
+Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores one endpoint plus a bearer API key under `$CODEX_SWITCH_HOME`, and a list of models. Each model can carry its own reasoning effort and `web_search` setting. At launch those become `codex -c …` overrides for **model and endpoint only**. The child keeps the user's `$CODEX_HOME` (normally `~/.codex`), so `/mcp`, prompts, skills, and `AGENTS.md` are the same files. Edits you make during that session are the real files. `auth.json` is not swapped.
 
 The alias is the only name. Codex's required `model_providers.<id>.name` is set to the alias.
 
@@ -84,11 +84,11 @@ codex-switch launch openrouter -- exec --json "review this"
 codex-switch launch openrouter -- -s workspace-write -a never
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json` and does not write the user's `$CODEX_HOME`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, copies MCP servers, `AGENTS.md`, prompts, and skills from the user home into that tree, and writes a Codex model catalog next to `provider.toml` so `/model` lists the **saved** provider slugs. Codex 0.149 applies those `-c` flags on the subcommand (`codex exec -c …`); putting them in front of `exec` is ignored. `launch` therefore places overrides after the subcommand and also moves user flags that preceded it (so `launch or -- -m one-shot exec hi` becomes `codex exec -c … -m one-shot hi`). Interactive launch has no subcommand, so the flags stay in front. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
+`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, keeps the user's `$CODEX_HOME`, and writes a Codex model catalog next to `provider.toml` so `/model` lists the **saved** provider slugs. Codex 0.149 applies those `-c` flags on the subcommand (`codex exec -c …`); putting them in front of `exec` is ignored. `launch` therefore places overrides after the subcommand and also moves user flags that preceded it (so `launch or -- -m one-shot exec hi` becomes `codex exec -c … -m one-shot hi`). Interactive launch has no subcommand, so the flags stay in front. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
 
 Put `--` before any Codex argv that could be mistaken for a codex-switch alias or flag (`exec`, `--json`, `--color`, a prompt that looks like a name). `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile; it cannot target a provider.
 
-On first launch Codex creates its runtime files in that isolated home. MCP servers and prompts from the user's `$CODEX_HOME` are copied in so `/mcp` and custom prompts still work; `auth.json` is not. Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are stored on the provider and passed as `-c`; they are not written into the user's `$CODEX_HOME/config.toml`.
+Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are stored on the provider and passed as `-c`. For the duration of the child, `launch` lifts `model`, `model_provider`, `model_reasoning_effort`, `model_providers`, `model_catalog_json`, and `web_search` out of the user's `config.toml` so a leftover thinking level cannot ride along; those keys are restored when Codex exits. MCP servers, prompts, skills, and `AGENTS.md` are not copied or replaced.
 
 `codex-switch use` does not accept a provider alias. A provider is applied only for the launched Codex process; a later bare `codex` invocation is unchanged.
 
@@ -146,7 +146,7 @@ codex-switch provider add openrouter \
 
 Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex also accepts `ultra`) come from the Codex version in use, so codex-switch does not restrict them on the CLI. The TUI form offers the common presets and `(skip)`. Plain chat models need no reasoning flag.
 
-The generated Codex catalog only advertises thinking levels when a model has a saved effort (or the launch picker sets one). Otherwise it lists no reasoning levels and omits `default_reasoning_level`, so Codex 0.150 does not send `reasoning.effort`. Launch also removes a leftover `model_reasoning_effort` from the provider's isolated `config.toml` (Codex writes that key when `/model` changes effort). Gateways that 404 on a reasoning field (Cursor-style `composer-2.5`, which exposes a `fast` parameter rather than effort) stay usable. Do not set `--reasoning` on those models. `(skip)` in the launch picker is this session only: it does not write the profile, and it must not keep a previous `high`.
+The generated Codex catalog only advertises thinking levels when a model has a saved effort (or the launch picker sets one). Otherwise it lists no reasoning levels and omits `default_reasoning_level`, so Codex 0.150 does not send `reasoning.effort`. Launch also lifts a leftover `model_reasoning_effort` out of the user's `config.toml` for that process (Codex writes that key when `/model` changes effort) and puts the previous value back on exit. Gateways that 404 on a reasoning field (Cursor-style `composer-2.5`, which exposes a `fast` parameter rather than effort) stay usable. Do not set `--reasoning` on those models. `(skip)` in the launch picker is this session only: it does not write the profile, and it must not keep a previous `high`.
 
 ## TUI
 
@@ -176,7 +176,6 @@ The stored key is never rendered in the table. `o` launches Codex on both tabs: 
 |---|---|
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Provider definition and API key (directory `0700`, file `0600`) |
 | `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog used at launch (`/model` list plus metadata) |
-| `$CODEX_SWITCH_HOME/providers/<alias>/codex-home/` | Isolated Codex runtime for that provider (`CODEX_HOME` for the launched process) |
 
 Defaults to `~/.codex-switch/providers/`. Relocate the whole tree with `CODEX_SWITCH_HOME`; this still does not change where Codex reads `auth.json`.
 
@@ -205,7 +204,7 @@ Security contract:
 - The key is never a CLI argument, so it does not appear in the process table as argv.
 - At launch it exists only in the Codex child environment, under a codex-switch-owned variable (`CODEX_SWITCH_<ALIAS>_KEY` by default) rather than a vendor's conventional name, so a pre-exported `OPENAI_API_KEY` or `OPENROUTER_API_KEY` is not reused by accident.
 - `list`, `show`, JSON output, and the TUI print a redacted form only.
-- Launch does not write under the user's `$CODEX_HOME`. Codex runtime files for that session go to `providers/<alias>/codex-home`. MCP servers, `AGENTS.md`, prompts, and skills are copied from the user home into that tree at launch; `auth.json` is not. ChatGPT `use` / `launch` locking and `auth.json` backup/restore do not apply.
+- Launch does not swap `$CODEX_HOME/auth.json`. The child uses the user's `$CODEX_HOME`, so MCP and prompt edits persist. Provider model/endpoint come from `-c`; those keys are lifted from `config.toml` for the process and restored afterwards. ChatGPT `use` / `launch` locking and `auth.json` backup/restore do not apply.
 
 Do not commit `provider.toml`, paste keys into issues, or share unredacted `--debug` output.
 

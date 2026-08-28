@@ -188,7 +188,7 @@ async fn launch_interactive(
         user_println(&format!("Launching codex with profile '{target_alias}'..."));
     }
 
-    let child_result = spawn_codex(&forwarded, None, json, None);
+    let child_result = spawn_codex(&forwarded, None, json);
 
     let mut child = match child_result {
         Ok(child) => child,
@@ -368,7 +368,6 @@ fn spawn_codex(
     args: &[String],
     extra_env: Option<(String, String)>,
     json: bool,
-    isolated_codex_home: Option<&std::path::Path>,
 ) -> std::io::Result<std::process::Child> {
     let mut cmd = std::process::Command::new("codex");
     cmd.args(args);
@@ -385,9 +384,6 @@ fn spawn_codex(
     }
     if let Some((name, value)) = extra_env {
         cmd.env(name, value);
-    }
-    if let Some(home) = isolated_codex_home {
-        cmd.env("CODEX_HOME", home);
     }
     cmd.spawn()
 }
@@ -494,10 +490,9 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// `codex -c …` overrides and the API key is injected into the child process
 /// environment under the profile's `env_key`. A generated model catalog is
 /// written under the provider directory so Codex `/model` lists the provider's
-/// slugs and has metadata for them. The child `CODEX_HOME` is
-/// `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. MCP servers, prompts,
-/// and skills are copied from the user's `$CODEX_HOME`; `auth.json` is not,
-/// and that user home is not written.
+/// slugs and has metadata for them. The child keeps the user's `$CODEX_HOME`
+/// so MCP, prompts, and skills are the same files. Only model and endpoint
+/// come from `-c`. `auth.json` is not swapped.
 async fn launch_provider(
     profile: ProviderProfile,
     model: Option<&str>,
@@ -539,8 +534,7 @@ async fn launch_provider(
         provider::load_remote_catalog(&profile).await
     };
     let (env_name, env_value) = profile.launch_env();
-    let isolated_home = provider::prepare_isolated_codex_home(&profile.alias)?;
-    provider::clear_isolated_reasoning_effort(&isolated_home)?;
+    let mut session = provider::ProviderSessionConfig::begin()?;
     let overrides =
         profile.codex_config_args_from_remote(model, reasoning.clone(), &primary, &fallback)?;
     let codex_args = provider_codex_argv(overrides, args.clone());
@@ -557,16 +551,22 @@ async fn launch_provider(
         ));
     }
 
-    let mut child = spawn_codex(
-        &codex_args,
-        Some((env_name, env_value)),
-        json,
-        Some(&isolated_home),
-    )
-    .context("Failed to start Codex")?;
+    let mut child = match spawn_codex(&codex_args, Some((env_name, env_value)), json) {
+        Ok(child) => child,
+        Err(err) => {
+            session
+                .restore()
+                .context("restoring Codex config after spawn failure")?;
+            return Err(err).context("Failed to start Codex");
+        }
+    };
     let pipes = take_codex_pipes(&mut child, json);
 
-    let status = child.wait().context("waiting for Codex")?;
+    let wait = child.wait();
+    session
+        .restore()
+        .context("restoring Codex config after provider launch")?;
+    let status = wait.context("waiting for Codex")?;
     let captured = join_codex_pipes(pipes);
     let exit_code = child_exit_code(&status);
 

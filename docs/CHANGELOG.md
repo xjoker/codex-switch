@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20260828.4.0 — 2026-08-28
+
+- **Provider launch only changes model and endpoint** — The Codex child keeps the user's `$CODEX_HOME`. `/mcp`, prompts, skills, and `AGENTS.md` are the same files, so edits during a third-party session persist. `launch` supplies model and base URL as `-c`, and for that process lifts leftover `model` / `model_provider` / `model_reasoning_effort` / `model_providers` / `web_search` out of `config.toml` then restores them on exit so ChatGPT is not stuck on the gateway model.
+
 ## v20260828.3.0 — 2026-08-28
 
 - **Provider launch keeps user MCP and prompts** — Isolated `CODEX_HOME` still holds sessions and catalog for that provider, but `launch` now copies `mcp_servers`, `developer_instructions`, `AGENTS.md`, `prompts/`, and `skills/` from the user's `$CODEX_HOME` so `/mcp` and custom prompts work. `auth.json` is not copied; the user home is not written.

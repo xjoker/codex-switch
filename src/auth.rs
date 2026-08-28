@@ -38,8 +38,8 @@ pub(crate) fn token_url() -> String {
 #[cfg(test)]
 pub(crate) static URL_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// User Codex home (`$CODEX_HOME`, or `~/.codex`). Provider launch copies MCP
-/// and prompts from here into the isolated provider home; it does not write back.
+/// User Codex home (`$CODEX_HOME`, or `~/.codex`). Provider launch keeps this
+/// directory so MCP and prompts stay the same files.
 pub(crate) fn user_codex_home() -> Result<PathBuf> {
     codex_home_from_values(std::env::var_os("CODEX_HOME"), dirs::home_dir())
 }
