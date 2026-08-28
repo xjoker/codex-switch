@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v20260828.1.0 — 2026-08-28
+
 - **Provider Responses probe** — `POST {base_url}/responses` with only `model` (no `input`) tells whether Codex can use a saved slug without generating tokens. HTTP 400 at validation means the Responses handler ran; HTTP 404 `bad_response_status_code` means Chat Completions only. `codex-switch provider probe <alias> [--model <id>]` prints the verdict; provider `launch` refuses an unsupported slug instead of opening Codex onto a 404. An inconclusive probe (auth, timeout) warns and still launches.
 
 ## v20260827.4.0 — 2026-08-27
