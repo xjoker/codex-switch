@@ -514,6 +514,7 @@ async fn launch_provider(
     };
     let (env_name, env_value) = profile.launch_env();
     let isolated_home = provider::prepare_isolated_codex_home(&profile.alias)?;
+    provider::clear_isolated_reasoning_effort(&isolated_home)?;
     let overrides =
         profile.codex_config_args_from_remote(model, reasoning.clone(), &primary, &fallback)?;
     let codex_args = provider_codex_argv(overrides, args.clone());

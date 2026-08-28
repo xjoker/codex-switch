@@ -173,7 +173,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 - `s` 保存；`Esc` 取消整张表单。
 - 改名在列表按 `n`，表单里没有第二个「显示名」字段。
 
-启动选择器（Providers 上 `Enter` / `o`）：`←` / `→` 只改**本次会话**的 reasoning，不写回配置文件。`Tab` 编辑本次额外的 Codex argv（空白拆分）。
+启动选择器（Providers 上 `Enter` / `o`）：`←` / `→` 只改**本次会话**的 reasoning，不写回配置文件。选 `(skip)` 时会清掉该提供方隔离 `CODEX_HOME` 里上次留下的思考等级，避免 Codex 0.150 仍显示 `high` 并向网关带上 `reasoning.effort`。`Tab` 编辑本次额外的 Codex argv（空白拆分）。
 
 Codex 在前台运行；退出后回到 TUI。
 
