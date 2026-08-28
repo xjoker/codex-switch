@@ -16,7 +16,9 @@
 //! environment under `env_key` — never onto the command line — so it stays out of
 //! the process table. The Codex child also gets its own `CODEX_HOME` under
 //! `providers/<alias>/codex-home`, so sessions, sqlite, and project trust stay
-//! in `$CODEX_SWITCH_HOME` rather than the user's `~/.codex`.
+//! in `$CODEX_SWITCH_HOME` rather than the user's `~/.codex`. MCP servers,
+//! `AGENTS.md`, custom prompts, and skills are copied from the user's Codex
+//! home at each launch so `/mcp` and prompts still work; `auth.json` is not.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1463,12 +1465,127 @@ pub(crate) fn isolated_codex_home(alias: &str) -> Result<PathBuf> {
     Ok(provider_dir(alias)?.join("codex-home"))
 }
 
-/// Create the isolated Codex home under `$CODEX_SWITCH_HOME`. Nothing is
-/// copied from the user's `$CODEX_HOME`.
+/// Create the isolated Codex home under `$CODEX_SWITCH_HOME`.
+///
+/// Sessions, sqlite, and project trust stay in this tree so `launch` does not
+/// write them into the user's `$CODEX_HOME`. MCP servers, `AGENTS.md`, custom
+/// prompts, and skills are copied from that user home each launch; `auth.json`
+/// is not.
 pub(crate) fn prepare_isolated_codex_home(alias: &str) -> Result<PathBuf> {
     let dest = isolated_codex_home(alias)?;
     ensure_private_dir(&dest)?;
+    let user_home = auth::user_codex_home()?;
+    if !same_path(&user_home, &dest) {
+        overlay_user_codex_into_isolated(&user_home, &dest)?;
+    }
     Ok(dest)
+}
+
+/// Config keys Codex reads from `$CODEX_HOME/config.toml` that are not
+/// provider-specific. Overlaying these keeps `/mcp` and inline instructions
+/// working when the child uses the isolated home.
+const USER_CODEX_OVERLAY_KEYS: [&str; 3] = ["mcp_servers", "developer_instructions", "skills"];
+
+/// Files and directories under `$CODEX_HOME` that hold prompts / skills.
+const USER_CODEX_OVERLAY_PATHS: [&str; 3] = ["AGENTS.md", "prompts", "skills"];
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn overlay_user_codex_into_isolated(user_home: &Path, isolated: &Path) -> Result<()> {
+    overlay_user_config_keys(user_home, isolated)?;
+    for name in USER_CODEX_OVERLAY_PATHS {
+        copy_codex_entry(&user_home.join(name), &isolated.join(name))?;
+    }
+    Ok(())
+}
+
+fn overlay_user_config_keys(user_home: &Path, isolated: &Path) -> Result<()> {
+    let user_config_path = user_home.join("config.toml");
+    if !user_config_path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&user_config_path)
+        .with_context(|| format!("reading user Codex config {}", user_config_path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    let user_value: toml::Value = toml::from_str(&raw)
+        .with_context(|| format!("parsing user Codex config {}", user_config_path.display()))?;
+    let Some(user_table) = user_value.as_table() else {
+        return Ok(());
+    };
+
+    let isolated_path = isolated.join("config.toml");
+    let mut isolated_value = if isolated_path.exists() {
+        let isolated_raw = std::fs::read_to_string(&isolated_path).with_context(|| {
+            format!("reading isolated Codex config {}", isolated_path.display())
+        })?;
+        if isolated_raw.trim().is_empty() {
+            toml::Value::Table(toml::map::Map::new())
+        } else {
+            toml::from_str(&isolated_raw).with_context(|| {
+                format!("parsing isolated Codex config {}", isolated_path.display())
+            })?
+        }
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+    let Some(dest_table) = isolated_value.as_table_mut() else {
+        anyhow::bail!(
+            "isolated Codex config is not a table: {}",
+            isolated_path.display()
+        );
+    };
+
+    let mut changed = false;
+    for key in USER_CODEX_OVERLAY_KEYS {
+        let Some(value) = user_table.get(key) else {
+            continue;
+        };
+        if dest_table.get(key) != Some(value) {
+            dest_table.insert(key.to_string(), value.clone());
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let serialized = toml::to_string(&isolated_value)
+        .context("serializing isolated Codex config after overlaying user MCP/prompts")?;
+    crate::auth::atomic_write_private(&isolated_path, serialized.as_bytes())
+        .with_context(|| format!("writing isolated Codex config {}", isolated_path.display()))
+}
+
+fn copy_codex_entry(src: &Path, dest: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    if same_path(src, dest) {
+        return Ok(());
+    }
+    if src.is_dir() {
+        return copy_codex_dir(src, dest);
+    }
+    if let Some(parent) = dest.parent() {
+        ensure_private_dir(parent)?;
+    }
+    std::fs::copy(src, dest)
+        .with_context(|| format!("copying {} -> {}", src.display(), dest.display()))?;
+    Ok(())
+}
+
+fn copy_codex_dir(src: &Path, dest: &Path) -> Result<()> {
+    ensure_private_dir(dest)?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+        let entry = entry.with_context(|| format!("reading entry in {}", src.display()))?;
+        copy_codex_entry(&entry.path(), &dest.join(entry.file_name()))?;
+    }
+    Ok(())
 }
 
 /// Drop a leftover `model_reasoning_effort` from the isolated Codex home.
@@ -1662,7 +1779,8 @@ mod tests {
     struct TestHome {
         _lock: MutexGuard<'static, ()>,
         _home: tempfile::TempDir,
-        previous: Option<OsString>,
+        previous_switch: Option<OsString>,
+        previous_codex: Option<OsString>,
     }
 
     impl TestHome {
@@ -1671,14 +1789,19 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let home = tempfile::tempdir().unwrap();
-            let previous = std::env::var_os("CODEX_SWITCH_HOME");
+            let previous_switch = std::env::var_os("CODEX_SWITCH_HOME");
+            let previous_codex = std::env::var_os("CODEX_HOME");
+            let user_codex = home.path().join(".codex");
+            std::fs::create_dir_all(&user_codex).unwrap();
             unsafe {
                 std::env::set_var("CODEX_SWITCH_HOME", home.path());
+                std::env::set_var("CODEX_HOME", &user_codex);
             }
             Self {
                 _lock: lock,
                 _home: home,
-                previous,
+                previous_switch,
+                previous_codex,
             }
         }
     }
@@ -1686,9 +1809,13 @@ mod tests {
     impl Drop for TestHome {
         fn drop(&mut self) {
             unsafe {
-                match &self.previous {
+                match &self.previous_switch {
                     Some(value) => std::env::set_var("CODEX_SWITCH_HOME", value),
                     None => std::env::remove_var("CODEX_SWITCH_HOME"),
+                }
+                match &self.previous_codex {
+                    Some(value) => std::env::set_var("CODEX_HOME", value),
+                    None => std::env::remove_var("CODEX_HOME"),
                 }
             }
         }
@@ -2088,21 +2215,30 @@ api_key = "sk-legacy-key"
     }
 
     #[test]
-    fn isolated_codex_home_lives_under_switch_home_and_does_not_copy_user_files() {
+    fn isolated_codex_home_copies_mcp_and_prompts_but_not_auth() {
         let _home = TestHome::new();
         let user_codex = tempfile::tempdir().unwrap();
         std::fs::write(
             user_codex.path().join("config.toml"),
-            "mcp_servers = { demo = { command = \"echo\" } }\n",
+            "developer_instructions = \"be terse\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n",
         )
         .unwrap();
         std::fs::write(user_codex.path().join("auth.json"), "{\"tokens\":{}}\n").unwrap();
+        std::fs::write(user_codex.path().join("AGENTS.md"), "# house rules\n").unwrap();
+        std::fs::create_dir_all(user_codex.path().join("prompts")).unwrap();
+        std::fs::write(user_codex.path().join("prompts/review.md"), "review this\n").unwrap();
+        std::fs::create_dir_all(user_codex.path().join("skills/demo")).unwrap();
+        std::fs::write(
+            user_codex.path().join("skills/demo/SKILL.md"),
+            "# demo skill\n",
+        )
+        .unwrap();
 
         let previous = std::env::var_os("CODEX_HOME");
         unsafe {
             std::env::set_var("CODEX_HOME", user_codex.path());
         }
-        struct Restore(Option<std::ffi::OsString>);
+        struct Restore(Option<OsString>);
         impl Drop for Restore {
             fn drop(&mut self) {
                 unsafe {
@@ -2116,14 +2252,96 @@ api_key = "sk-legacy-key"
         let _restore = Restore(previous);
 
         save(&sample("zai")).unwrap();
+        let isolated_dir = isolated_codex_home("zai").unwrap();
+        std::fs::create_dir_all(&isolated_dir).unwrap();
+        std::fs::write(
+            isolated_dir.join("config.toml"),
+            "model = \"glm-5.3-flash\"\nmodel_reasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+
         let isolated = prepare_isolated_codex_home("zai").unwrap();
         assert!(isolated.starts_with(crate::auth::app_home().unwrap()));
         assert!(isolated.ends_with(std::path::Path::new("providers/zai/codex-home")));
-        assert!(!isolated.join("config.toml").exists());
+
+        let isolated_config = std::fs::read_to_string(isolated.join("config.toml")).unwrap();
+        assert!(
+            isolated_config.contains("mcp_servers") && isolated_config.contains("demo"),
+            "MCP must be visible to the isolated Codex home: {isolated_config}"
+        );
+        assert!(
+            isolated_config.contains("be terse"),
+            "developer_instructions must be copied: {isolated_config}"
+        );
+        assert!(
+            isolated_config.contains("glm-5.3-flash"),
+            "leftover provider keys must remain: {isolated_config}"
+        );
         assert!(!isolated.join("auth.json").exists());
         assert_eq!(
+            std::fs::read_to_string(isolated.join("AGENTS.md")).unwrap(),
+            "# house rules\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(isolated.join("prompts/review.md")).unwrap(),
+            "review this\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(isolated.join("skills/demo/SKILL.md")).unwrap(),
+            "# demo skill\n"
+        );
+        assert_eq!(
             std::fs::read_to_string(user_codex.path().join("config.toml")).unwrap(),
-            "mcp_servers = { demo = { command = \"echo\" } }\n"
+            "developer_instructions = \"be terse\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(user_codex.path().join("auth.json")).unwrap(),
+            "{\"tokens\":{}}\n"
+        );
+    }
+
+    #[test]
+    fn isolated_codex_home_refreshes_mcp_from_the_user_home() {
+        let _home = TestHome::new();
+        let user_codex = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user_codex.path().join("config.toml"),
+            "[mcp_servers.old]\ncommand = \"true\"\n",
+        )
+        .unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        unsafe {
+            std::env::set_var("CODEX_HOME", user_codex.path());
+        }
+        struct Restore(Option<OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("CODEX_HOME", value),
+                        None => std::env::remove_var("CODEX_HOME"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(previous);
+
+        save(&sample("zai")).unwrap();
+        prepare_isolated_codex_home("zai").unwrap();
+        std::fs::write(
+            user_codex.path().join("config.toml"),
+            "[mcp_servers.fresh]\ncommand = \"false\"\n",
+        )
+        .unwrap();
+        let isolated = prepare_isolated_codex_home("zai").unwrap();
+        let isolated_config = std::fs::read_to_string(isolated.join("config.toml")).unwrap();
+        assert!(
+            isolated_config.contains("fresh"),
+            "next launch must pick up MCP added in ~/.codex: {isolated_config}"
+        );
+        assert!(
+            !isolated_config.contains("old"),
+            "replaced MCP names must not linger: {isolated_config}"
         );
     }
 

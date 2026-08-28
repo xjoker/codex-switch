@@ -2,7 +2,7 @@
 
 A custom API provider is a saved third-party endpoint that `codex-switch launch` can hand to Codex CLI for one session. Typical case: OpenRouter, or another gateway that speaks Codex's Responses protocol.
 
-Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores one endpoint plus a bearer API key under `$CODEX_SWITCH_HOME`, and a list of models. Each model can carry its own reasoning effort and `web_search` setting. At launch those become `codex -c …` overrides. The Codex process is given its own `CODEX_HOME` under `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. Catalog, sessions, sqlite, and project trust all stay in that tree. The user's `~/.codex` is not read or written.
+Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores one endpoint plus a bearer API key under `$CODEX_SWITCH_HOME`, and a list of models. Each model can carry its own reasoning effort and `web_search` setting. At launch those become `codex -c …` overrides. The Codex process is given its own `CODEX_HOME` under `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. Catalog, sessions, sqlite, and project trust all stay in that tree so they do not mix with ChatGPT. At each launch, MCP servers, `developer_instructions`, `AGENTS.md`, `prompts/`, and `skills/` are copied from the user's `$CODEX_HOME` (normally `~/.codex`) into that isolated home. `auth.json` is not. The user's Codex home is not written.
 
 The alias is the only name. Codex's required `model_providers.<id>.name` is set to the alias.
 
@@ -84,11 +84,11 @@ codex-switch launch openrouter -- exec --json "review this"
 codex-switch launch openrouter -- -s workspace-write -a never
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json` and does not read or write the user's `$CODEX_HOME`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, and writes a Codex model catalog next to `provider.toml` so `/model` lists the **saved** provider slugs. Codex 0.149 applies those `-c` flags on the subcommand (`codex exec -c …`); putting them in front of `exec` is ignored. `launch` therefore places overrides after the subcommand and also moves user flags that preceded it (so `launch or -- -m one-shot exec hi` becomes `codex exec -c … -m one-shot hi`). Interactive launch has no subcommand, so the flags stay in front. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
+`launch` does **not** replace `$CODEX_HOME/auth.json` and does not write the user's `$CODEX_HOME`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, points the child's `CODEX_HOME` at `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`, copies MCP servers, `AGENTS.md`, prompts, and skills from the user home into that tree, and writes a Codex model catalog next to `provider.toml` so `/model` lists the **saved** provider slugs. Codex 0.149 applies those `-c` flags on the subcommand (`codex exec -c …`); putting them in front of `exec` is ignored. `launch` therefore places overrides after the subcommand and also moves user flags that preceded it (so `launch or -- -m one-shot exec hi` becomes `codex exec -c … -m one-shot hi`). Interactive launch has no subcommand, so the flags stay in front. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
 
 Put `--` before any Codex argv that could be mistaken for a codex-switch alias or flag (`exec`, `--json`, `--color`, a prompt that looks like a name). `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile; it cannot target a provider.
 
-On first launch Codex creates its runtime files in that isolated home. Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are stored on the provider and passed as `-c`; they are not written into the user's `$CODEX_HOME/config.toml`.
+On first launch Codex creates its runtime files in that isolated home. MCP servers and prompts from the user's `$CODEX_HOME` are copied in so `/mcp` and custom prompts still work; `auth.json` is not. Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are stored on the provider and passed as `-c`; they are not written into the user's `$CODEX_HOME/config.toml`.
 
 `codex-switch use` does not accept a provider alias. A provider is applied only for the launched Codex process; a later bare `codex` invocation is unchanged.
 
@@ -205,7 +205,7 @@ Security contract:
 - The key is never a CLI argument, so it does not appear in the process table as argv.
 - At launch it exists only in the Codex child environment, under a codex-switch-owned variable (`CODEX_SWITCH_<ALIAS>_KEY` by default) rather than a vendor's conventional name, so a pre-exported `OPENAI_API_KEY` or `OPENROUTER_API_KEY` is not reused by accident.
 - `list`, `show`, JSON output, and the TUI print a redacted form only.
-- Launch writes nothing under the user's `$CODEX_HOME`. Codex runtime files for that session go to `providers/<alias>/codex-home`. ChatGPT `use` / `launch` locking and `auth.json` backup/restore do not apply.
+- Launch does not write under the user's `$CODEX_HOME`. Codex runtime files for that session go to `providers/<alias>/codex-home`. MCP servers, `AGENTS.md`, prompts, and skills are copied from the user home into that tree at launch; `auth.json` is not. ChatGPT `use` / `launch` locking and `auth.json` backup/restore do not apply.
 
 Do not commit `provider.toml`, paste keys into issues, or share unredacted `--debug` output.
 

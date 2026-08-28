@@ -10,7 +10,7 @@ No. Codex reads authentication at startup. Restart Codex, or use `codex-switch l
 
 ## Where is account data stored?
 
-Saved profiles and application state default to `~/.codex-switch`; the live Codex file defaults to `~/.codex/auth.json`. Custom API providers live under `~/.codex-switch/providers/<alias>/` (`provider.toml`, generated `models.json`, isolated `codex-home/`). `CODEX_SWITCH_HOME` and `CODEX_HOME` relocate them independently.
+Saved profiles and application state default to `~/.codex-switch`; the live Codex file defaults to `~/.codex/auth.json`. Custom API providers live under `~/.codex-switch/providers/<alias>/` (`provider.toml`, generated `models.json`, isolated `codex-home/`). Provider `launch` copies MCP, `AGENTS.md`, prompts, and skills from `$CODEX_HOME` into that isolated home; it does not delete the originals. `CODEX_SWITCH_HOME` and `CODEX_HOME` relocate them independently.
 
 ## Can I point Codex at DeepSeek (or another Chat Completions API) directly?
 

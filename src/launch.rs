@@ -495,8 +495,9 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// environment under the profile's `env_key`. A generated model catalog is
 /// written under the provider directory so Codex `/model` lists the provider's
 /// slugs and has metadata for them. The child `CODEX_HOME` is
-/// `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. The user's `~/.codex` is
-/// not read or written.
+/// `$CODEX_SWITCH_HOME/providers/<alias>/codex-home`. MCP servers, prompts,
+/// and skills are copied from the user's `$CODEX_HOME`; `auth.json` is not,
+/// and that user home is not written.
 async fn launch_provider(
     profile: ProviderProfile,
     model: Option<&str>,

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Provider launch keeps user MCP and prompts** — Isolated `CODEX_HOME` still holds sessions and catalog for that provider, but `launch` now copies `mcp_servers`, `developer_instructions`, `AGENTS.md`, `prompts/`, and `skills/` from the user's `$CODEX_HOME` so `/mcp` and custom prompts work. `auth.json` is not copied; the user home is not written.
+
 ## v20260828.2.0 — 2026-08-28
 
 - **Provider Responses probe** — `POST {base_url}/responses` with only `model` (no `input`) tells whether Codex can use a saved slug without generating tokens. HTTP 400 at validation means the Responses handler ran; HTTP 404 `bad_response_status_code` means Chat Completions only. `codex-switch provider probe <alias> [--model <id>]` prints the verdict; provider `launch` refuses an unsupported slug instead of opening Codex onto a 404. An inconclusive probe (auth, timeout) warns and still launches.
