@@ -2,10 +2,12 @@
 
 ## Unreleased
 
+- **Skip no longer keeps a leftover thinking level** — Codex 0.150 sends `reasoning.effort` whenever isolated `config.toml` or the catalog has a level, including `none`. A previous `/model` or launch could leave `high` in the provider home, so the picker `(skip)` still showed `high` and some gateways 404'd `{base_url}/responses`. Launch now removes `model_reasoning_effort` from that isolated home, drops the same key from extras on skip, and catalogs non-thinking slugs with an empty level list and no default.
+
 ## v20260827.4.0 — 2026-08-27
 
 - **Pick models from a large gateway catalog** — OpenRouter-sized `GET /models` lists are not imported wholesale. `provider add --fetch-models --model …` and `provider fetch-models <alias> --model …` keep only those slugs (and must exist on the gateway). TUI `f` opens a filterable picker (`space` toggle, `/` filter, Enter apply). Small catalogs still import every chat slug.
-- **Catalog reasoning only when saved** — Models without `--reasoning` get catalog `effort: none` and `supports_reasoning_summaries: false`, so Codex does not send `reasoning.effort`. That 404s some gateways (Cursor-style `composer-2.5`). Thinking models still advertise low…max when an effort is saved.
+- **Catalog reasoning only when saved** — Models without `--reasoning` get an empty `supported_reasoning_levels` list and no default, so Codex 0.150 does not send `reasoning.effort`. That 404s some gateways (Cursor-style `composer-2.5`). Thinking models still advertise low…max when an effort is saved.
 - **Provider `launch exec` `-c` placement** — Codex 0.149 applies `-c` on the subcommand (`codex exec -c …`). Flags in front of `exec` are ignored, so the child used the built-in OpenAI provider. `launch` now puts provider overrides after `exec` / `resume` / …, and moves user flags that preceded the subcommand with them. Interactive launch (no subcommand) still has them in front.
 
 ## v20260827.3.0 — 2026-08-27

@@ -137,7 +137,7 @@ codex-switch provider add openrouter \
 
 Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex also accepts `ultra`) come from the Codex version in use, so codex-switch does not restrict them on the CLI. The TUI form offers the common presets and `(skip)`. Plain chat models need no reasoning flag.
 
-The generated Codex catalog only advertises thinking levels when a model has a saved effort (or the launch picker sets one). Otherwise it lists `none` and sets `supports_reasoning_summaries` false, so Codex does not send `reasoning.effort`. Gateways that 404 on a reasoning field (Cursor-style `composer-2.5`, which exposes a `fast` parameter rather than effort) stay usable. Do not set `--reasoning` on those models.
+The generated Codex catalog only advertises thinking levels when a model has a saved effort (or the launch picker sets one). Otherwise it lists no reasoning levels and omits `default_reasoning_level`, so Codex 0.150 does not send `reasoning.effort`. Launch also removes a leftover `model_reasoning_effort` from the provider's isolated `config.toml` (Codex writes that key when `/model` changes effort). Gateways that 404 on a reasoning field (Cursor-style `composer-2.5`, which exposes a `fast` parameter rather than effort) stay usable. Do not set `--reasoning` on those models. `(skip)` in the launch picker is this session only: it does not write the profile, and it must not keep a previous `high`.
 
 ## TUI
 
