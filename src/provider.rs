@@ -2705,7 +2705,15 @@ api_key = "sk-legacy-key"
         let args = profile
             .codex_config_args_from_saved_catalog_at(None, ReasoningLaunch::Skip, &skip_run)
             .unwrap();
-        assert!(args.join(" ").contains(&skip_run.display().to_string()));
+        let expected_catalog_arg = format!(
+            "model_catalog_json={}",
+            toml_string(&skip_run.join("models.json").to_string_lossy())
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", expected_catalog_arg.as_str()]),
+            "launch arguments must pass the tailored catalog path as TOML"
+        );
         let catalog: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(skip_run.join("models.json")).unwrap())
                 .unwrap();
