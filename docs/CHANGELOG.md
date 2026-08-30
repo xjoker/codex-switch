@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20260831.1.0 — 2026-08-31
+
+- **Dependency safety fixes** — Updated `lru` to 0.18.2 to close RUSTSEC-2026-0253 and updated `chacha20` to 0.10.2 to replace the yanked SSE2 backend release. No new dependencies were added.
+
 ## v20260830.3.0 — 2026-08-30
 
 - **Provider launch is now a local fast path** — `launch` consumes the saved provider profile, model catalog, and explicit Responses probe verdict without contacting the gateway. `provider fetch-models` persists catalog metadata and `provider probe` persists conclusive support results; a saved unsupported result is refused locally. JSON launch capture drains child output with a 1 MiB limit per stream and reports `codex_stdout_truncated` / `codex_stderr_truncated`.
