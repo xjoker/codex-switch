@@ -24,6 +24,8 @@ pub(crate) struct RateLimitDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplaySafety {
     Idempotent,
+    /// Safe to retry, but the caller owns scheduling and shared cooldown.
+    DeferredGet,
     UnsafePost,
 }
 
@@ -36,6 +38,7 @@ impl ReplaySafety {
 pub(crate) struct BufferedResponse {
     pub status: reqwest::StatusCode,
     pub body: Vec<u8>,
+    pub retry_after: Option<Duration>,
 }
 
 pub(crate) async fn send(
@@ -54,21 +57,32 @@ pub(crate) async fn send(
         let body = response.bytes().await?.to_vec();
 
         if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Ok(BufferedResponse { status, body });
+            return Ok(BufferedResponse {
+                status,
+                body,
+                retry_after: None,
+            });
         }
 
         let decision = rate_limit_decision(&headers, &body, attempt);
         if !safety.may_replay() {
             debug!(
-                "HTTP 429 on non-replayable request; waiting {:.3}s before returning ({:?})",
+                "HTTP 429; returning with retry hint {:.3}s ({:?})",
                 decision.delay.as_secs_f64(),
                 decision.source
             );
-            tokio::time::sleep(with_jitter(decision.delay)).await;
-            return Ok(BufferedResponse { status, body });
+            return Ok(BufferedResponse {
+                status,
+                body,
+                retry_after: Some(decision.delay),
+            });
         }
         if attempt + 1 >= MAX_ATTEMPTS {
-            return Ok(BufferedResponse { status, body });
+            return Ok(BufferedResponse {
+                status,
+                body,
+                retry_after: Some(decision.delay),
+            });
         }
 
         debug!(
@@ -79,24 +93,6 @@ pub(crate) async fn send(
         tokio::time::sleep(with_jitter(decision.delay)).await;
         attempt += 1;
     }
-}
-
-pub(crate) async fn wait_after_429_headers(
-    status: reqwest::StatusCode,
-    headers: &HeaderMap,
-    consecutive_429: u32,
-) -> bool {
-    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return false;
-    }
-    let decision = rate_limit_decision(headers, &[], consecutive_429);
-    debug!(
-        "HTTP 429 on non-replayable request; waiting {:.3}s before returning ({:?})",
-        decision.delay.as_secs_f64(),
-        decision.source
-    );
-    tokio::time::sleep(with_jitter(decision.delay)).await;
-    true
 }
 
 fn with_jitter(delay: Duration) -> Duration {
@@ -266,6 +262,7 @@ mod tests {
     #[test]
     fn retry_safety_never_replays_unsafe_post() {
         assert!(!ReplaySafety::UnsafePost.may_replay());
+        assert!(!ReplaySafety::DeferredGet.may_replay());
         assert!(ReplaySafety::Idempotent.may_replay());
     }
 

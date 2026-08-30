@@ -244,6 +244,8 @@ async fn launch_interactive(
             "exit_code": exit_code,
             "codex_stdout": captured.stdout,
             "codex_stderr": captured.stderr,
+            "codex_stdout_truncated": captured.stdout_truncated,
+            "codex_stderr_truncated": captured.stderr_truncated,
         });
         if let Some(model) = display_model(model, &forwarded) {
             payload["model"] = serde_json::Value::String(model);
@@ -393,13 +395,38 @@ fn spawn_codex(
 }
 
 struct CodexPipes {
-    stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
-    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stdout: Option<std::thread::JoinHandle<CapturedBytes>>,
+    stderr: Option<std::thread::JoinHandle<CapturedBytes>>,
 }
 
 struct CapturedCodexIo {
     stdout: String,
     stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+struct CapturedBytes {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+const CODEX_CAPTURE_LIMIT: usize = 1024 * 1024;
+
+fn read_bounded(mut pipe: impl std::io::Read) -> CapturedBytes {
+    let mut bytes = Vec::with_capacity(CODEX_CAPTURE_LIMIT.min(64 * 1024));
+    let mut chunk = [0_u8; 16 * 1024];
+    let mut truncated = false;
+    while let Ok(read) = pipe.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        let remaining = CODEX_CAPTURE_LIMIT.saturating_sub(bytes.len());
+        let kept = remaining.min(read);
+        bytes.extend_from_slice(&chunk[..kept]);
+        truncated |= kept < read;
+    }
+    CapturedBytes { bytes, truncated }
 }
 
 fn take_codex_pipes(child: &mut std::process::Child, json: bool) -> CodexPipes {
@@ -410,33 +437,42 @@ fn take_codex_pipes(child: &mut std::process::Child, json: bool) -> CodexPipes {
         };
     }
     CodexPipes {
-        stdout: child.stdout.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        }),
-        stderr: child.stderr.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        }),
+        stdout: child
+            .stdout
+            .take()
+            .map(|mut pipe| std::thread::spawn(move || read_bounded(&mut pipe))),
+        stderr: child
+            .stderr
+            .take()
+            .map(|mut pipe| std::thread::spawn(move || read_bounded(&mut pipe))),
     }
 }
 
 fn join_codex_pipes(pipes: CodexPipes) -> CapturedCodexIo {
-    fn into_string(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> String {
-        handle
-            .and_then(|h| h.join().ok())
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default()
+    fn into_string(handle: Option<std::thread::JoinHandle<CapturedBytes>>) -> (String, bool) {
+        let captured = handle.and_then(|h| h.join().ok()).unwrap_or(CapturedBytes {
+            bytes: Vec::new(),
+            truncated: false,
+        });
+        let mut text = String::from_utf8_lossy(&captured.bytes).into_owned();
+        let mut truncated = captured.truncated;
+        if text.len() > CODEX_CAPTURE_LIMIT {
+            let mut end = CODEX_CAPTURE_LIMIT;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            truncated = true;
+        }
+        (text, truncated)
     }
+    let (stdout, stdout_truncated) = into_string(pipes.stdout);
+    let (stderr, stderr_truncated) = into_string(pipes.stderr);
     CapturedCodexIo {
-        stdout: into_string(pipes.stdout),
-        stderr: into_string(pipes.stderr),
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
     }
 }
 
@@ -492,10 +528,10 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 ///
 /// Unlike the ChatGPT path this stages nothing: the provider is applied as
 /// `codex -c …` overrides and the API key is injected into the child process
-/// environment under the profile's `env_key`. A generated model catalog is
-/// written under the provider directory so Codex `/model` lists the provider's
-/// slugs and has metadata for them. Each launch gets its own Codex home under
-/// the provider directory so concurrent models do not share sqlite or rewrite
+/// environment under the profile's `env_key`. The saved model catalog is
+/// passed to Codex without gateway discovery on the launch path. Each launch
+/// gets its own Codex home under the provider directory so concurrent models
+/// do not share sqlite or rewrite
 /// the user's `config.toml` model keys. Prompts and skills are linked to the
 /// user's `$CODEX_HOME`. Model and endpoint come from `-c`. `auth.json` is not
 /// swapped.
@@ -510,39 +546,19 @@ async fn launch_provider(
 
     let selected = profile.resolve_model(model)?.clone();
     let shown_model = passthrough_model_value(&args).unwrap_or_else(|| selected.id.clone());
-    match provider::probe_responses_support(&profile.base_url, &profile.api_key, &shown_model).await
-    {
-        Ok(probe) => match probe.support {
-            provider::ResponsesSupport::Unsupported => {
-                anyhow::bail!("{}", probe.refusal_message(&profile.alias));
-            }
-            provider::ResponsesSupport::Unknown => {
-                if !json {
-                    user_println(&format!(
-                        "Warning: could not confirm Responses support for '{shown_model}' ({}); launching anyway.",
-                        probe.summary()
-                    ));
-                }
-            }
-            provider::ResponsesSupport::Supported => {}
-        },
-        Err(err) => {
-            if !json {
-                user_println(&format!(
-                    "Warning: Responses probe failed ({err:#}); launching anyway."
-                ));
-            }
-        }
+    if profile.responses_support_for(&shown_model) == Some(false) {
+        anyhow::bail!(
+            "Model '{}' on provider '{}' has no Codex Responses channel. The saved explicit probe marked it unsupported; probe again with `codex-switch provider probe {} --model {}` after the endpoint changes.",
+            shown_model,
+            profile.alias,
+            profile.alias,
+            shown_model,
+        );
     }
-    let (primary, fallback) = if profile.has_explicit_model_catalog() {
-        (Vec::new(), Vec::new())
-    } else {
-        provider::load_remote_catalog(&profile).await
-    };
     let (env_name, env_value) = profile.launch_env();
     let mut session = provider::ProviderCodexHome::begin(&profile.alias)?;
     let overrides =
-        profile.codex_config_args_from_remote(model, reasoning.clone(), &primary, &fallback)?;
+        profile.codex_config_args_from_saved_catalog_at(model, reasoning.clone(), &session.path)?;
     let codex_args = provider_codex_argv(overrides, args.clone());
 
     if !json {
@@ -591,6 +607,8 @@ async fn launch_provider(
             "exit_code": exit_code,
             "codex_stdout": captured.stdout,
             "codex_stderr": captured.stderr,
+            "codex_stdout_truncated": captured.stdout_truncated,
+            "codex_stderr_truncated": captured.stderr_truncated,
         }));
     } else {
         user_println("codex exited");

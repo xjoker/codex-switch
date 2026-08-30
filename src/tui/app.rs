@@ -780,25 +780,37 @@ impl App {
         match form.handle_key(code) {
             super::provider_form::FormOutcome::Continue => {}
             super::provider_form::FormOutcome::Cancel => self.provider_form = None,
-            super::provider_form::FormOutcome::Saved(profile) => {
+            super::provider_form::FormOutcome::Saved {
+                profile,
+                fetched_catalog,
+            } => {
                 let action = if crate::provider::exists(&profile.alias) {
                     "Updated"
                 } else {
                     "Added"
                 };
-                match crate::provider::save(&profile) {
-                    Ok(()) => {
-                        self.provider_form = None;
-                        self.set_status(format!("{action} provider '{}'", profile.alias), 4);
-                        self.active_tab = Tab::Providers;
-                        self.load_profiles();
-                        if let Some(idx) =
-                            self.providers.iter().position(|p| p.alias == profile.alias)
-                        {
-                            self.provider_selected = idx;
-                        }
-                    }
-                    Err(e) => self.set_status_error(format!("{action} provider failed: {e}"), 6),
+                if let Err(e) = crate::provider::save(&profile) {
+                    self.set_status_error(format!("{action} provider failed: {e}"), 6);
+                    return;
+                }
+                if let Some(catalog) = fetched_catalog
+                    && let Err(e) = profile.save_synced_model_catalog_blocking(&catalog)
+                {
+                    self.set_status_error(
+                        format!(
+                            "{action} provider '{}', but saving fetched model metadata failed: {e}",
+                            profile.alias
+                        ),
+                        6,
+                    );
+                    return;
+                }
+                self.provider_form = None;
+                self.set_status(format!("{action} provider '{}'", profile.alias), 4);
+                self.active_tab = Tab::Providers;
+                self.load_profiles();
+                if let Some(idx) = self.providers.iter().position(|p| p.alias == profile.alias) {
+                    self.provider_selected = idx;
                 }
             }
         }

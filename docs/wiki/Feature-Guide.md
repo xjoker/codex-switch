@@ -83,7 +83,7 @@ codex-switch launch -- exec --json "do the thing"
 codex-switch launch -- -s workspace-write -a never
 ```
 
-Arguments after `--` are Codex's, not codex-switch's. A known Codex subcommand (`exec`, `resume`, …) can start the argv without `--` (`codex-switch launch exec --json "…"`). Tokens on both sides of `--` are kept. The separator is still required when the Codex argv starts with a prompt that looks like an alias, or a flag that also exists on codex-switch (`--json`, `--color`, `--model`) immediately after the alias. Current Codex has no `--full-auto`; use `-a never`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox`. `--json launch` prints one JSON object after Codex exits and captures Codex stdout/stderr into that object.
+Arguments after `--` are Codex's, not codex-switch's. A known Codex subcommand (`exec`, `resume`, …) can start the argv without `--` (`codex-switch launch exec --json "…"`). Tokens on both sides of `--` are kept. The separator is still required when the Codex argv starts with a prompt that looks like an alias, or a flag that also exists on codex-switch (`--json`, `--color`, `--model`) immediately after the alias. Current Codex has no `--full-auto`; use `-a never`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox`. `--json launch` prints one JSON object after Codex exits and captures at most 1 MiB from each Codex output stream; the corresponding `*_truncated` fields report clipping.
 
 The launch lock serializes overlapping launch sessions. The restore delay is configurable (`launch.restore_delay_secs`) because Codex does not expose an authentication-read handshake.
 
@@ -98,7 +98,7 @@ codex-switch provider add openrouter \
 codex-switch launch openrouter
 ```
 
-`launch <provider>` does not swap `$CODEX_HOME/auth.json`. It starts Codex with `-c` overrides that define and select the provider (and `launch --model` to pick a saved model), injects the key into the child environment only, uses a per-launch Codex home (prompts/skills/`AGENTS.md` linked to the user home; MCP merged back on exit) so concurrent models can overlap, and writes a model catalog so Codex `/model` lists the saved provider slugs. Fill those slugs with `--model`, or import chat ids from the gateway (`--fetch-models` / `provider fetch-models` / TUI `f`). Catalogs larger than 48 chat models must be picked (`--model` or the TUI picker); they are not imported wholesale. Auto-select (`launch` with no alias) and `use` remain ChatGPT-only. Before spawn, provider `launch` probes `POST /responses` with only `model` (no `input`) and refuses a slug that 404s. `codex-switch provider probe <alias>` runs that check without starting Codex.
+`launch <provider>` does not swap `$CODEX_HOME/auth.json`. It starts Codex with `-c` overrides that define and select the provider (and `launch --model` to pick a saved model), injects the key into the child environment only, uses a per-launch Codex home (prompts/skills/`AGENTS.md` linked to the user home; MCP merged back on exit) so concurrent models can overlap, and writes a model catalog so Codex `/model` lists the saved provider slugs. Fill those slugs with `--model`, or import chat ids and catalog metadata explicitly from the gateway (`--fetch-models` / `provider fetch-models` / TUI `f`). Catalogs larger than 48 chat models must be picked (`--model` or the TUI picker); they are not imported wholesale. Auto-select (`launch` with no alias) and `use` remain ChatGPT-only. Launch performs no gateway request. `codex-switch provider probe <alias>` explicitly checks `POST /responses` without starting Codex, saves conclusive verdicts, and later launches refuse a model saved as unsupported.
 
 A provider holds several models; reasoning effort and `web_search` are per model. In the TUI Providers tab, `Enter` / `o` opens a picker for a saved model, a one-shot reasoning override, and optional extra Codex argv; `e` edits the provider (including env key, wire API, and extra `-c`). The API key is read from a hidden prompt (or `--api-key-stdin`), never from argv. Full workflow, DeepSeek-via-OpenRouter, model-specific settings, TUI add/edit/rename, and the security contract are in [Custom API providers](Providers).
 
@@ -126,7 +126,7 @@ Model names are discovered at runtime rather than maintained as a hardcoded comp
 
 ## Run the background daemon
 
-The Beta daemon monitors the current profile, refreshes cached usage and expiring tokens, and prepares a better account when the configured threshold is reached.
+The Beta daemon monitors the current profile, refreshes cached usage, rotates credentials nearing expiry as part of that refresh, and prepares a better account when the configured threshold is reached.
 
 ```bash
 codex-switch daemon install
@@ -135,7 +135,7 @@ codex-switch daemon status
 
 Service integration is platform-native: LaunchAgent on macOS, a systemd user service on Linux, and Task Scheduler on Windows. Windows installation requires elevated PowerShell.
 
-The daemon runs four independent timers: account polling (`poll_interval_secs`), full cache refresh (`cache_refresh_interval_secs`, with warmup only when `auto_warmup` is on and `warmup_times` is empty), scheduled warmup (~60s, when `auto_warmup` is on and `warmup_times` is set), and proactive token refresh (`token_check_interval_secs`). Scheduled slots use `daemon.timezone` when set, otherwise the process local timezone. A switch happens only when at least two profiles exist and the current profile's 5-hour usage reaches `switch_threshold`.
+The daemon runs three timers: account polling (`poll_interval_secs`), full cache refresh (`cache_refresh_interval_secs`, with warmup only when `auto_warmup` is on and `warmup_times` is empty), and scheduled warmup (~60s, when `auto_warmup` is on and `warmup_times` is set). Full refresh handles credentials expiring within 30 minutes and writes all refreshed usage rows in one cache commit. Scheduled slots use `daemon.timezone` when set, otherwise the process local timezone. A switch happens only when at least two profiles exist and the current profile's 5-hour usage reaches `switch_threshold`.
 
 By default, a switch is deferred while an interactive Codex process (`codex`, `codex resume`, `codex exec`) is running; the daemon records the pending switch and retries on the next poll. Long-lived MCP or app-server processes do not block a switch. Operational state lives in `daemon-state.json` and is shown by `daemon status`. Daemon switches cannot ask for confirmation: an untracked live `auth.json` is replaced after the normal backup rotation, so save or import an account first if you want to keep it selectable.
 

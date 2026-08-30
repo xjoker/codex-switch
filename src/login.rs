@@ -475,8 +475,6 @@ async fn exchange_code_with_redirect(
             .await
         {
             Ok(resp) => {
-                http_retry::wait_after_429_headers(resp.status(), resp.headers(), attempt - 1)
-                    .await;
                 if resp.status().is_server_error() && attempt < TOKEN_EXCHANGE_MAX_ATTEMPTS {
                     debug!(
                         "Token exchange got HTTP {} (attempt {attempt}/{TOKEN_EXCHANGE_MAX_ATTEMPTS}), retrying",
@@ -672,7 +670,6 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
         .map_err(|e| crate::auth::format_reqwest_error("Failed to request device code", &e))?;
 
     let status = resp.status();
-    http_retry::wait_after_429_headers(status, resp.headers(), 0).await;
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         bail!("Device code request failed (HTTP {status}): {body}");

@@ -21,7 +21,7 @@
 //! merged back on exit. `auth.json` is not swapped. Model and endpoint come
 //! from `-c`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -87,6 +87,10 @@ pub struct ProviderProfile {
     /// Models this endpoint can run. At least one; `default_model` must be in it.
     #[serde(default)]
     pub models: Vec<ProviderModel>,
+    /// Last conclusive result from the explicit `provider probe` command.
+    /// Missing means unknown; launch never performs this network request.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    responses_support: BTreeMap<String, bool>,
     /// Legacy single-model field from pre-multi-model files. Read on load, never
     /// written back.
     #[serde(default, skip_serializing)]
@@ -226,6 +230,7 @@ impl ProviderProfile {
             env_key: derive_env_key(&alias),
             default_model,
             models,
+            responses_support: BTreeMap::new(),
             model: String::new(),
             metadata_fallback: String::new(),
             wire_api: default_wire_api(),
@@ -254,6 +259,8 @@ impl ProviderProfile {
         {
             self.default_model = first.id.clone();
         }
+        self.responses_support
+            .retain(|slug, _| self.models.iter().any(|model| model.id == *slug));
         self.model.clear();
     }
 
@@ -359,6 +366,24 @@ impl ProviderProfile {
             })
     }
 
+    pub(crate) fn responses_support_for(&self, model: &str) -> Option<bool> {
+        self.responses_support.get(model).copied()
+    }
+
+    pub(crate) fn record_responses_probes(&mut self, probes: &[ResponsesProbe]) {
+        for probe in probes {
+            match probe.support {
+                ResponsesSupport::Supported => {
+                    self.responses_support.insert(probe.model.clone(), true);
+                }
+                ResponsesSupport::Unsupported => {
+                    self.responses_support.insert(probe.model.clone(), false);
+                }
+                ResponsesSupport::Unknown => {}
+            }
+        }
+    }
+
     /// Compact list label: the default model, plus how many others exist.
     pub fn models_label(&self) -> String {
         let extra = self.models.len().saturating_sub(1);
@@ -444,26 +469,55 @@ impl ProviderProfile {
         override_value(&self.codex_config, "model_catalog_json").is_some()
     }
 
-    /// Launch-time `-c` overrides plus a generated model catalog unless the
-    /// provider already has an explicit `model_catalog_json` override.
-    pub(crate) fn codex_config_args_from_remote(
+    /// Launch-time overrides backed only by the catalog already on disk.
+    ///
+    /// Provider discovery is an explicit operation. Launch must stay usable
+    /// offline and must not replace previously fetched metadata with a weaker
+    /// fallback. A local base is generated only when no matching saved catalog
+    /// exists; launches that change its model-specific view receive a private
+    /// tailored copy.
+    pub(crate) fn codex_config_args_from_saved_catalog_at(
         &self,
         model_id: Option<&str>,
         reasoning: ReasoningLaunch,
-        remote: &[RemoteModel],
-        fallback: &[RemoteModel],
+        launch_dir: &Path,
     ) -> Result<Vec<String>> {
         let mut args = self.codex_config_args_with(model_id, reasoning.clone())?;
         if self.has_explicit_model_catalog() {
             return Ok(args);
         }
-        let model = self.resolve_model(model_id)?;
-        let effort = match &reasoning {
-            ReasoningLaunch::Saved => model.reasoning.as_deref(),
-            ReasoningLaunch::Skip => None,
-            ReasoningLaunch::Effort(value) => Some(value.as_str()),
+        let selected = self.resolve_model(model_id)?;
+        let default = self.resolve_model(None)?;
+        let dir = provider_dir(&self.alias)?;
+        let saved_path = dir.join("models.json");
+        let saved_slugs = self.saved_model_slugs(&default.id);
+        if !saved_catalog_matches(&saved_path, &saved_slugs) {
+            self.write_model_catalog(&default.id, default.reasoning.as_deref(), &[], &[])?;
+        }
+        let body = std::fs::read(&saved_path)
+            .with_context(|| format!("reading provider model catalog {}", saved_path.display()))?;
+        let mut catalog: serde_json::Value = serde_json::from_slice(&body)
+            .with_context(|| format!("parsing provider model catalog {}", saved_path.display()))?;
+        let saved_catalog = catalog.clone();
+        tailor_saved_catalog(
+            &mut catalog,
+            &self.saved_model_slugs(&selected.id),
+            &self.models,
+            &selected.id,
+            &reasoning,
+            override_context_window(&self.codex_config),
+        )?;
+        let path = if catalog == saved_catalog {
+            saved_path
+        } else {
+            ensure_private_dir(launch_dir)?;
+            let path = launch_dir.join("models.json");
+            let body = serde_json::to_vec_pretty(&catalog)
+                .context("serializing provider launch model catalog")?;
+            auth::atomic_write_private(&path, &body)
+                .with_context(|| format!("writing provider launch catalog {}", path.display()))?;
+            path
         };
-        let path = self.write_model_catalog(&model.id, effort, remote, fallback)?;
         let path_utf8 = path
             .to_str()
             .map(str::to_string)
@@ -473,6 +527,34 @@ impl ProviderProfile {
             format!("model_catalog_json={}", toml_string(&path_utf8)),
         ]);
         Ok(args)
+    }
+
+    /// Persist the metadata gathered by an explicit model sync for later
+    /// offline launches. Metadata fallback is also resolved here, while the
+    /// user is explicitly asking for network discovery.
+    pub(crate) async fn save_synced_model_catalog(&self, primary: &[RemoteModel]) -> Result<()> {
+        if self.has_explicit_model_catalog() {
+            return Ok(());
+        }
+        let fallback = load_metadata_fallback(self, primary).await;
+        let model = self.resolve_model(None)?;
+        self.write_model_catalog(&model.id, model.reasoning.as_deref(), primary, &fallback)?;
+        Ok(())
+    }
+
+    pub(crate) fn save_synced_model_catalog_blocking(&self, primary: &[RemoteModel]) -> Result<()> {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(self.save_synced_model_catalog(primary))
+            }),
+            Err(_) => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("starting runtime for provider catalog save")?;
+                runtime.block_on(self.save_synced_model_catalog(primary))
+            }
+        }
     }
 
     fn write_model_catalog(
@@ -513,6 +595,81 @@ impl ProviderProfile {
         }
         out
     }
+}
+
+fn saved_catalog_matches(path: &Path, saved_slugs: &[String]) -> bool {
+    let Ok(body) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(catalog) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return false;
+    };
+    let Some(models) = catalog.get("models").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    models.len() == saved_slugs.len()
+        && saved_slugs.iter().all(|slug| {
+            models.iter().any(|model| {
+                model.get("slug").and_then(serde_json::Value::as_str) == Some(slug.as_str())
+            })
+        })
+}
+
+fn tailor_saved_catalog(
+    catalog: &mut serde_json::Value,
+    ordered_slugs: &[String],
+    models: &[ProviderModel],
+    selected_slug: &str,
+    reasoning: &ReasoningLaunch,
+    selected_context_window: Option<i64>,
+) -> Result<()> {
+    let entries = catalog
+        .get_mut("models")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("saved provider catalog has no models array")?;
+    let mut remaining = std::mem::take(entries);
+    let mut ordered = Vec::with_capacity(ordered_slugs.len());
+    for (priority, slug) in ordered_slugs.iter().enumerate() {
+        let index = remaining
+            .iter()
+            .position(|entry| {
+                entry.get("slug").and_then(serde_json::Value::as_str) == Some(slug.as_str())
+            })
+            .with_context(|| format!("saved provider catalog is missing model '{slug}'"))?;
+        let mut entry = remaining.remove(index);
+        let effort = if slug == selected_slug {
+            match reasoning {
+                ReasoningLaunch::Saved => models
+                    .iter()
+                    .find(|model| model.id == *slug)
+                    .and_then(|model| model.reasoning.as_deref()),
+                ReasoningLaunch::Skip => None,
+                ReasoningLaunch::Effort(value) => Some(value.as_str()),
+            }
+        } else {
+            models
+                .iter()
+                .find(|model| model.id == *slug)
+                .and_then(|model| model.reasoning.as_deref())
+        };
+        apply_catalog_reasoning(&mut entry, effort)?;
+        let object = entry
+            .as_object_mut()
+            .context("saved provider catalog model is not an object")?;
+        object.insert(
+            "priority".into(),
+            serde_json::Value::from(i64::try_from(priority).unwrap_or(i64::MAX)),
+        );
+        if slug == selected_slug
+            && let Some(context_window) = selected_context_window
+        {
+            object.insert("context_window".into(), context_window.into());
+            object.insert("max_context_window".into(), context_window.into());
+        }
+        ordered.push(entry);
+    }
+    *entries = ordered;
+    Ok(())
 }
 
 /// Codex's fallback for an unknown slug is a 272k window. Custom models such as
@@ -603,8 +760,7 @@ fn same_models_endpoint(base_url: &str, fallback_source: &str) -> bool {
     !left.is_empty() && left == right
 }
 
-/// `GET {base_url}/models` with the provider key. Failure is the caller's to
-/// swallow: launch must still proceed with generated defaults.
+/// `GET {base_url}/models` with the provider key for an explicit sync action.
 pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Vec<RemoteModel>> {
     let models = fetch_gateway_models_at(&profile.base_url, &profile.api_key).await?;
     debug!(
@@ -878,36 +1034,26 @@ fn classify_responses_probe(
     ResponsesSupport::Unknown
 }
 
-/// Primary gateway list plus fallback metadata when the gateway did not cover
-/// every catalog slug's `context_window`. Fallback never decides which slugs
-/// are injected into `/model`.
-pub(crate) async fn load_remote_catalog(
+async fn load_metadata_fallback(
     profile: &ProviderProfile,
-) -> (Vec<RemoteModel>, Vec<RemoteModel>) {
-    let primary = match fetch_gateway_models(profile).await {
-        Ok(models) => models,
-        Err(err) => {
-            debug!("provider gateway /models unavailable: {err:#}");
-            Vec::new()
-        }
-    };
+    primary: &[RemoteModel],
+) -> Vec<RemoteModel> {
     let source = metadata_fallback_source(profile);
     if !needs_metadata_fallback(
         &profile.saved_model_slugs(&profile.default_model),
-        &primary,
+        primary,
         &profile.base_url,
         &source,
     ) {
-        return (primary, Vec::new());
+        return Vec::new();
     }
-    let fallback = match fetch_fallback_models(&source).await {
+    match fetch_fallback_models(&source).await {
         Ok(models) => models,
         Err(err) => {
             debug!("metadata fallback unavailable ({source}): {err:#}");
             Vec::new()
         }
-    };
-    (primary, fallback)
+    }
 }
 
 fn needs_metadata_fallback(
@@ -1267,7 +1413,7 @@ pub(crate) fn apply_fetched_models(
 pub(crate) async fn fetch_and_apply_models(
     profile: &mut ProviderProfile,
     picks: &[ProviderModel],
-) -> Result<usize> {
+) -> Result<(usize, Vec<RemoteModel>)> {
     let remote = fetch_gateway_models(profile).await?;
     let (models, default) = apply_fetched_models(
         &profile.models,
@@ -1278,7 +1424,7 @@ pub(crate) async fn fetch_and_apply_models(
     let n = models.len();
     profile.models = models;
     profile.default_model = default;
-    Ok(n)
+    Ok((n, remote))
 }
 
 fn entry_context_window(
@@ -1350,25 +1496,7 @@ const THINKING_REASONING_LEVELS: &[(&str, &str)] = &[
     ("max", "Deep reasoning"),
 ];
 
-fn catalog_entry(
-    slug: &str,
-    context_window: i64,
-    reasoning: Option<&str>,
-    meta: Option<&RemoteModel>,
-    priority: i64,
-) -> serde_json::Value {
-    let display_name = meta
-        .and_then(|model| model.display_name.as_deref())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(slug);
-    let description = meta
-        .and_then(|model| model.description.as_deref())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(display_name);
-    let modalities: Vec<String> = meta
-        .map(|model| model.input_modalities.clone())
-        .filter(|values| !values.is_empty())
-        .unwrap_or_else(|| vec!["text".to_string(), "image".to_string()]);
+fn apply_catalog_reasoning(entry: &mut serde_json::Value, reasoning: Option<&str>) -> Result<()> {
     let thinking = thinking_effort(reasoning);
     // Codex 0.150 always puts `reasoning.effort` on POST /responses when the
     // catalog has a default (including `none`). Skip/plain-chat slugs must
@@ -1391,12 +1519,48 @@ fn catalog_entry(
         }
         None => Vec::new(),
     };
+    let object = entry
+        .as_object_mut()
+        .context("provider catalog model is not an object")?;
+    object.insert("supported_reasoning_levels".into(), levels.into());
+    object.insert(
+        "supports_reasoning_summaries".into(),
+        thinking.is_some().into(),
+    );
+    match thinking {
+        Some(effort) => {
+            object.insert("default_reasoning_level".into(), effort.into());
+        }
+        None => {
+            object.remove("default_reasoning_level");
+        }
+    }
+    Ok(())
+}
+
+fn catalog_entry(
+    slug: &str,
+    context_window: i64,
+    reasoning: Option<&str>,
+    meta: Option<&RemoteModel>,
+    priority: i64,
+) -> serde_json::Value {
+    let display_name = meta
+        .and_then(|model| model.display_name.as_deref())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(slug);
+    let description = meta
+        .and_then(|model| model.description.as_deref())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(display_name);
+    let modalities: Vec<String> = meta
+        .map(|model| model.input_modalities.clone())
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec!["text".to_string(), "image".to_string()]);
     let mut entry = serde_json::json!({
         "slug": slug,
         "display_name": display_name,
         "description": description,
-        "supported_reasoning_levels": levels,
-        "supports_reasoning_summaries": thinking.is_some(),
         "shell_type": "shell_command",
         "visibility": "list",
         "supported_in_api": true,
@@ -1412,9 +1576,7 @@ fn catalog_entry(
         "experimental_supported_tools": [],
         "input_modalities": modalities,
     });
-    if let Some(effort) = thinking {
-        entry["default_reasoning_level"] = serde_json::Value::String(effort.to_string());
-    }
+    apply_catalog_reasoning(&mut entry, reasoning).expect("catalog entry is an object");
     entry
 }
 /// Render a string as a TOML basic (quoted) string for a `codex -c key=value`
@@ -1781,6 +1943,12 @@ pub fn load(alias: &str) -> Result<ProviderProfile> {
 /// Persist a provider profile (directory `0700`, file `0600`).
 pub fn save(profile: &ProviderProfile) -> Result<()> {
     let mut stored = profile.clone();
+    if stored.responses_support.is_empty()
+        && let Ok(existing) = load(&stored.alias)
+        && existing.base_url == stored.base_url
+    {
+        stored.responses_support = existing.responses_support;
+    }
     stored.normalize();
     stored.validate()?;
     let dir = provider_dir(&stored.alias)?;
@@ -2039,8 +2207,14 @@ mod tests {
         let _home = TestHome::new();
         assert!(list_providers().unwrap().is_empty());
 
-        let profile = sample("openrouter");
+        let mut profile = sample("openrouter");
+        profile
+            .responses_support
+            .insert("openai/gpt-5.3-codex".into(), true);
         save(&profile).unwrap();
+        let mut form_style_update = profile.clone();
+        form_style_update.responses_support.clear();
+        save(&form_style_update).unwrap();
 
         assert!(exists("openrouter"));
         assert_eq!(list_providers().unwrap(), vec!["openrouter".to_string()]);
@@ -2054,6 +2228,11 @@ mod tests {
         assert_eq!(loaded.wire_api, "responses");
         assert_eq!(loaded.default_model, "openai/gpt-5.3-codex");
         assert_eq!(loaded.models.len(), 1);
+        assert_eq!(
+            loaded.responses_support_for("openai/gpt-5.3-codex"),
+            Some(true),
+            "a TUI edit rebuilds the public fields and must retain saved probe evidence"
+        );
 
         remove("openrouter").unwrap();
         assert!(!exists("openrouter"));
@@ -2491,23 +2670,48 @@ api_key = "sk-legacy-key"
     }
 
     #[test]
-    fn launch_args_write_a_catalog_for_an_unknown_slug() {
+    fn launch_args_create_and_tailor_an_offline_catalog() {
         let _home = TestHome::new();
         let mut profile = sample("zai");
-        profile.models = vec![ProviderModel::from_id("glm-5.3-flash")];
+        profile.models = vec![ProviderModel {
+            id: "glm-5.3-flash".into(),
+            reasoning: Some("high".into()),
+            no_web_search: false,
+        }];
         profile.default_model = "glm-5.3-flash".to_string();
         save(&profile).unwrap();
+        let first_run = provider_dir("zai").unwrap().join("runs/first");
         let args = profile
-            .codex_config_args_from_remote(None, ReasoningLaunch::Saved, &[], &[])
+            .codex_config_args_from_saved_catalog_at(None, ReasoningLaunch::Saved, &first_run)
             .unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("model_catalog_json="));
         let catalog_path = provider_dir("zai").unwrap().join("models.json");
+        assert!(
+            catalog_path.exists(),
+            "first launch persists a local base catalog"
+        );
+
+        profile
+            .write_model_catalog(
+                "glm-5.3-flash",
+                Some("high"),
+                &[remote("glm-5.3-flash")],
+                &[],
+            )
+            .unwrap();
+        let saved_catalog = std::fs::read_to_string(&catalog_path).unwrap();
+        let skip_run = provider_dir("zai").unwrap().join("runs/skip");
+        let args = profile
+            .codex_config_args_from_saved_catalog_at(None, ReasoningLaunch::Skip, &skip_run)
+            .unwrap();
+        assert!(args.join(" ").contains(&skip_run.display().to_string()));
         let catalog: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&catalog_path).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(skip_run.join("models.json")).unwrap())
+                .unwrap();
         assert_eq!(catalog["models"][0]["slug"], "glm-5.3-flash");
         assert_eq!(catalog["models"][0]["visibility"], "list");
-        assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
+        assert_eq!(catalog["models"][0]["context_window"], 8_192);
         assert_eq!(catalog["models"][0]["base_instructions"], "");
         assert!(catalog["models"][0]["default_reasoning_level"].is_null());
         assert!(
@@ -2517,6 +2721,11 @@ api_key = "sk-legacy-key"
                 .is_empty()
         );
         assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+        assert_eq!(
+            std::fs::read_to_string(catalog_path).unwrap(),
+            saved_catalog,
+            "a one-shot launch must not weaken the persisted remote metadata"
+        );
     }
 
     #[test]
@@ -2527,8 +2736,9 @@ api_key = "sk-legacy-key"
         profile.default_model = "glm-5.3-flash".to_string();
         profile.codex_config = vec![r#"model_catalog_json="/tmp/custom-models.json""#.to_string()];
         save(&profile).unwrap();
+        let launch_dir = provider_dir("zai").unwrap().join("runs/explicit");
         let args = profile
-            .codex_config_args_from_remote(None, ReasoningLaunch::Saved, &[], &[])
+            .codex_config_args_from_saved_catalog_at(None, ReasoningLaunch::Saved, &launch_dir)
             .unwrap();
         let joined = args.join(" ");
         assert!(joined.contains(r#"model_catalog_json="/tmp/custom-models.json""#));

@@ -6,11 +6,17 @@
 //! these tests prove the composed command rather than only the clap parse.
 
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+};
+use std::thread::JoinHandle;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -81,7 +87,8 @@ open(path, "w", encoding="utf-8").write(json.dumps(data))
 if sys.argv[1:] == ["--version"]:
     sys.stdout.write("codex-cli 0.0.0-test\n")
 else:
-    sys.stdout.write("codex-ok\n")
+    size = int(os.environ.get("CS_FAKE_CODEX_STDOUT_BYTES", "0"))
+    sys.stdout.write("x" * size if size else "codex-ok\n")
 sys.exit(0)
 "#,
     )
@@ -136,19 +143,21 @@ fn run(home: &Path, fake_bin: &Path, log: &Path, args: &[&str]) -> Output {
     command(home, fake_bin, log, args).output().unwrap()
 }
 
-fn setup_provider(home: &Path) {
+fn setup_provider_at(home: &Path, base_url: &str) {
     let dir = home.join(".codex-switch/providers/openrouter");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("provider.toml"),
-        r#"
+        format!(
+            r#"
 provider_id = "openrouter"
 name = "openrouter"
-base_url = "https://openrouter.ai/api/v1"
+base_url = "{base_url}"
 env_key = "CODEX_SWITCH_OPENROUTER_KEY"
 default_model = "openai/gpt-5.3-codex"
 wire_api = "responses"
 api_key = "sk-test-passthrough"
+metadata_fallback = "none"
 
 [[models]]
 id = "openai/gpt-5.3-codex"
@@ -157,9 +166,95 @@ id = "openai/gpt-5.3-codex"
 id = "deepseek/deepseek-r1-0528"
 reasoning = "high"
 no_web_search = true
-"#,
+"#
+        ),
     )
     .unwrap();
+}
+
+fn setup_provider(home: &Path) {
+    setup_provider_at(home, "http://127.0.0.1:9/v1");
+}
+
+struct RequestCounter {
+    base_url: String,
+    count: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl RequestCounter {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_count = count.clone();
+        let thread_stop = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                        let mut request = Vec::with_capacity(4096);
+                        let mut chunk = [0_u8; 1024];
+                        while request.len() < 16 * 1024 {
+                            let n = stream.read(&mut chunk).unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            request.extend_from_slice(&chunk[..n]);
+                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        thread_count.fetch_add(1, Ordering::Relaxed);
+                        let request = String::from_utf8_lossy(&request);
+                        let (status, body) = if request.starts_with("POST /v1/responses ") {
+                            (
+                                "400 Bad Request",
+                                r#"{"error":{"type":"invalid_request_error","message":"input required"}}"#,
+                            )
+                        } else {
+                            (
+                                "200 OK",
+                                r#"{"data":[{"id":"openai/gpt-5.3-codex","context_length":123456}]}"#,
+                            )
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            base_url: format!("http://{addr}/v1"),
+            count,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn requests(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for RequestCounter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
 }
 
 fn setup_chatgpt(home: &Path) {
@@ -381,11 +476,12 @@ fn launch_merges_tokens_on_both_sides_of_double_dash() {
 
 #[test]
 fn launch_json_reports_passthrough_model_and_captures_codex_stdout() {
+    const LIMIT: usize = 1024 * 1024;
     let home = temp_home("json-model");
     let (fake_bin, log) = install_fake_codex(&home);
     setup_provider(&home);
 
-    let output = run(
+    let output = command(
         &home,
         &fake_bin,
         &log,
@@ -399,7 +495,10 @@ fn launch_json_reports_passthrough_model_and_captures_codex_stdout() {
             "exec",
             "hi",
         ],
-    );
+    )
+    .env("CS_FAKE_CODEX_STDOUT_BYTES", (LIMIT + 4096).to_string())
+    .output()
+    .unwrap();
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -409,11 +508,111 @@ fn launch_json_reports_passthrough_model_and_captures_codex_stdout() {
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["alias"], "openrouter");
     assert_eq!(payload["model"], "one-shot");
-    assert!(
-        payload["codex_stdout"]
-            .as_str()
-            .is_some_and(|s| s.contains("codex-ok")),
-        "codex stdout must be captured into the JSON envelope: {payload}"
+    assert!(payload["codex_stdout"].as_str().unwrap().len() <= LIMIT);
+    assert_eq!(payload["codex_stdout_truncated"], true);
+    assert_eq!(payload["codex_stderr_truncated"], false);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_sync_is_persisted_and_launch_stays_offline() {
+    let home = temp_home("provider-probe-verdict");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let server = RequestCounter::start();
+    setup_provider_at(&home, &server.base_url);
+
+    let fetched = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["provider", "fetch-models", "openrouter"],
     );
+    assert!(
+        fetched.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+
+    let probed = run(
+        &home,
+        &fake_bin,
+        &log,
+        &[
+            "provider",
+            "probe",
+            "openrouter",
+            "--model",
+            "openai/gpt-5.3-codex",
+        ],
+    );
+
+    assert!(
+        probed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&probed.stderr)
+    );
+    let saved =
+        fs::read_to_string(home.join(".codex-switch/providers/openrouter/provider.toml")).unwrap();
+    assert!(
+        saved.contains("responses_support") && saved.contains("openai/gpt-5.3-codex"),
+        "an explicit probe must make its verdict available to later offline launches: {saved}"
+    );
+    let catalog = home.join(".codex-switch/providers/openrouter/models.json");
+    assert!(
+        catalog.exists(),
+        "explicit model sync must persist launch metadata"
+    );
+    let saved_catalog = fs::read_to_string(&catalog).unwrap();
+    let catalog_json: Value = serde_json::from_str(&saved_catalog).unwrap();
+    assert_eq!(catalog_json["models"][0]["slug"], "openai/gpt-5.3-codex");
+    assert_eq!(catalog_json["models"][0]["context_window"], 123456);
+
+    let requests_before_launch = server.requests();
+    let launched = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+    assert!(
+        launched.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    assert_eq!(
+        server.requests(),
+        requests_before_launch,
+        "launch must consume the saved probe/catalog without network I/O"
+    );
+    assert_eq!(
+        fs::read_to_string(catalog).unwrap(),
+        saved_catalog,
+        "launch must not replace fetched metadata with local defaults"
+    );
+    let path = home.join(".codex-switch/providers/openrouter/provider.toml");
+    let unsupported = fs::read_to_string(&path).unwrap().replace(
+        "\"openai/gpt-5.3-codex\" = true",
+        "\"openai/gpt-5.3-codex\" = false",
+    );
+    assert!(unsupported.contains("\"openai/gpt-5.3-codex\" = false"));
+    fs::write(path, unsupported).unwrap();
+    let codex_launches = recorded_argv(&log).len();
+
+    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "saved unsupported verdict was ignored"
+    );
+    assert!(
+        combined.contains("no Codex Responses channel"),
+        "{combined}"
+    );
+    assert_eq!(
+        server.requests(),
+        requests_before_launch,
+        "a saved unsupported verdict must also be enforced offline"
+    );
+    assert_eq!(recorded_argv(&log).len(), codex_launches);
     let _ = fs::remove_dir_all(home);
 }

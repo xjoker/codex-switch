@@ -150,6 +150,7 @@ pub struct ProviderFormState {
     base_url: String,
     api_key: String,
     original_key: String,
+    metadata_fallback: String,
     env_key: String,
     wire_api: String,
     extra_sets: String,
@@ -162,12 +163,16 @@ pub struct ProviderFormState {
     error: Option<String>,
     confirm_remove: bool,
     pick: Option<GatewayPickState>,
+    fetched_catalog: Option<Vec<RemoteModel>>,
 }
 
 pub enum FormOutcome {
     Continue,
     Cancel,
-    Saved(Box<ProviderProfile>),
+    Saved {
+        profile: Box<ProviderProfile>,
+        fetched_catalog: Option<Vec<RemoteModel>>,
+    },
 }
 
 impl ProviderFormState {
@@ -181,6 +186,7 @@ impl ProviderFormState {
             base_url: String::new(),
             api_key: String::new(),
             original_key: String::new(),
+            metadata_fallback: String::new(),
             env_key: String::new(),
             wire_api: "responses".to_string(),
             extra_sets: String::new(),
@@ -193,6 +199,7 @@ impl ProviderFormState {
             error: None,
             confirm_remove: false,
             pick: None,
+            fetched_catalog: None,
         }
     }
 
@@ -224,6 +231,7 @@ impl ProviderFormState {
             base_url: profile.base_url.clone(),
             api_key: String::new(),
             original_key: profile.api_key.clone(),
+            metadata_fallback: profile.metadata_fallback.clone(),
             env_key: profile.env_key.clone(),
             wire_api: profile.wire_api.clone(),
             extra_sets: profile.codex_config.join(", "),
@@ -240,6 +248,7 @@ impl ProviderFormState {
             error: None,
             confirm_remove: false,
             pick: None,
+            fetched_catalog: None,
         }
     }
 
@@ -556,6 +565,7 @@ impl ProviderFormState {
             }
         };
         if slugs.len() > SMALL_REMOTE_CATALOG_LIMIT {
+            self.fetched_catalog = Some(remote.to_vec());
             self.pick = Some(GatewayPickState::new(slugs, &self.models));
             self.error = None;
             self.popup.reset();
@@ -600,6 +610,7 @@ impl ProviderFormState {
         match code {
             KeyCode::Esc => {
                 self.pick = None;
+                self.fetched_catalog = None;
             }
             KeyCode::Char('/') => {
                 if let Some(pick) = self.pick.as_mut() {
@@ -730,6 +741,7 @@ impl ProviderFormState {
             apply_fetched_models(&existing, current_default.as_deref(), remote, &[])
                 .map_err(|err| err.to_string())?;
         self.set_saved_models(models, default);
+        self.fetched_catalog = Some(remote.to_vec());
         Ok(())
     }
 
@@ -780,8 +792,18 @@ impl ProviderFormState {
         let value = self.input.trim().to_string();
         match self.focus {
             Focus::Alias => self.alias = value,
-            Focus::BaseUrl => self.base_url = value,
-            Focus::ApiKey => self.api_key = value,
+            Focus::BaseUrl => {
+                if self.base_url != value {
+                    self.fetched_catalog = None;
+                }
+                self.base_url = value;
+            }
+            Focus::ApiKey => {
+                if self.api_key != value {
+                    self.fetched_catalog = None;
+                }
+                self.api_key = value;
+            }
             Focus::EnvKey => self.env_key = value,
             Focus::WireApi => self.wire_api = value,
             Focus::Extra => self.extra_sets = value,
@@ -850,7 +872,10 @@ impl ProviderFormState {
             self.commit_edit();
         }
         match self.build_profile() {
-            Ok(profile) => FormOutcome::Saved(Box::new(profile)),
+            Ok(profile) => FormOutcome::Saved {
+                profile: Box::new(profile),
+                fetched_catalog: self.fetched_catalog.clone(),
+            },
             Err(err) => {
                 self.error = Some(err);
                 FormOutcome::Continue
@@ -912,6 +937,7 @@ impl ProviderFormState {
         let default_idx = self.default_idx.min(models.len() - 1);
         let mut profile = ProviderProfile::build(alias, self.base_url.trim(), models, api_key);
         profile.default_model = profile.models[default_idx].id.clone();
+        profile.metadata_fallback = self.metadata_fallback.clone();
         let env_key = self.env_key.trim();
         if !env_key.is_empty() {
             profile.env_key = env_key.to_string();
@@ -1408,7 +1434,7 @@ mod tests {
         form.handle_key(KeyCode::Char('w'));
         form.handle_key(KeyCode::Char('*'));
 
-        let FormOutcome::Saved(profile) = form.handle_key(KeyCode::Char('s')) else {
+        let FormOutcome::Saved { profile, .. } = form.handle_key(KeyCode::Char('s')) else {
             panic!("form should save");
         };
         assert_eq!(profile.alias, "openrouter");
@@ -1465,7 +1491,7 @@ mod tests {
         }
         type_into(&mut form, "https://example.com/v1");
         form.handle_key(KeyCode::Enter);
-        let FormOutcome::Saved(profile) = form.handle_key(KeyCode::Char('s')) else {
+        let FormOutcome::Saved { profile, .. } = form.handle_key(KeyCode::Char('s')) else {
             panic!("edit should save; error={:?}", form.error);
         };
         assert_eq!(profile.api_key, "sk-original");
@@ -1557,7 +1583,7 @@ mod tests {
         assert_eq!(tab.focus, Focus::Models);
         type_into(&mut tab, "m");
         tab.handle_key(KeyCode::Enter);
-        let FormOutcome::Saved(profile) = tab.handle_key(KeyCode::Char('s')) else {
+        let FormOutcome::Saved { profile, .. } = tab.handle_key(KeyCode::Char('s')) else {
             panic!("add should save; error={:?}", tab.error);
         };
         assert_eq!(profile.env_key, "CODEX_SWITCH_OR_KEY");
@@ -1882,12 +1908,13 @@ mod tests {
             "sk-original",
         );
         original.env_key = "MY_CUSTOM_KEY".into();
+        original.metadata_fallback = "none".into();
         original.wire_api = "responses".into();
         original.codex_config = vec!["temperature=0".into(), "foo=bar".into()];
         crate::provider::save(&original).unwrap();
 
         let mut form = ProviderFormState::edit(&original);
-        let FormOutcome::Saved(profile) = form.handle_key(KeyCode::Char('s')) else {
+        let FormOutcome::Saved { profile, .. } = form.handle_key(KeyCode::Char('s')) else {
             panic!("edit should save; error={:?}", form.error);
         };
         assert_eq!(
@@ -1895,6 +1922,7 @@ mod tests {
             Some("custom-effort")
         );
         assert_eq!(profile.env_key, "MY_CUSTOM_KEY");
+        assert_eq!(profile.metadata_fallback, "none");
         assert_eq!(profile.wire_api, "responses");
         assert_eq!(profile.codex_config, ["temperature=0", "foo=bar"]);
     }
@@ -1935,6 +1963,14 @@ mod tests {
         let ids: Vec<&str> = form.models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["glm-5.3-flash", "gemini-3-flash"]);
         assert_eq!(form.models[form.default_idx].id, "glm-5.3-flash");
+        let FormOutcome::Saved {
+            fetched_catalog: Some(catalog),
+            ..
+        } = form.handle_key(KeyCode::Char('s'))
+        else {
+            panic!("fetched metadata must leave the form with the saved profile");
+        };
+        assert_eq!(catalog[0].context_window, Some(1_048_576));
     }
 
     fn remote(slug: &str) -> crate::provider::RemoteModel {

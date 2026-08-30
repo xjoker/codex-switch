@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -16,15 +19,68 @@ use super::{
 };
 
 #[derive(Debug)]
-struct UsageRateLimited;
+struct UsageRateLimited {
+    retry_after: Duration,
+}
 
 impl std::fmt::Display for UsageRateLimited {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Usage API rate limited after exponential backoff (HTTP 429)")
+        write!(
+            f,
+            "Usage API rate limited (HTTP 429; retry after {}s)",
+            self.retry_after.as_secs()
+        )
     }
 }
 
 impl std::error::Error for UsageRateLimited {}
+
+static USAGE_COOLDOWNS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+fn usage_cooldowns() -> &'static Mutex<HashMap<String, Instant>> {
+    USAGE_COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn usage_cooldown_remaining(key: &str) -> Option<Duration> {
+    let now = Instant::now();
+    let mut cooldowns = usage_cooldowns()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let until = cooldowns.get(key).copied()?;
+    if until <= now {
+        cooldowns.remove(key);
+        return None;
+    }
+    Some(until.duration_since(now))
+}
+
+fn record_usage_cooldown(key: &str, delay: Duration) {
+    let mut cooldowns = usage_cooldowns()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let until = Instant::now() + delay;
+    cooldowns
+        .entry(key.to_string())
+        .and_modify(|saved| *saved = (*saved).max(until))
+        .or_insert(until);
+}
+
+fn clear_usage_cooldown(key: &str) {
+    usage_cooldowns()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(key);
+}
+
+fn rate_limited(
+    alias: &str,
+    account_id: Option<&str>,
+    response: &http_retry::BufferedResponse,
+) -> anyhow::Error {
+    let delay = response.retry_after.unwrap_or(Duration::from_secs(30));
+    record_usage_cooldown(account_id.unwrap_or(alias), delay);
+    UsageRateLimited { retry_after: delay }.into()
+}
 
 pub(crate) fn apply_account_routing_headers(
     mut builder: reqwest::RequestBuilder,
@@ -194,7 +250,7 @@ pub async fn fetch_usage_retried(
     profile_path: &Path,
     current_alias: &str,
 ) -> std::result::Result<UsageInfo, UsageError> {
-    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Cached).await
+    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Cached, true).await
 }
 
 /// Bypass the usage TTL for current numbers, but leave a recorded auth verdict
@@ -204,7 +260,31 @@ pub async fn fetch_usage_retried_unattended(
     profile_path: &Path,
     current_alias: &str,
 ) -> std::result::Result<UsageInfo, UsageError> {
-    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Unattended).await
+    fetch_usage_retried_inner(
+        alias,
+        profile_path,
+        current_alias,
+        Refresh::Unattended,
+        true,
+    )
+    .await
+}
+
+/// Daemon batch-refresh variant. Credential rotations are still persisted
+/// immediately; only the usage-cache write is deferred to one batch commit.
+pub(crate) async fn fetch_usage_retried_unattended_deferred_cache(
+    alias: &str,
+    profile_path: &Path,
+    current_alias: &str,
+) -> std::result::Result<UsageInfo, UsageError> {
+    fetch_usage_retried_inner(
+        alias,
+        profile_path,
+        current_alias,
+        Refresh::Unattended,
+        false,
+    )
+    .await
 }
 
 /// Bypass every cache, including a recorded auth verdict. Only for a person
@@ -214,7 +294,7 @@ pub async fn fetch_usage_retried_force(
     profile_path: &Path,
     current_alias: &str,
 ) -> std::result::Result<UsageInfo, UsageError> {
-    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Forced).await
+    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Forced, true).await
 }
 
 /// Write credentials the auth server just rotated back to the profile.
@@ -333,6 +413,7 @@ async fn fetch_usage_retried_inner(
     profile_path: &Path,
     _current_alias: &str,
     refresh: Refresh,
+    write_usage_cache: bool,
 ) -> std::result::Result<UsageInfo, UsageError> {
     if !refresh.skips_usage_cache() {
         if let Some(cached) = crate::cache::get_async(alias).await {
@@ -367,6 +448,17 @@ async fn fetch_usage_retried_inner(
     {
         debug!("{alias}: credential already rejected by the auth server, not retrying");
         return Err(known);
+    }
+    if !refresh.may_re_present_a_rejected_credential()
+        && let Some(remaining) = usage_cooldown_remaining(account_id.as_deref().unwrap_or(alias))
+    {
+        return Err(UsageError {
+            summary: "HTTP 429 rate limited".into(),
+            detail: format!(
+                "[{alias}] Usage API cooling down for {:.1}s after HTTP 429",
+                remaining.as_secs_f64()
+            ),
+        });
     }
 
     let mut at = match access_token {
@@ -465,9 +557,11 @@ async fn fetch_usage_retried_inner(
 
         match outcome.result {
             Ok(mut usage) => {
-                let cached = crate::cache::get_async(alias).await;
-                merge_cached_reset_credits(&mut usage, cached.as_ref(), chrono::Utc::now());
-                crate::cache::put_async(alias, &usage).await;
+                if write_usage_cache {
+                    let cached = crate::cache::get_async(alias).await;
+                    merge_cached_reset_credits(&mut usage, cached.as_ref(), chrono::Utc::now());
+                    crate::cache::put_async(alias, &usage).await;
+                }
                 return Ok(usage);
             }
             Err(e) => {
@@ -563,6 +657,9 @@ async fn fetch_usage_with_refresh_capturing_rejection(
         persist_rotated_tokens,
     )
     .await;
+    if result.is_ok() {
+        clear_usage_cooldown(account_id.unwrap_or(alias));
+    }
     (UsageFetchOutcome { refreshed, result }, rejected_refresh)
 }
 
@@ -588,7 +685,7 @@ async fn fetch_usage_capturing_refresh(
     // Refresh when either JWT is near expiry so account identity metadata does
     // not remain stale while the access token is still usable.
     if let Some(rt) = refresh_token
-        && token_needs_refresh(access_token, id_token, 60)
+        && token_needs_refresh(access_token, id_token, OPPORTUNISTIC_REFRESH_MARGIN)
     {
         info!("[{alias}] token expiring soon, proactively refreshing");
 
@@ -608,7 +705,7 @@ async fn fetch_usage_capturing_refresh(
                     account_id,
                     is_fedramp,
                 );
-                let resp = http_retry::send(resp, ReplaySafety::Idempotent)
+                let resp = http_retry::send(resp, ReplaySafety::DeferredGet)
                     .await
                     .context("Usage API request failed")?;
 
@@ -625,7 +722,7 @@ async fn fetch_usage_capturing_refresh(
                     return parse_usage_checked(&body);
                 }
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    return Err(UsageRateLimited.into());
+                    return Err(rate_limited(alias, account_id, &resp));
                 }
                 anyhow::bail!("Usage API failed (HTTP {status}) after proactive token refresh");
             }
@@ -650,7 +747,7 @@ async fn fetch_usage_capturing_refresh(
         account_id,
         is_fedramp,
     );
-    let resp = http_retry::send(resp, ReplaySafety::Idempotent)
+    let resp = http_retry::send(resp, ReplaySafety::DeferredGet)
         .await
         .context("Usage API request failed")?;
 
@@ -666,7 +763,7 @@ async fn fetch_usage_capturing_refresh(
         return parse_usage_checked(&body);
     }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Err(UsageRateLimited.into());
+        return Err(rate_limited(alias, account_id, &resp));
     }
 
     // The auth server already rejected this refresh token moments ago; asking
@@ -697,7 +794,7 @@ async fn fetch_usage_capturing_refresh(
                     account_id,
                     is_fedramp,
                 );
-                let resp2 = http_retry::send(resp2, ReplaySafety::Idempotent)
+                let resp2 = http_retry::send(resp2, ReplaySafety::DeferredGet)
                     .await
                     .context("Usage API retry request failed")?;
 
@@ -712,7 +809,7 @@ async fn fetch_usage_capturing_refresh(
                     return parse_usage_checked(&body);
                 }
                 if status2 == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    return Err(UsageRateLimited.into());
+                    return Err(rate_limited(alias, account_id, &resp2));
                 }
                 anyhow::bail!("Usage API still failed (HTTP {status2}) after token refresh");
             }
@@ -873,7 +970,6 @@ pub(crate) async fn do_refresh_token(
         .map_err(|e| format_reqwest_error("token refresh request failed", &e))?;
 
     let status = resp.status();
-    http_retry::wait_after_429_headers(status, resp.headers(), 0).await;
     debug!("[{alias}] token refresh response: HTTP {status}");
 
     // Read raw body first so we can log it on parse failure

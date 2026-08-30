@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v20260830.3.0 — 2026-08-30
+
+- **Provider launch is now a local fast path** — `launch` consumes the saved provider profile, model catalog, and explicit Responses probe verdict without contacting the gateway. `provider fetch-models` persists catalog metadata and `provider probe` persists conclusive support results; a saved unsupported result is refused locally. JSON launch capture drains child output with a 1 MiB limit per stream and reports `codex_stdout_truncated` / `codex_stderr_truncated`.
+- **The daemon does less background work** — The duplicate token-check timer and `token_check_interval_secs` setting are removed. Usage refresh now owns the existing 30-minute proactive rotation window, all-account refresh commits usage cache rows in one atomic write, Usage 429 responses return immediately into a shared per-account cooldown, and non-replayable POSTs no longer sleep after the server has already answered.
+- **Failed maintenance no longer rewrites success** — A partially failed scheduled warmup remains due for retry, while failure to record ancillary last-used metadata no longer turns an already completed credential switch into a reported switch failure.
+
 ## v20260830.2.0 — 2026-08-30
 
 - **Account tables show only relevant quota data** — The TUI hides Credits when no loaded account has credits and hides both 5h columns when no account has a 5-hour window. Help is scoped to the active tab, modified character keys no longer trigger plain shortcuts, and quitting with unsaved Settings now asks before discarding edits.

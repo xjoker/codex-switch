@@ -358,7 +358,6 @@ fn status(json: bool) -> Result<()> {
                 "auto_warmup": cfg.daemon.auto_warmup,
                 "warmup_times": cfg.daemon.warmup_times,
                 "timezone": cfg.daemon.timezone,
-                "token_check_interval_secs": cfg.daemon.token_check_interval_secs,
                 "switch_threshold": cfg.daemon.switch_threshold,
                 "notify": cfg.daemon.notify,
                 "log_level": cfg.daemon.log_level,

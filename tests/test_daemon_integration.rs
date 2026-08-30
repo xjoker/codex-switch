@@ -109,7 +109,6 @@ poll_interval_secs = 1
 switch_threshold = 50
 cache_refresh_interval_secs = 1
 auto_warmup = false
-token_check_interval_secs = 60
 notify = false
 # info so the startup line reaches the rotating log file (asserted below).
 log_level = "info"
@@ -387,7 +386,6 @@ cache_refresh_interval_secs = 3600
 auto_warmup = true
 warmup_times = ["{slot}"]
 timezone = "Asia/Shanghai"
-token_check_interval_secs = 3600
 notify = false
 log_level = "info"
 defer_switch_while_codex_running = false

@@ -73,6 +73,7 @@ async fn add(
     let api_key = read_api_key(&alias, api_key_stdin)?;
 
     let mut fetched_default = None;
+    let mut fetched_catalog = None;
     if fetch_models {
         let remote = provider::fetch_gateway_models_at(&base_url, &api_key).await?;
         let default_hint = models.first().map(|model| model.id.clone());
@@ -80,6 +81,7 @@ async fn add(
             provider::apply_fetched_models(&[], default_hint.as_deref(), &remote, &models)?;
         models = merged;
         fetched_default = Some(default);
+        fetched_catalog = Some(remote);
     }
     if models.is_empty() {
         anyhow::bail!("pass --model ID or --fetch-models");
@@ -99,6 +101,9 @@ async fn add(
     }
     profile.validate()?;
     provider::save(&profile)?;
+    if let Some(remote) = fetched_catalog {
+        profile.save_synced_model_catalog(&remote).await?;
+    }
     print_added(&profile, json)
 }
 
@@ -133,9 +138,10 @@ async fn refresh_models(alias: &str, picks: Vec<String>, json: bool) -> Result<(
         .into_iter()
         .map(provider::ProviderModel::from_id)
         .collect();
-    let count = provider::fetch_and_apply_models(&mut profile, &picks).await?;
+    let (count, remote) = provider::fetch_and_apply_models(&mut profile, &picks).await?;
     profile.validate()?;
     provider::save(&profile)?;
+    profile.save_synced_model_catalog(&remote).await?;
     if json {
         print_json(&serde_json::json!({
             "ok": true,
@@ -159,8 +165,10 @@ async fn refresh_models(alias: &str, picks: Vec<String>, json: bool) -> Result<(
 }
 
 async fn probe(alias: &str, model: Option<&str>, json: bool) -> Result<()> {
-    let profile = provider::load(alias)?;
+    let mut profile = provider::load(alias)?;
     let results = provider::probe_provider_models(&profile, model).await?;
+    profile.record_responses_probes(&results);
+    provider::save(&profile)?;
     if json {
         print_json(&serde_json::json!({
             "ok": true,

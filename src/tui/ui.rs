@@ -1639,7 +1639,6 @@ mod tests {
             "auto_warmup",
             "warmup_times",
             "timezone",
-            "token_check_secs",
             "notify",
             "log_level",
             "defer_while_codex",
@@ -1654,7 +1653,7 @@ mod tests {
     fn settings_tab_scrolls_to_restore_delay_on_a_short_screen() {
         let mut app = App::new();
         app.active_tab = crate::tui::app::Tab::Settings;
-        for _ in 0..17 {
+        for _ in 0..16 {
             app.settings.handle_key(crossterm::event::KeyCode::Down);
         }
         let backend = TestBackend::new(80, 24);

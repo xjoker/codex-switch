@@ -58,13 +58,10 @@ pub async fn run_daemon_loop() -> Result<()> {
 
     let cfg = config::get();
     let poll_secs = cfg.daemon.poll_interval_secs;
-    let token_secs = cfg.daemon.token_check_interval_secs;
     let cache_refresh_secs = cfg.daemon.cache_refresh_interval_secs;
 
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
     poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut token_interval = tokio::time::interval(std::time::Duration::from_secs(token_secs));
-    token_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let cache_refresh_period = std::time::Duration::from_secs(cache_refresh_secs);
     let mut cache_refresh_interval = tokio::time::interval_at(
         tokio::time::Instant::now() + cache_refresh_period,
@@ -84,9 +81,8 @@ pub async fn run_daemon_loop() -> Result<()> {
     state::write(&mut st);
 
     tracing::info!(
-        "Daemon loop started: poll={}s, token_check={}s, cache_refresh={}s, auto_warmup={}, warmup_times={:?}, timezone={}, threshold={}%",
+        "Daemon loop started: poll={}s, cache_refresh={}s, auto_warmup={}, warmup_times={:?}, timezone={}, threshold={}%",
         poll_secs,
-        token_secs,
         cache_refresh_secs,
         cfg.daemon.auto_warmup,
         cfg.daemon.warmup_times,
@@ -97,8 +93,8 @@ pub async fn run_daemon_loop() -> Result<()> {
     loop {
         tokio::select! {
             _ = poll_interval.tick() => {
-                // Failure backoff suspends polling only; token and cache
-                // timers keep running.
+                // Failure backoff suspends polling only; cache refresh and
+                // scheduled warmup keep running.
                 let now = auth::now_unix_secs();
                 if let Some(until) = st.backoff_until {
                     if now < until {
@@ -153,16 +149,6 @@ pub async fn run_daemon_loop() -> Result<()> {
                 }
                 state::write(&mut st);
             }
-            _ = token_interval.tick() => {
-                // Runs unattended on a timer: a lost write here bricks the
-                // profile with nobody watching, so it gets ERROR, not debug.
-                for failure in usage::refresh_expiring_tokens().await {
-                    // `detail` already opens with `[alias]` and carries the
-                    // underlying IO/permission cause; the field makes the
-                    // affected profile filterable in structured log output.
-                    tracing::error!(alias = %failure.alias, "{}", failure.error.detail);
-                }
-            }
             _ = cache_refresh_interval.tick() => {
                 let daemon = live_daemon_cfg();
                 let warm = warmup_on_cache_refresh(daemon.auto_warmup, &daemon.warmup_times);
@@ -215,16 +201,24 @@ async fn run_due_scheduled_warmup(st: &mut DaemonState) {
     else {
         return;
     };
-    match refresh_profile_cache(true).await {
-        Ok(summary) => tracing::info!(
-            "Scheduled warmup for {slot}: refreshed={}, warmed={}, failed={}",
-            summary.refreshed,
-            summary.warmed,
-            summary.failed
-        ),
-        Err(e) => tracing::warn!("Scheduled warmup for {slot} skipped: {e}"),
+    let completed = match refresh_profile_cache(true).await {
+        Ok(summary) => {
+            tracing::info!(
+                "Scheduled warmup for {slot}: refreshed={}, warmed={}, failed={}",
+                summary.refreshed,
+                summary.warmed,
+                summary.failed
+            );
+            summary.completed()
+        }
+        Err(e) => {
+            tracing::warn!("Scheduled warmup for {slot} skipped: {e}");
+            false
+        }
+    };
+    if completed {
+        st.last_warmup_slot = Some(warmup_schedule::slot_stamp_for(now, &slot));
     }
-    st.last_warmup_slot = Some(warmup_schedule::slot_stamp_for(now, &slot));
     st.last_cache_refresh_at = Some(auth::now_unix_secs());
     state::write(st);
 }
@@ -362,7 +356,11 @@ async fn check_and_switch() -> Result<PollOutcome> {
             );
             return Ok(PollOutcome::NoAction);
         }
-        cache::set_last_used(&best_alias)?;
+        if let Err(error) = cache::set_last_used(&best_alias) {
+            tracing::warn!(
+                "Switched to '{best_alias}', but failed to record last-used metadata: {error:#}"
+            );
+        }
 
         if cfg.daemon.notify {
             super::notify::send_notification(&format!(
@@ -383,7 +381,7 @@ async fn check_and_switch() -> Result<PollOutcome> {
 
 #[cfg(test)]
 mod tests {
-    use super::{current_usage_percent_for_switch, poll_backoff_secs};
+    use super::{CacheRefreshSummary, current_usage_percent_for_switch, poll_backoff_secs};
     use crate::usage::{UsageInfo, WindowUsage};
     use std::sync::{
         Arc,
@@ -410,6 +408,27 @@ mod tests {
         };
 
         assert!(current_usage_percent_for_switch(&usage) >= 80.0);
+    }
+
+    #[test]
+    fn scheduled_warmup_is_complete_only_when_every_account_succeeds() {
+        assert!(CacheRefreshSummary::default().completed());
+        assert!(
+            CacheRefreshSummary {
+                refreshed: 2,
+                warmed: 1,
+                failed: 0,
+            }
+            .completed()
+        );
+        assert!(
+            !CacheRefreshSummary {
+                refreshed: 1,
+                warmed: 0,
+                failed: 1,
+            }
+            .completed()
+        );
     }
 
     #[tokio::test]
@@ -443,6 +462,12 @@ struct CacheRefreshSummary {
     failed: usize,
 }
 
+impl CacheRefreshSummary {
+    fn completed(&self) -> bool {
+        self.failed == 0
+    }
+}
+
 async fn refresh_profile_cache(auto_warmup: bool) -> Result<CacheRefreshSummary> {
     let profiles = profile::list_profiles()?;
     if profiles.is_empty() {
@@ -461,41 +486,52 @@ async fn refresh_profile_cache(auto_warmup: bool) -> Result<CacheRefreshSummary>
         let sem = semaphore.clone();
         tasks.spawn(async move {
             let Ok(_permit) = sem.acquire_owned().await else {
-                return (
-                    alias,
-                    false,
-                    false,
-                    Some("usage limiter closed".to_string()),
-                );
+                return (alias, None, false, Some("usage limiter closed".to_string()));
             };
             let path = match profile::profile_auth_path(&alias) {
                 Ok(path) => path,
-                Err(e) => return (alias, false, false, Some(e.to_string())),
+                Err(e) => return (alias, None, false, Some(e.to_string())),
             };
 
-            let usage = match usage::fetch_usage_retried_unattended(&alias, &path, &current).await {
-                Ok(usage) => usage,
-                Err(e) => return (alias, false, false, Some(e.summary)),
-            };
+            let usage =
+                match usage::fetch_usage_retried_unattended_deferred_cache(&alias, &path, &current)
+                    .await
+                {
+                    Ok(usage) => usage,
+                    Err(e) => return (alias, None, false, Some(e.summary)),
+                };
 
             if !auto_warmup || usage::usage_has_active_warmup_window(&usage, now) {
-                return (alias, true, false, None);
+                return (alias, Some(usage), false, None);
             }
 
             if let Err(e) = warmup::warmup_account(&alias, &path).await {
-                return (alias, true, false, Some(format!("warmup failed: {e}")));
+                return (
+                    alias,
+                    Some(usage),
+                    false,
+                    Some(format!("warmup failed: {e}")),
+                );
             }
 
-            if let Err(e) = usage::fetch_usage_retried_unattended(&alias, &path, &current).await {
-                tracing::warn!("[{alias}] post-warmup cache refresh failed: {}", e.summary);
-            }
-            (alias, true, true, None)
+            let usage =
+                match usage::fetch_usage_retried_unattended_deferred_cache(&alias, &path, &current)
+                    .await
+                {
+                    Ok(updated) => updated,
+                    Err(e) => {
+                        tracing::warn!("[{alias}] post-warmup cache refresh failed: {}", e.summary);
+                        usage
+                    }
+                };
+            (alias, Some(usage), true, None)
         });
     }
 
     let mut summary = CacheRefreshSummary::default();
+    let mut updates = Vec::new();
     while let Some(res) = tasks.join_next().await {
-        let (alias, refreshed, warmed, err) = match res {
+        let (alias, usage, warmed, err) = match res {
             Ok(value) => value,
             Err(e) => {
                 summary.failed += 1;
@@ -503,8 +539,9 @@ async fn refresh_profile_cache(auto_warmup: bool) -> Result<CacheRefreshSummary>
                 continue;
             }
         };
-        if refreshed {
+        if let Some(usage) = usage {
             summary.refreshed += 1;
+            updates.push((alias.clone(), usage));
         }
         if warmed {
             summary.warmed += 1;
@@ -514,6 +551,8 @@ async fn refresh_profile_cache(auto_warmup: bool) -> Result<CacheRefreshSummary>
             tracing::warn!("[{alias}] cache refresh failed: {err}");
         }
     }
+
+    cache::put_many_async(updates).await?;
 
     Ok(summary)
 }

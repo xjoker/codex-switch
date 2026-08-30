@@ -129,7 +129,7 @@ pub(crate) fn should_fetch_reset_credit_details(usage: &UsageInfo) -> bool {
     }
 }
 
-pub(super) fn merge_cached_reset_credits(
+pub(crate) fn merge_cached_reset_credits(
     usage: &mut UsageInfo,
     cached: Option<&UsageInfo>,
     now: chrono::DateTime<chrono::Utc>,

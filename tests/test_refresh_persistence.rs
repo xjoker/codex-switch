@@ -502,12 +502,12 @@ async fn rotated_refresh_token_is_persisted_even_when_usage_fails_afterwards() {
     server.shutdown();
 }
 
-/// Once rotation succeeds, a later Usage retry delay must not extend the
-/// interval in which the only valid refresh token exists solely in memory.
+/// The usage path owns proactive rotation for the daemon, and a later 429
+/// must not delay persisting the only valid replacement refresh token.
 #[tokio::test]
-async fn proactive_rotation_is_persisted_before_usage_rate_limit_backoff() {
+async fn thirty_minute_rotation_is_persisted_before_usage_rate_limit_return() {
     let _lock = ENV_LOCK.lock().await;
-    let expiring_access = jwt_expiring_in(30);
+    let expiring_access = jwt_expiring_in(10 * 60);
     let server = MockServer::start(
         vec![(
             "access_1".to_string(),
@@ -546,7 +546,7 @@ async fn proactive_rotation_is_persisted_before_usage_rate_limit_backoff() {
     assert_eq!(
         stored_refresh_token(&profile_path),
         "refresh_1",
-        "the rotated token must reach disk before any Usage 429 sleep"
+        "the rotated token must reach disk before the Usage 429 is returned"
     );
 
     fetch.abort();
@@ -1837,6 +1837,73 @@ async fn an_unattended_refresh_still_ignores_a_fresh_usage_cache() {
         "an unattended refresh must fetch current numbers, saw {:?}",
         server.usage_calls()
     );
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn usage_429_returns_immediately_and_cools_down_the_account() {
+    let _lock = ENV_LOCK.lock().await;
+    let access = jwt_expiring_in(7_200);
+    let server = MockServer::start(
+        vec![(
+            access.clone(),
+            vec![
+                reply(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    json!({"detail": "slow down"}),
+                ),
+                usage_ok(),
+                usage_ok(),
+            ],
+        )],
+        vec![rotation(1)],
+    )
+    .await;
+    let fx = fixture(&server, "usage-cooldown", &access);
+
+    let first = tokio::time::timeout(
+        Duration::from_secs(2),
+        codex_switch::usage::fetch_usage_retried_unattended(
+            "usage-cooldown",
+            &fx.profile_path,
+            "usage-cooldown",
+        ),
+    )
+    .await
+    .expect("HTTP 429 must be returned to the scheduler instead of sleeping")
+    .expect_err("the first response is rate limited");
+    assert!(first.summary.contains("429"), "{}", first.summary);
+    let calls_after_first = server.usage_calls().len();
+
+    codex_switch::usage::fetch_usage_retried_unattended(
+        "usage-cooldown",
+        &fx.profile_path,
+        "usage-cooldown",
+    )
+    .await
+    .expect_err("the account remains in its shared cooldown");
+    assert_eq!(
+        server.usage_calls().len(),
+        calls_after_first,
+        "a later daemon pass must not contact an account still cooling down"
+    );
+
+    codex_switch::usage::fetch_usage_retried_force(
+        "usage-cooldown",
+        &fx.profile_path,
+        "usage-cooldown",
+    )
+    .await
+    .expect("an explicit refresh bypasses the cooldown");
+    let calls_after_force = server.usage_calls().len();
+    codex_switch::usage::fetch_usage_retried_unattended(
+        "usage-cooldown",
+        &fx.profile_path,
+        "usage-cooldown",
+    )
+    .await
+    .expect("a successful force refresh clears the shared cooldown");
+    assert_eq!(server.usage_calls().len(), calls_after_force + 1);
     server.shutdown();
 }
 

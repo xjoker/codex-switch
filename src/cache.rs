@@ -215,6 +215,27 @@ fn to_entry(u: &UsageInfo) -> CacheEntry {
     }
 }
 
+fn apply_usage_updates(
+    cache: &mut CacheFile,
+    updates: &[(String, UsageInfo)],
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    for (alias, update) in updates {
+        let mut update = update.clone();
+        let cached = cache.entries.get(alias).map(from_entry);
+        crate::usage::merge_cached_reset_credits(&mut update, cached.as_ref(), now);
+        let entry = to_entry(&update);
+        if cache
+            .entries
+            .get(alias)
+            .is_some_and(|cached| cached.ts >= entry.ts)
+        {
+            continue;
+        }
+        cache.entries.insert(alias.clone(), entry);
+    }
+}
+
 fn from_entry(e: &CacheEntry) -> UsageInfo {
     use crate::usage::WindowUsage;
     let primary = if e.primary_used.is_some() || e.primary_reset.is_some() {
@@ -281,6 +302,17 @@ pub fn put(alias: &str, usage: &UsageInfo) {
     }) {
         tracing::warn!("Failed to write cache: {err}");
     }
+}
+
+fn put_many(updates: &[(String, UsageInfo)]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    with_cache_lock(|| {
+        let mut cache = load_cache();
+        apply_usage_updates(&mut cache, updates, chrono::Utc::now());
+        save_cache(&cache)
+    })
 }
 
 /// Update only the Reset Card snapshot without replacing newer main Usage data.
@@ -571,6 +603,14 @@ pub async fn put_async(alias: &str, usage: &UsageInfo) {
     let _ = tokio::task::spawn_blocking(move || put(&alias, &usage)).await;
 }
 
+/// Persist a completed multi-account refresh with one cache lock and one
+/// atomic replacement instead of rewriting the whole JSON file per account.
+pub(crate) async fn put_many_async(updates: Vec<(String, UsageInfo)>) -> Result<()> {
+    tokio::task::spawn_blocking(move || put_many(&updates))
+        .await
+        .context("batch cache task panicked")?
+}
+
 /// Async wrapper around [`get_auth_failure`]; see [`get_async`] for rationale.
 pub async fn get_auth_failure_async(alias: &str, refresh_token: &str) -> Option<UsageError> {
     let alias = alias.to_string();
@@ -684,6 +724,63 @@ mod tests {
             restored.additional_limits[0].metered_feature.as_deref(),
             Some("codex_bengalfox")
         );
+    }
+
+    #[test]
+    fn batch_usage_update_applies_every_account_before_persisting() {
+        let mut cache = CacheFile::default();
+        let updates = vec![
+            (
+                "one".to_string(),
+                UsageInfo {
+                    fetched_at: Some(101),
+                    credits_balance: Some(1.0),
+                    ..UsageInfo::default()
+                },
+            ),
+            (
+                "two".to_string(),
+                UsageInfo {
+                    fetched_at: Some(202),
+                    credits_balance: Some(2.0),
+                    ..UsageInfo::default()
+                },
+            ),
+        ];
+
+        apply_usage_updates(&mut cache, &updates, chrono::Utc::now());
+
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.entries["one"].ts, 101);
+        assert_eq!(cache.entries["two"].ts, 202);
+    }
+
+    #[test]
+    fn batch_usage_update_preserves_an_entry_with_the_same_or_newer_timestamp() {
+        for incoming_ts in [101, 202] {
+            let mut cache = CacheFile::default();
+            cache.entries.insert(
+                "one".to_string(),
+                to_entry(&UsageInfo {
+                    fetched_at: Some(202),
+                    credits_balance: Some(2.0),
+                    ..UsageInfo::default()
+                }),
+            );
+            let updates = vec![(
+                "one".to_string(),
+                UsageInfo {
+                    fetched_at: Some(incoming_ts),
+                    credits_balance: Some(1.0),
+                    ..UsageInfo::default()
+                },
+            )];
+
+            apply_usage_updates(&mut cache, &updates, chrono::Utc::now());
+
+            assert_eq!(cache.entries["one"].ts, 202);
+            assert_eq!(cache.entries["one"].credits_balance, Some(2.0));
+        }
     }
 
     #[test]

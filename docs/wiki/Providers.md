@@ -50,7 +50,7 @@ Optional flags:
 | `--env-key` | `CODEX_SWITCH_<ALIAS>_KEY` | Environment variable Codex reads the key from at launch |
 | `--wire-api` | `responses` | Codex wire protocol; current Codex only accepts `responses` |
 | `--set KEY=VALUE` | none | Extra provider-level `codex -c` override (repeatable) |
-| `--metadata-fallback URL\|PATH\|none` | public OpenRouter `/models` | Catalog metadata fallback after the gateway `/models` call |
+| `--metadata-fallback URL\|PATH\|none` | public OpenRouter `/models` | Catalog metadata fallback during explicit model sync |
 | `--api-key-stdin` | off | Read the key from stdin instead of a hidden prompt |
 
 `--set` is for overrides that are not per-model. Values are passed to Codex verbatim — Codex, not codex-switch, decides which keys and values are valid — so only the `KEY=VALUE` shape is checked.
@@ -84,7 +84,7 @@ codex-switch launch openrouter -- exec --json "review this"
 codex-switch launch openrouter -- -s workspace-write -a never
 ```
 
-`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, points `CODEX_HOME` at a per-launch run directory (prompts/skills/`AGENTS.md` linked to the user home), and writes a Codex model catalog next to `provider.toml` so `/model` lists the **saved** provider slugs. Codex 0.149 applies those `-c` flags on the subcommand (`codex exec -c …`); putting them in front of `exec` is ignored. `launch` therefore places overrides after the subcommand and also moves user flags that preceded it (so `launch or -- -m one-shot exec hi` becomes `codex exec -c … -m one-shot hi`). Interactive launch has no subcommand, so the flags stay in front. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
+`launch` does **not** replace `$CODEX_HOME/auth.json`. It starts `codex` with `-c` overrides that define and select the provider and the chosen model (or `default_model`), injects the API key into the child process environment under `env_key`, points `CODEX_HOME` at a per-launch run directory (prompts/skills/`AGENTS.md` linked to the user home), and passes the model catalog saved by `provider fetch-models` / `--fetch-models` so `/model` lists the **saved** provider slugs. A provider created only with `--model` gets a local fallback catalog on first launch. Launch itself performs no gateway request. Codex 0.149 applies those `-c` flags on the subcommand (`codex exec -c …`); putting them in front of `exec` is ignored. `launch` therefore places overrides after the subcommand and also moves user flags that preceded it (so `launch or -- -m one-shot exec hi` becomes `codex exec -c … -m one-shot hi`). Interactive launch has no subcommand, so the flags stay in front. Extra arguments after `--` are appended as Codex CLI flags. `--model` before `--` must name a model saved on that provider; `--model` / `-m` after `--` is forwarded to Codex and drops the competing per-model `-c` pairs (`model`, `model_reasoning_effort`, `web_search`).
 
 Put `--` before any Codex argv that could be mistaken for a codex-switch alias or flag (`exec`, `--json`, `--color`, a prompt that looks like a name). `codex-switch launch -- exec --json "…"` auto-selects a ChatGPT profile; it cannot target a provider.
 
@@ -115,7 +115,7 @@ codex-switch provider probe AI-KR
 codex-switch provider probe AI-KR --model deepseek-v4-flash
 ```
 
-That POSTs `{base_url}/responses` with only `{"model":"<slug>"}` (no `input`). A supporting Responses handler returns HTTP 400 at validation. HTTP 404 `bad_response_status_code` / `Not Found` means Chat Completions only — Codex cannot use it. Provider `launch` runs the same probe and refuses an unsupported slug instead of opening the Codex TUI onto that 404.
+That POSTs `{base_url}/responses` with only `{"model":"<slug>"}` (no `input`). A supporting Responses handler returns HTTP 400 at validation. HTTP 404 `bad_response_status_code` / `Not Found` means Chat Completions only — Codex cannot use it. Conclusive results are saved in `provider.toml`; launch reads that verdict offline and refuses a saved unsupported slug. Run `provider probe` again after the endpoint changes.
 
 ## Model-specific request settings
 

@@ -29,7 +29,6 @@ enum Focus {
     AutoWarmup,
     WarmupTimes,
     Timezone,
-    TokenCheck,
     Notify,
     LogLevel,
     DeferSwitch,
@@ -50,7 +49,6 @@ const FOCUS_ORDER: &[Focus] = &[
     Focus::AutoWarmup,
     Focus::WarmupTimes,
     Focus::Timezone,
-    Focus::TokenCheck,
     Focus::Notify,
     Focus::LogLevel,
     Focus::DeferSwitch,
@@ -292,7 +290,6 @@ impl SettingsState {
                 .cloned()
                 .unwrap_or_default(),
             Focus::Timezone => self.draft.daemon.timezone.clone(),
-            Focus::TokenCheck => self.draft.daemon.token_check_interval_secs.to_string(),
             Focus::RestoreDelay => self.draft.launch.restore_delay_secs.to_string(),
             Focus::TeamPriority
             | Focus::AutoWarmup
@@ -381,10 +378,6 @@ impl SettingsState {
                     self.draft.daemon.timezone = raw;
                 }
             }
-            Focus::TokenCheck => {
-                self.draft.daemon.token_check_interval_secs =
-                    parse_u64(&raw, 1, "daemon.token_check_interval_secs")?;
-            }
             Focus::RestoreDelay => {
                 self.draft.launch.restore_delay_secs =
                     parse_u64(&raw, 1, "launch.restore_delay_secs")?;
@@ -422,7 +415,7 @@ impl SettingsState {
             message.push_str(&warnings.join(" "));
         }
         message.push_str(
-            ". Restart the daemon to apply poll/token/cache intervals; warmup slots and timezone are re-read about once a minute.",
+            ". Restart the daemon to apply poll/cache intervals; warmup slots and timezone are re-read about once a minute.",
         );
         SettingsOutcome::Saved { message }
     }
@@ -790,18 +783,6 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
 
     push_field(
         settings,
-        Focus::TokenCheck,
-        "token_check_secs",
-        field_value(
-            settings,
-            Focus::TokenCheck,
-            &settings.draft.daemon.token_check_interval_secs.to_string(),
-        ),
-        &mut lines,
-        &mut focused_line,
-    );
-    push_field(
-        settings,
         Focus::Notify,
         "notify",
         bool_label(settings.draft.daemon.notify).to_string(),
@@ -1009,7 +990,6 @@ mod tests {
             auto_warmup: _,
             warmup_times: _,
             timezone: _,
-            token_check_interval_secs: _,
             notify: _,
             log_level: _,
             defer_switch_while_codex_running: _,
@@ -1017,7 +997,7 @@ mod tests {
         let crate::config::LaunchConfig {
             restore_delay_secs: _,
         } = launch;
-        assert_eq!(FOCUS_ORDER.len(), 18);
+        assert_eq!(FOCUS_ORDER.len(), 17);
     }
 
     fn type_value(settings: &mut SettingsState, value: &str) {
@@ -1082,8 +1062,6 @@ mod tests {
         settings.handle_key(KeyCode::Enter);
         move_to(&mut settings, Focus::Timezone);
         type_value(&mut settings, "UTC");
-        move_to(&mut settings, Focus::TokenCheck);
-        type_value(&mut settings, "180");
         move_to(&mut settings, Focus::Notify);
         settings.handle_key(KeyCode::Enter);
         move_to(&mut settings, Focus::LogLevel);
@@ -1117,7 +1095,6 @@ mod tests {
         assert!(loaded.daemon.auto_warmup);
         assert_eq!(loaded.daemon.warmup_times, vec!["08:00".to_string()]);
         assert_eq!(loaded.daemon.timezone, "UTC");
-        assert_eq!(loaded.daemon.token_check_interval_secs, 180);
         assert!(loaded.daemon.notify);
         assert_eq!(loaded.daemon.log_level, "warn");
         assert!(!loaded.daemon.defer_switch_while_codex_running);

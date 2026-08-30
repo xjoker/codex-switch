@@ -515,7 +515,6 @@ async fn warmup_additional_models(
             .send()
             .await
             .map_err(|e| crate::auth::format_reqwest_error("additional warmup failed", &e))?;
-        http_retry::wait_after_429_headers(resp.status(), resp.headers(), 0).await;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -688,8 +687,6 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
     .await
     .map_err(|e| crate::auth::format_reqwest_error("warmup request failed", &e))?;
 
-    http_retry::wait_after_429_headers(resp.status(), resp.headers(), 0).await;
-
     let status = resp.status();
     debug!("[{alias}] warmup status: {status}");
 
@@ -742,8 +739,6 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                 .send()
                 .await
                 .map_err(|e| crate::auth::format_reqwest_error("warmup retry failed", &e))?;
-                http_retry::wait_after_429_headers(retry_resp.status(), retry_resp.headers(), 1)
-                    .await;
                 let retry_status = retry_resp.status();
                 if retry_status.is_success() {
                     let _ = retry_resp.chunk().await;
@@ -798,12 +793,6 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                         .map_err(|e| {
                             crate::auth::format_reqwest_error("warmup retry failed", &e)
                         })?;
-                        http_retry::wait_after_429_headers(
-                            retry_resp.status(),
-                            retry_resp.headers(),
-                            1,
-                        )
-                        .await;
                         let retry_status = retry_resp.status();
                         if retry_status.is_success() {
                             let _ = retry_resp.chunk().await;

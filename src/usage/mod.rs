@@ -7,12 +7,14 @@ mod parse;
 mod reset_credits;
 mod scoring;
 
-pub(crate) use api::{apply_account_routing_headers, do_refresh_token};
+pub(crate) use api::{
+    apply_account_routing_headers, do_refresh_token, fetch_usage_retried_unattended_deferred_cache,
+};
 pub use api::{
     fetch_usage_retried, fetch_usage_retried_force, fetch_usage_retried_unattended,
     refresh_expiring_tokens, validate_import_auth,
 };
-pub(crate) use reset_credits::should_fetch_reset_credit_details;
+pub(crate) use reset_credits::{merge_cached_reset_credits, should_fetch_reset_credit_details};
 // Re-exported for the lib target's public API (used by integration tests via
 // `codex_switch::usage::X`); the binary target doesn't call these through this
 // path itself, so they'd otherwise look unused there.

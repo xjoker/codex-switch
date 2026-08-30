@@ -50,12 +50,6 @@ impl AppConfig {
             warnings.push("config.daemon.poll_interval_secs=0 is invalid; using 60 instead".into());
             self.daemon.poll_interval_secs = 60;
         }
-        if self.daemon.token_check_interval_secs == 0 {
-            warnings.push(
-                "config.daemon.token_check_interval_secs=0 is invalid; using 300 instead".into(),
-            );
-            self.daemon.token_check_interval_secs = 300;
-        }
         // Not merely a tidy default: at zero, `launch` restores the original
         // auth.json before Codex has read the staged one, so the session runs
         // on the wrong account with nothing reporting it.
@@ -161,8 +155,6 @@ pub struct DaemonConfig {
     /// IANA timezone for `warmup_times` (e.g. `Asia/Shanghai`). Empty = system local.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub timezone: String,
-    /// Token expiry check interval in seconds (default: 300)
-    pub token_check_interval_secs: u64,
     /// Send desktop notification on switch (default: false)
     pub notify: bool,
     /// Log level for daemon (default: "error")
@@ -180,7 +172,6 @@ impl Default for DaemonConfig {
             auto_warmup: false,
             warmup_times: Vec::new(),
             timezone: String::new(),
-            token_check_interval_secs: 300,
             notify: false,
             log_level: "error".to_string(),
             defer_switch_while_codex_running: true,
@@ -215,6 +206,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 struct DeprecatedConfigProbe {
     #[serde(rename = "use")]
     use_cfg: Option<DeprecatedUseProbe>,
+    daemon: Option<DeprecatedDaemonProbe>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -224,25 +216,39 @@ struct DeprecatedUseProbe {
     min_remaining: Option<toml::Value>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DeprecatedDaemonProbe {
+    token_check_interval_secs: Option<toml::Value>,
+}
+
 fn deprecated_key_warnings(raw: &str) -> Vec<String> {
     let mut warnings = Vec::new();
     let Ok(probe) = toml::from_str::<DeprecatedConfigProbe>(raw) else {
         return warnings;
     };
-    let Some(use_cfg) = probe.use_cfg else {
-        return warnings;
-    };
-    if use_cfg.mode.is_some() {
-        warnings.push(
-            "config: [use] 'mode' is deprecated and ignored in v0.0.13+, \
-             the adaptive algorithm replaces all selection modes"
-                .into(),
-        );
+    if let Some(use_cfg) = probe.use_cfg {
+        if use_cfg.mode.is_some() {
+            warnings.push(
+                "config: [use] 'mode' is deprecated and ignored in v0.0.13+, \
+                 the adaptive algorithm replaces all selection modes"
+                    .into(),
+            );
+        }
+        if use_cfg.min_remaining.is_some() {
+            warnings.push(
+                "config: [use] 'min_remaining' is deprecated and ignored in v0.0.13+, \
+                 the adaptive algorithm replaces all selection modes"
+                    .into(),
+            );
+        }
     }
-    if use_cfg.min_remaining.is_some() {
+    if probe
+        .daemon
+        .is_some_and(|daemon| daemon.token_check_interval_secs.is_some())
+    {
         warnings.push(
-            "config: [use] 'min_remaining' is deprecated and ignored in v0.0.13+, \
-             the adaptive algorithm replaces all selection modes"
+            "config: [daemon] 'token_check_interval_secs' is ignored; token refresh now runs as part of usage refresh"
                 .into(),
         );
     }
@@ -389,20 +395,29 @@ mod tests {
     }
 
     #[test]
-    fn daemon_zero_intervals_use_defaults() {
-        let config = load_from_str(
+    fn daemon_normalizes_remaining_intervals_and_ignores_legacy_token_timer() {
+        let (config, warnings) = super::load_from_str_with_warnings(
             r#"
 [daemon]
 poll_interval_secs = 0
-token_check_interval_secs = 0
 cache_refresh_interval_secs = 0
+token_check_interval_secs = 17
 "#,
         )
         .unwrap();
 
         assert_eq!(config.daemon.poll_interval_secs, 60);
-        assert_eq!(config.daemon.token_check_interval_secs, 300);
         assert_eq!(config.daemon.cache_refresh_interval_secs, 300);
+        let saved = toml::to_string(&config).unwrap();
+        assert!(
+            !saved.contains("token_check_interval_secs"),
+            "token rotation is a usage-fetch side effect, not a fourth daemon timer: {saved}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("token_check_interval_secs"))
+        );
     }
 
     /// A zero restore delay makes `launch` put the original auth.json back
