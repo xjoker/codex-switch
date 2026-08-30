@@ -66,8 +66,9 @@ async fn main() {
     let raw: Vec<String> = std::env::args().collect();
     let (clap_argv, launch_passthrough) = extract_launch_passthrough(&raw);
     let cli = Cli::parse_from(&clap_argv);
+    let is_tui = matches!(&cli.command, Commands::Tui);
     let use_json = cli.json || cli.json_pretty;
-    let message_mode = if matches!(&cli.command, Commands::Tui) {
+    let message_mode = if is_tui {
         MessageMode::Silent
     } else if use_json {
         MessageMode::Stderr
@@ -110,7 +111,23 @@ async fn main() {
             None
         }
     };
-    if let Some(file_writer) = file_writer {
+    if is_tui {
+        use tracing_subscriber::fmt::writer::MakeWriterExt;
+        let tui_writer = logging::tui_log_writer();
+        if let Some(file_writer) = file_writer {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(tui_writer.and(file_writer))
+                .init();
+        } else {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(tui_writer)
+                .init();
+        }
+    } else if let Some(file_writer) = file_writer {
         use tracing_subscriber::fmt::writer::MakeWriterExt;
         tracing_subscriber::fmt()
             .with_env_filter(filter)

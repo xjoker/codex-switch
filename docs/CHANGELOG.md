@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20260830.1.0 — 2026-08-30
+
+- **TUI diagnostics stay inside a dedicated log tab** — Runtime errors and debug traces are captured in a bounded in-memory session log instead of writing through the active terminal screen. The existing `Tab` cycle now includes Logs, where keyboard scrolling keeps long failures inspectable without deforming the account view; rotated file logging continues unchanged.
+
 ## v20260828.5.0 — 2026-08-28
 
 - **Concurrent provider launches** — Each `launch` gets its own Codex home under `$CODEX_SWITCH_HOME/providers/<alias>/runs/`. `prompts/`, `skills/`, and `AGENTS.md` are linked to the user home so edits are the real files. MCP and other non-model keys are copied into that run `config.toml` and three-way-merged back on exit (short lock). ChatGPT `model` / `model_reasoning_effort` in the user `config.toml` are left alone for the whole session, so overlapping models cannot restore over each other.
@@ -53,7 +57,6 @@
 - **TUI provider form** — Add starts typing the alias immediately; Enter commits each field and continues to the next. Tab moves between fields; `j`/`k` move inside Models. A visible `+ add model` row adds another model (also `+` / `=` / `a`); `d` / `-` / Delete ask for confirmation before removing, and the last model cannot be removed. Edit still starts on Base URL in navigation mode so `s` is save.
 - **TUI palette** — Every TUI style now sets the designed dark background with the foreground, so a light terminal (xfce4-terminal / macOS Terminal defaults) cannot wash the yellow keys and cyan headings back to black-on-white. The dashboard also keeps that palette when `NO_COLOR` is set; `NO_COLOR` still disables color on CLI output.
 - **Custom API providers** — Save an OpenRouter-style endpoint under `$CODEX_SWITCH_HOME/providers/` and start Codex with `codex-switch launch <alias>`. One provider holds several models; reasoning effort and `web_search` are per model. The TUI Providers tab uses a single form dialog to add or edit (`a` / `e`), plus rename (`n`) and remove (`d`). `launch --model` selects a saved model. The API key is read from a hidden prompt or `--api-key-stdin`, stored mode `0600`, and injected into the child environment; it never appears on the command line, and `$CODEX_HOME` is not written. `use` and auto-select stay ChatGPT-only. Codex currently speaks only `wire_api = "responses"`, so Chat Completions-only vendors (including DeepSeek's official API) must be reached through a Responses-capable gateway. See [Custom API providers](wiki/Providers.md).
-
 ## v20260811.3.0 — 2026-08-11
 
 - **Reset Card details refresh without blocking the account table** — Main Usage results render immediately while card details refresh in a serialized background queue. The Cards column shows a cyan refresh marker during work and a yellow waiting marker during HTTP 429 cooldown, while preserving the last known unexpired cards.

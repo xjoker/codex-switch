@@ -63,6 +63,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         }
         Tab::Providers => render_providers_tab(f, app, vertical[1]),
         Tab::Settings => super::settings::render_settings_tab(f, &app.settings, vertical[1]),
+        Tab::Logs => render_logs(f, app, vertical[1]),
     }
 
     render_status_bar(f, app, vertical[2]);
@@ -78,6 +79,56 @@ pub fn render(f: &mut Frame, app: &mut App) {
     } else if let Some(menu) = app.menu.as_mut() {
         menu.render(f, area);
     }
+}
+
+fn render_logs(f: &mut Frame, app: &mut App, area: Rect) {
+    let lines = app.log_writer.lines();
+    let inner_width = area.width.saturating_sub(2).max(1);
+    let visual_lines = if lines.is_empty() {
+        vec!["No logs in this session.".to_string()]
+    } else {
+        hard_wrap_log_lines(&lines, inner_width)
+    };
+    let visible_rows = usize::from(area.height.saturating_sub(2)).max(1);
+    let max_scroll = visual_lines.len().saturating_sub(visible_rows);
+    let bottom_offset = usize::from(app.log_scroll).min(max_scroll);
+    app.log_scroll = u16::try_from(bottom_offset).unwrap_or(u16::MAX);
+    let end = visual_lines.len().saturating_sub(bottom_offset);
+    let start = end.saturating_sub(visible_rows);
+    let text = visual_lines[start..end].join("\n");
+    let block = Block::default()
+        .title(" Session logs ")
+        .borders(Borders::ALL)
+        .border_style(base().fg(C_BLUE))
+        .style(base());
+    f.render_widget(
+        Paragraph::new(text).style(base().fg(C_GRAY)).block(block),
+        area,
+    );
+}
+
+fn hard_wrap_log_lines(lines: &[String], width: u16) -> Vec<String> {
+    let width = usize::from(width.max(1));
+    let mut wrapped = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        let mut row = String::new();
+        let mut row_width: usize = 0;
+        for ch in line.chars() {
+            let ch_width = display_width(ch.encode_utf8(&mut [0; 4]));
+            if row_width > 0 && row_width.saturating_add(ch_width) > width {
+                wrapped.push(std::mem::take(&mut row));
+                row_width = 0;
+            }
+            row.push(ch);
+            row_width = row_width.saturating_add(ch_width);
+        }
+        wrapped.push(row);
+    }
+    wrapped
 }
 
 fn render_help_popup(f: &mut Frame, state: &mut popup::PopupState, area: ratatui::layout::Rect) {
@@ -772,7 +823,7 @@ pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
     }
 }
 
-/// Top tab bar: Accounts, Providers, Settings.
+/// Top tab bar: Accounts, Providers, Settings, Logs.
 fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     let active = base().fg(BG).bg(C_CYAN).add_modifier(Modifier::BOLD);
     let inactive = base().fg(C_GRAY);
@@ -795,6 +846,8 @@ fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled("  ", base()),
         Span::styled(" Settings ", style(Tab::Settings)),
+        Span::styled("  ", base()),
+        Span::styled(" Logs ", style(Tab::Logs)),
         Span::styled("   Tab to switch", base().fg(DIM)),
     ]);
     f.render_widget(Paragraph::new(line).style(base()), area);
@@ -902,6 +955,20 @@ pub(super) fn credits_table_color(u: &UsageInfo) -> Color {
 }
 
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    if app.active_tab == Tab::Logs {
+        let line = Line::from(vec![
+            Span::styled(" tab", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" switch tabs │ ", base().fg(DIM)),
+            Span::styled("j k / PgUp PgDn", base().fg(C_YELLOW)),
+            Span::styled(" scroll │ ", base().fg(DIM)),
+            Span::styled("end", base().fg(C_YELLOW)),
+            Span::styled(" latest │ ", base().fg(DIM)),
+            Span::styled("q", base().fg(C_YELLOW)),
+            Span::styled(" quit", base().fg(DIM)),
+        ]);
+        f.render_widget(Paragraph::new(line).style(base()), area);
+        return;
+    }
     // Rename input takes top priority
     if let Some(rs) = &app.rename {
         let line = Line::from(vec![
@@ -1372,7 +1439,7 @@ fn status_bar_height(app: &App, width: u16) -> usize {
     {
         return 1;
     }
-    if app.active_tab == Tab::Providers || app.active_tab == Tab::Settings {
+    if matches!(app.active_tab, Tab::Providers | Tab::Settings | Tab::Logs) {
         return 1;
     }
     build_help_lines(width as usize).len()
@@ -1387,10 +1454,12 @@ mod tests {
         usage_gauges_height,
     };
     use crate::jwt::AccountInfo;
-    use crate::tui::app::{AccountEntry, App, UsageStatus};
+    use crate::tui::app::{AccountEntry, App, Tab, UsageStatus};
     use crate::usage::{AdditionalRateLimit, ResetCredit, UsageInfo, WindowUsage};
     use ratatui::style::Modifier;
     use ratatui::{Terminal, backend::TestBackend};
+    use std::io::Write;
+    use tracing_subscriber::fmt::MakeWriter;
 
     fn row_text(backend: &TestBackend, y: u16) -> String {
         let area = backend.buffer().area;
@@ -1543,6 +1612,77 @@ mod tests {
             joined.contains("restore_delay_secs"),
             "focused last field must be visible:\n{joined}"
         );
+    }
+
+    #[test]
+    fn logs_render_in_their_own_tab() {
+        let mut app = App::new();
+        app.log_writer = crate::logging::TuiLogWriter::new();
+        app.active_tab = Tab::Logs;
+        app.log_writer
+            .make_writer()
+            .write_all(b"tui-tab-test-error\n")
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+
+        let screen = (0..12)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Accounts"));
+        assert!(screen.contains("Logs"));
+        assert!(screen.contains("tui-tab-test-error"));
+    }
+
+    #[test]
+    fn logs_tab_starts_at_the_wrapped_tail_of_long_errors() {
+        let mut app = App::new();
+        app.log_writer = crate::logging::TuiLogWriter::new();
+        app.active_tab = Tab::Logs;
+        let error = format!("{}LATEST_TAIL\n", "x".repeat(200));
+        app.log_writer
+            .make_writer()
+            .write_all(error.as_bytes())
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+
+        let screen = (0..8)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("LATEST_TAIL"));
+    }
+
+    #[test]
+    fn logs_tab_clamps_scroll_before_rendering_a_short_log() {
+        let mut app = App::new();
+        app.log_writer = crate::logging::TuiLogWriter::new();
+        app.active_tab = Tab::Logs;
+        app.log_scroll = 10;
+        app.log_writer
+            .make_writer()
+            .write_all(b"short-log-marker\n")
+            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+
+        let screen = (0..8)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("short-log-marker"));
+        assert_eq!(app.log_scroll, 0);
     }
 
     #[test]

@@ -62,7 +62,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "tab",
         section: Section::Navigation,
-        label: "next tab (Accounts / Providers / Settings)",
+        label: "next tab (Accounts / Providers / Settings / Logs)",
         in_status_bar: false,
     },
     Binding {

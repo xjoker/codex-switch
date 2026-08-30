@@ -2,10 +2,11 @@ use anyhow::{Context, Result};
 use chrono::{Days, Local, NaiveDate};
 use fs4::FileExt;
 use std::{
+    collections::VecDeque,
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tracing_subscriber::fmt::MakeWriter;
@@ -13,6 +14,84 @@ use tracing_subscriber::fmt::MakeWriter;
 const LOG_PREFIX: &str = "codex-switch";
 const MAX_LOG_AGE_DAYS: u64 = 3;
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_TUI_LOG_LINES: usize = 1000;
+static TUI_LOG_WRITER: OnceLock<TuiLogWriter> = OnceLock::new();
+
+pub(crate) fn tui_log_writer() -> TuiLogWriter {
+    TUI_LOG_WRITER.get_or_init(TuiLogWriter::new).clone()
+}
+
+#[derive(Clone)]
+pub(crate) struct TuiLogWriter {
+    state: Arc<Mutex<TuiLogState>>,
+}
+
+struct TuiLogState {
+    lines: VecDeque<String>,
+    capacity: usize,
+}
+
+impl TuiLogWriter {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(TuiLogState {
+                lines: VecDeque::new(),
+                capacity: MAX_TUI_LOG_LINES,
+            })),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(capacity: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(TuiLogState {
+                lines: VecDeque::new(),
+                capacity,
+            })),
+        }
+    }
+
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .map(|state| state.lines.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+impl<'a> MakeWriter<'a> for TuiLogWriter {
+    type Writer = TuiLogSink;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TuiLogSink {
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+pub(crate) struct TuiLogSink {
+    state: Arc<Mutex<TuiLogState>>,
+}
+
+impl Write for TuiLogSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("TUI log writer lock poisoned"))?;
+        for line in String::from_utf8_lossy(buf).lines() {
+            if state.lines.len() == state.capacity {
+                state.lines.pop_front();
+            }
+            state.lines.push_back(line.to_string());
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// How long retention may go unenforced, and how many bytes may be appended in
 /// the meantime.
@@ -252,6 +331,24 @@ fn log_date(filename: &str) -> Option<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tui_writer_keeps_logs_in_memory_without_terminal_output() {
+        let writer = TuiLogWriter::new_for_test(3);
+        let mut sink = writer.make_writer();
+        sink.write_all(b"first\nsecond\n").unwrap();
+
+        assert_eq!(writer.lines(), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn tui_writer_discards_oldest_lines_at_capacity() {
+        let writer = TuiLogWriter::new_for_test(2);
+        let mut sink = writer.make_writer();
+        sink.write_all(b"first\nsecond\nthird\n").unwrap();
+
+        assert_eq!(writer.lines(), vec!["second", "third"]);
+    }
 
     fn create_log(dir: &Path, day: NaiveDate, bytes: u64) {
         let file = fs::File::create(log_path(dir, day)).unwrap();

@@ -78,7 +78,7 @@ See [Custom API providers](Providers) for OpenRouter, DeepSeek-via-gateway, stor
 
 ## TUI shortcuts
 
-Three tabs: **Accounts**, **Providers**, and **Settings**. `Tab` / `Shift+Tab` cycles them. `q` and `h` are global.
+Four tabs: **Accounts**, **Providers**, **Settings**, and **Logs**. `Tab` / `Shift+Tab` cycles them. `q` and `h` are global.
 
 ### Accounts tab
 
@@ -87,6 +87,7 @@ Three tabs: **Accounts**, **Providers**, and **Settings**. `Tab` / `Shift+Tab` c
 | Key | Action |
 |---|---|
 | `j` / `k` or `↑` / `↓` | Navigate |
+| `Tab` | Next tab (Providers) |
 | `Enter` | Open the account menu, or the batch menu when accounts are marked |
 | `/` | Filter accounts |
 | `r` | Refresh visible accounts |
@@ -137,11 +138,15 @@ Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and u
 | `d` / `-` | Remove the selected warmup slot |
 | `s` | Save `config.toml` |
 | `Esc` | Cancel the current field edit (does not discard other unsaved fields) |
-| `Tab` | Next tab (Accounts). Ignored while a field is being edited. Unsaved edits are kept. |
+| `Tab` | Next tab (Logs). Ignored while a field is being edited. Unsaved edits are kept. |
 | `h` | Show help |
 | `q` | Quit |
 
 Destructive or consumptive actions always require confirmation.
+
+### Logs tab
+
+Session diagnostics stay inside the TUI instead of writing through the active terminal screen. Use `j` / `k` or `PgUp` / `PgDn` to scroll and `End` to return to the latest line. `Tab` continues to Accounts.
 
 ## Next steps
 

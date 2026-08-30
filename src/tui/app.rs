@@ -187,9 +187,12 @@ pub enum Tab {
     Accounts,
     Providers,
     Settings,
+    Logs,
 }
 
 pub struct App {
+    pub log_writer: crate::logging::TuiLogWriter,
+    pub log_scroll: u16,
     pub accounts: Vec<AccountEntry>,
     /// Custom API provider profiles (OpenRouter, etc.), shown on the Providers
     /// tab; they carry no OAuth/usage and never join `accounts`.
@@ -267,6 +270,8 @@ impl App {
         let (model_tx, model_rx) = tokio::sync::mpsc::channel(32);
         let cfg = crate::config::get();
         App {
+            log_writer: crate::logging::tui_log_writer(),
+            log_scroll: 0,
             accounts: vec![],
             providers: vec![],
             provider_selected: 0,
@@ -612,7 +617,7 @@ impl App {
         self.menu = Some(super::menu::MenuState::add());
     }
 
-    /// Cycle Accounts → Providers → Settings → Accounts (`Tab`), or reverse (`BackTab`).
+    /// Cycle Accounts → Providers → Settings → Logs → Accounts (`Tab`), or reverse (`BackTab`).
     /// Entering Settings reloads `config.toml` from disk unless the form has
     /// unsaved edits.
     pub fn cycle_tab(&mut self, forward: bool) {
@@ -620,13 +625,15 @@ impl App {
             match self.active_tab {
                 Tab::Accounts => Tab::Providers,
                 Tab::Providers => Tab::Settings,
-                Tab::Settings => Tab::Accounts,
+                Tab::Settings => Tab::Logs,
+                Tab::Logs => Tab::Accounts,
             }
         } else {
             match self.active_tab {
-                Tab::Accounts => Tab::Settings,
+                Tab::Accounts => Tab::Logs,
                 Tab::Providers => Tab::Accounts,
                 Tab::Settings => Tab::Providers,
+                Tab::Logs => Tab::Settings,
             }
         };
         self.status_msg = None;
@@ -1821,7 +1828,7 @@ impl App {
                         }
                         Err(e) => self.set_status_error(format!("Rename failed: {e}"), 5),
                     },
-                    Tab::Settings => {}
+                    Tab::Settings | Tab::Logs => {}
                 }
                 return false;
             }
@@ -2265,6 +2272,22 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                     },
                     Tab::Providers => app.handle_provider_list_key(code),
                     Tab::Settings => app.handle_settings_key(code),
+                    Tab::Logs => match code {
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.log_scroll = app.log_scroll.saturating_sub(1);
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.log_scroll = app.log_scroll.saturating_add(1);
+                        }
+                        KeyCode::PageDown => {
+                            app.log_scroll = app.log_scroll.saturating_sub(10);
+                        }
+                        KeyCode::PageUp => {
+                            app.log_scroll = app.log_scroll.saturating_add(10);
+                        }
+                        KeyCode::End => app.log_scroll = 0,
+                        _ => {}
+                    },
                 },
             }
         }
@@ -3344,7 +3367,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_accounts_providers_settings() {
+    fn tab_cycles_accounts_providers_settings_logs() {
         let mut app = App::new();
         assert_eq!(app.active_tab, Tab::Accounts);
         app.cycle_tab(true);
@@ -3352,7 +3375,11 @@ mod tests {
         app.cycle_tab(true);
         assert_eq!(app.active_tab, Tab::Settings);
         app.cycle_tab(true);
+        assert_eq!(app.active_tab, Tab::Logs);
+        app.cycle_tab(true);
         assert_eq!(app.active_tab, Tab::Accounts);
+        app.cycle_tab(false);
+        assert_eq!(app.active_tab, Tab::Logs);
         app.cycle_tab(false);
         assert_eq!(app.active_tab, Tab::Settings);
         app.cycle_tab(false);
@@ -3396,7 +3423,7 @@ mod tests {
         assert!(app.settings.is_dirty());
 
         app.cycle_tab(true);
-        assert_eq!(app.active_tab, Tab::Accounts);
+        assert_eq!(app.active_tab, Tab::Logs);
         app.cycle_tab(false);
         assert_eq!(app.active_tab, Tab::Settings);
         assert!(app.settings.draft.daemon.auto_warmup);
