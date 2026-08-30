@@ -18,6 +18,7 @@ pub enum Section {
     Batch,
     Provider,
     Settings,
+    Logs,
     Global,
 }
 
@@ -26,10 +27,11 @@ impl Section {
         match self {
             Section::Navigation => "Navigation",
             Section::Selection => "Selection",
-            Section::Account => "Account actions  (open via Enter)",
+            Section::Account => "Accounts tab",
             Section::Batch => "Batch actions  (open via Enter when accounts marked)",
             Section::Provider => "Providers tab",
             Section::Settings => "Settings tab",
+            Section::Logs => "Logs tab",
             Section::Global => "Global",
         }
     }
@@ -49,13 +51,13 @@ pub const KEYMAP: &[Binding] = &[
     // Navigation
     Binding {
         keys: "j / k / ↑ ↓",
-        section: Section::Navigation,
+        section: Section::Account,
         label: "move selection",
         in_status_bar: true,
     },
     Binding {
         keys: "/",
-        section: Section::Navigation,
+        section: Section::Account,
         label: "search",
         in_status_bar: true,
     },
@@ -67,7 +69,7 @@ pub const KEYMAP: &[Binding] = &[
     },
     Binding {
         keys: "s",
-        section: Section::Navigation,
+        section: Section::Account,
         label: "cycle sort (name / quota / status)",
         in_status_bar: false,
     },
@@ -85,6 +87,12 @@ pub const KEYMAP: &[Binding] = &[
         in_status_bar: false,
     },
     // Account actions (via Enter menu)
+    Binding {
+        keys: "enter",
+        section: Section::Account,
+        label: "open selected account actions",
+        in_status_bar: true,
+    },
     Binding {
         keys: "r",
         section: Section::Account,
@@ -160,6 +168,12 @@ pub const KEYMAP: &[Binding] = &[
     },
     // Providers tab
     Binding {
+        keys: "j / k / ↑ ↓",
+        section: Section::Provider,
+        label: "move provider selection",
+        in_status_bar: false,
+    },
+    Binding {
         keys: "enter / o",
         section: Section::Provider,
         label: "launch Codex (pick model, reasoning, extra args)",
@@ -232,40 +246,47 @@ pub const KEYMAP: &[Binding] = &[
         label: "cancel the current field edit",
         in_status_bar: false,
     },
-    // Global
+    // Logs tab
     Binding {
-        keys: "enter",
-        section: Section::Global,
-        label: "open selected (Accounts: menu, Providers: launch picker)",
-        in_status_bar: true,
+        keys: "j / k / ↑ ↓ / PgUp PgDn",
+        section: Section::Logs,
+        label: "scroll session logs",
+        in_status_bar: false,
     },
     Binding {
+        keys: "end",
+        section: Section::Logs,
+        label: "jump to latest log",
+        in_status_bar: false,
+    },
+    // Global
+    Binding {
         keys: "a",
-        section: Section::Global,
+        section: Section::Account,
         label: "add new account",
         in_status_bar: true,
     },
     Binding {
         keys: "r",
-        section: Section::Global,
+        section: Section::Account,
         label: "refresh visible accounts",
         in_status_bar: true,
     },
     Binding {
         keys: "t",
-        section: Section::Global,
+        section: Section::Account,
         label: "toggle auto-refresh",
         in_status_bar: false,
     },
     Binding {
         keys: "W",
-        section: Section::Global,
+        section: Section::Account,
         label: "toggle auto-warmup (auto-refresh + warm whenever 5h expires)",
         in_status_bar: false,
     },
     Binding {
         keys: "i",
-        section: Section::Global,
+        section: Section::Account,
         label: "show / hide account detail panel",
         in_status_bar: true,
     },
@@ -284,9 +305,16 @@ pub const KEYMAP: &[Binding] = &[
 ];
 
 /// Build help text grouped by section. Returns a list of (heading, lines).
-pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+pub fn help_sections_for(
+    active: Section,
+) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
     let mut result: Vec<(&'static str, Vec<(&'static str, &'static str)>)> = Vec::new();
-    for binding in KEYMAP {
+    for binding in KEYMAP.iter().filter(|binding| {
+        matches!(binding.section, Section::Navigation | Section::Global)
+            || binding.section == active
+            || (active == Section::Account
+                && matches!(binding.section, Section::Selection | Section::Batch))
+    }) {
         let heading = binding.section.label();
         if let Some((_, items)) = result.iter_mut().find(|(h, _)| *h == heading) {
             items.push((binding.keys, binding.label));
@@ -309,21 +337,16 @@ pub fn status_bar_items() -> Vec<(&'static str, &'static str)> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn status_bar_surfaces_add_account_action() {
-        assert!(
-            super::status_bar_items()
-                .iter()
-                .any(|(keys, label)| *keys == "a" && label.contains("add"))
-        );
-    }
-
-    #[test]
-    fn status_bar_surfaces_account_detail_action() {
-        assert!(
-            super::status_bar_items()
-                .iter()
-                .any(|(keys, label)| *keys == "i" && label.contains("detail"))
-        );
+    fn status_bar_surfaces_core_account_actions() {
+        let items = super::status_bar_items();
+        for (key, verb) in [("a", "add"), ("i", "detail"), ("o", "launch")] {
+            assert!(
+                items
+                    .iter()
+                    .any(|(keys, label)| *keys == key && label.to_ascii_lowercase().contains(verb)),
+                "missing {key} {verb} from {items:?}"
+            );
+        }
     }
 
     #[test]
@@ -361,11 +384,16 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_surfaces_launch() {
-        assert!(
-            super::status_bar_items()
-                .iter()
-                .any(|(keys, label)| *keys == "o" && label.to_ascii_lowercase().contains("launch"))
-        );
+    fn help_only_shows_bindings_for_the_active_tab() {
+        let providers = super::help_sections_for(super::Section::Provider);
+        let provider_text = format!("{providers:?}");
+        assert!(provider_text.contains("add provider"));
+        assert!(!provider_text.contains("add new account"));
+        assert!(!provider_text.contains("refresh visible accounts"));
+
+        let logs = super::help_sections_for(super::Section::Logs);
+        let log_text = format!("{logs:?}");
+        assert!(log_text.contains("scroll session logs"));
+        assert!(!log_text.contains("add provider"));
     }
 }

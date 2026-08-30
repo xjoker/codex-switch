@@ -581,6 +581,12 @@ mod tests {
     use serde_json::Value;
 
     #[test]
+    fn already_reported_errors_are_not_reported_twice() {
+        assert!(!should_report_error(&OutputAlreadyReported.into()));
+        assert!(should_report_error(&anyhow::anyhow!("new failure")));
+    }
+
+    #[test]
     fn test_reset_credit_without_expiry_uses_explicit_text_and_json_null() {
         let usage = UsageInfo {
             reset_credits_available_count: Some(1),

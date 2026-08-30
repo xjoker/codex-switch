@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v20260830.2.0 — 2026-08-30
+
+- **Account tables show only relevant quota data** — The TUI hides Credits when no loaded account has credits and hides both 5h columns when no account has a 5-hour window. Help is scoped to the active tab, modified character keys no longer trigger plain shortcuts, and quitting with unsaved Settings now asks before discarding edits.
+- **Daemon switches and credential refreshes are safer** — An automatic switch is abandoned when a manual switch won the race. A rotated refresh token is persisted before any follow-up Usage request can enter a long 429 backoff, and macOS stop failures now propagate instead of allowing a loaded KeepAlive service to be mistaken for a stopped daemon.
+- **Usage details stay consistent** — Reset Card details are discarded and refetched when the authoritative count shrinks, while a permanently rejected proactive refresh is remembered even if the old access token can still return current usage.
+- **The test target no longer runs the library suite twice** — The binary delegates to the library entry point and disables its empty test harness, reducing `cargo test --all-targets` from 1,331 to 737 test executions while retaining focused regression coverage for the corrected behavior.
+
 ## v20260830.1.0 — 2026-08-30
 
 - **TUI diagnostics stay inside a dedicated log tab** — Runtime errors and debug traces are captured in a bounded in-memory session log instead of writing through the active terminal screen. The existing `Tab` cycle now includes Logs, where keyboard scrolling keeps long failures inspectable without deforming the account view; rotated file logging continues unchanged.

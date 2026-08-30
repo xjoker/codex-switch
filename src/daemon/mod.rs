@@ -203,16 +203,10 @@ fn stop() -> Result<()> {
     #[cfg(not(target_os = "windows"))]
     {
         if service::is_installed() {
-            match service::stop_installed() {
-                Ok(()) => {
-                    wait_until_stopped_or_kill(pidfile::read_pidfile())?;
-                    let _ = pidfile::cleanup_pidfile();
-                    return Ok(());
-                }
-                Err(err) => {
-                    tracing::warn!("Failed to stop installed daemon service: {err}");
-                }
-            }
+            service::stop_installed()?;
+            wait_until_stopped_or_kill(pidfile::read_pidfile())?;
+            let _ = pidfile::cleanup_pidfile();
+            return Ok(());
         }
 
         stop_detached()

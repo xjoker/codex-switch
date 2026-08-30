@@ -45,7 +45,7 @@ The usage model includes the main 5-hour and 7-day windows, additional model-spe
 
 Normal reads refresh only stale entries. Use `list -f` or the TUI refresh action when a fresh network read is required.
 
-The TUI has three tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (custom API endpoints), and **Settings** (`config.toml`). `Tab` / `Shift+Tab` cycles them. `o` launches Codex on Accounts and Providers. Account-only keys (`W`, mark, filter) stay on Accounts. Settings uses `j`/`k` for fields and `s` to save; `s` on Accounts still cycles sort. Unsaved Settings edits survive leaving the tab; while a field is being edited, `Tab` stays on Settings.
+The TUI has four tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (custom API endpoints), **Settings** (`config.toml`), and **Logs** (bounded session diagnostics). `Tab` / `Shift+Tab` cycles them. `o` launches Codex on Accounts and Providers. Account-only keys (`W`, mark, filter) stay on Accounts. Settings uses `j`/`k` for fields and `s` to save; `s` on Accounts still cycles sort. Unsaved Settings edits survive leaving the tab and require confirmation before quitting; while a field is being edited, `Tab` stays on Settings.
 
 The TUI account detail page is a single scrollable column with identity and organization labels, token expiry times in the local timezone, every quota pool with a pace marker, available reset cards, and the models the account may use. Model names and reasoning-effort capabilities are discovered from the authenticated service at runtime, not hardcoded. The full shortcut list is in the [command reference](Command-Reference#tui-shortcuts) and under `h` inside the TUI.
 

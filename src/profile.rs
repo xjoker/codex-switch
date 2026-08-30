@@ -283,7 +283,11 @@ fn switch_live_auth(alias: &str) -> Result<()> {
     }
 
     let _transaction = lock_auth_transaction()?;
-    let val = read_auth(&src)?;
+    switch_live_auth_locked(alias, &src)
+}
+
+fn switch_live_auth_locked(alias: &str, src: &Path) -> Result<()> {
+    let val = read_auth(src)?;
     crate::auth::validate_managed_auth_value(&val)?;
     let dst = codex_auth_path()?;
     backup_auth(&dst)?;
@@ -1016,6 +1020,24 @@ pub fn switch_profile(alias: &str) -> Result<()> {
     switch_live_auth(alias)
 }
 
+/// Switch only if no other process changed the selected profile since the
+/// caller made its decision.
+pub fn switch_profile_if_current(expected: &str, alias: &str) -> Result<bool> {
+    validate_alias(expected)?;
+    validate_alias(alias)?;
+    let src = profile_auth_path(alias)?;
+    if !src.exists() {
+        return Err(CsError::NotFound(alias.to_string()).into());
+    }
+
+    let _transaction = lock_auth_transaction()?;
+    if read_current() != expected {
+        return Ok(false);
+    }
+    switch_live_auth_locked(alias, &src)?;
+    Ok(true)
+}
+
 /// Write a profile's auth.json to the live codex auth path WITHOUT updating
 /// the current-profile marker.  Used by `launch` for temporary switching.
 /// Caller MUST hold the lock from `lock_live_auth()`.
@@ -1304,7 +1326,7 @@ mod tests {
 
     use super::{
         cmd_delete, cmd_save, cmd_use, lock_reset_card_consume, rename_profile, switch_profile,
-        validate_alias,
+        switch_profile_if_current, validate_alias,
     };
 
     #[test]
@@ -1557,6 +1579,39 @@ mod tests {
             Some("acc_new")
         );
         assert_eq!(super::read_current(), "next-profile");
+    }
+
+    #[test]
+    fn conditional_switch_preserves_a_newer_manual_selection() {
+        let _env = TestEnv::new();
+        for (alias, access, refresh) in [
+            ("alpha", "access-a", "refresh-a"),
+            ("beta", "access-b", "refresh-b"),
+            ("charlie", "access-c", "refresh-c"),
+        ] {
+            let auth = realistic_auth_json(
+                &format!("{alias}@example.com"),
+                &format!("acct-{alias}"),
+                access,
+                refresh,
+            );
+            let path = super::profile_auth_path(alias).unwrap();
+            super::ensure_profile_parent(&path).unwrap();
+            crate::auth::write_auth(&path, &auth).unwrap();
+        }
+
+        switch_profile("alpha").unwrap();
+        switch_profile("charlie").unwrap();
+
+        assert!(!switch_profile_if_current("alpha", "beta").unwrap());
+        assert_eq!(super::read_current(), "charlie");
+        assert_eq!(
+            crate::auth::read_auth(&crate::auth::codex_auth_path().unwrap())
+                .unwrap()
+                .pointer("/tokens/access_token")
+                .and_then(|value| value.as_str()),
+            Some("access-c")
+        );
     }
 
     #[test]

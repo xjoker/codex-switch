@@ -70,8 +70,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     // Overlays (rendered last, on top of everything).
     // Help popup takes top priority since the user invoked it explicitly.
+    let active_tab = app.active_tab;
     if let Some(state) = app.help_popup.as_mut() {
-        render_help_popup(f, state, area);
+        render_help_popup(f, state, active_tab, area);
     } else if let Some(form) = app.provider_form.as_mut() {
         super::provider_form::render_provider_form(f, form, area);
     } else if let Some(launch) = app.provider_launch.as_mut() {
@@ -82,13 +83,20 @@ pub fn render(f: &mut Frame, app: &mut App) {
 }
 
 fn render_logs(f: &mut Frame, app: &mut App, area: Rect) {
-    let lines = app.log_writer.lines();
     let inner_width = area.width.saturating_sub(2).max(1);
-    let visual_lines = if lines.is_empty() {
-        vec!["No logs in this session.".to_string()]
-    } else {
-        hard_wrap_log_lines(&lines, inner_width)
-    };
+    let previous_revision = (app.log_render_width == inner_width)
+        .then_some(app.log_render_revision)
+        .flatten();
+    if let Some((revision, lines)) = app.log_writer.lines_if_changed(previous_revision) {
+        app.log_render_revision = Some(revision);
+        app.log_render_width = inner_width;
+        app.log_visual_lines = if lines.is_empty() {
+            vec!["No logs in this session.".to_string()]
+        } else {
+            hard_wrap_log_lines(&lines, inner_width)
+        };
+    }
+    let visual_lines = &app.log_visual_lines;
     let visible_rows = usize::from(area.height.saturating_sub(2)).max(1);
     let max_scroll = visual_lines.len().saturating_sub(visible_rows);
     let bottom_offset = usize::from(app.log_scroll).min(max_scroll);
@@ -131,7 +139,12 @@ fn hard_wrap_log_lines(lines: &[String], width: u16) -> Vec<String> {
     wrapped
 }
 
-fn render_help_popup(f: &mut Frame, state: &mut popup::PopupState, area: ratatui::layout::Rect) {
+fn render_help_popup(
+    f: &mut Frame,
+    state: &mut popup::PopupState,
+    active_tab: Tab,
+    area: ratatui::layout::Rect,
+) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let key_style = base().fg(C_YELLOW).add_modifier(Modifier::BOLD);
     let label_style = base().fg(C_WHITE);
@@ -139,7 +152,13 @@ fn render_help_popup(f: &mut Frame, state: &mut popup::PopupState, area: ratatui
     let dim_style = base().fg(DIM);
 
     // Compute key column width for alignment within section
-    let groups = keymap::help_sections();
+    let active_section = match active_tab {
+        Tab::Accounts => keymap::Section::Account,
+        Tab::Providers => keymap::Section::Provider,
+        Tab::Settings => keymap::Section::Settings,
+        Tab::Logs => keymap::Section::Logs,
+    };
+    let groups = keymap::help_sections_for(active_section);
     let key_col = groups
         .iter()
         .flat_map(|(_, items)| items.iter())
@@ -193,6 +212,8 @@ fn table_text_widths(
     aliases: &[&str],
     emails: &[&str],
     plans: &[&str],
+    show_5h: bool,
+    show_credits: bool,
 ) -> TableTextWidths {
     let desired = |header: &str, values: &[&str]| {
         values
@@ -210,8 +231,10 @@ fn table_text_widths(
         plan: desired("Plan", plans).max(4),
     };
 
-    // Borders, column spacing, marker and fixed quota columns consume 75 cells.
-    let budget = total_width.saturating_sub(75).max(14);
+    // Base borders, spacing, marker and fixed columns consume 44 cells. The
+    // optional 5h pair and Credits column add their widths plus spacing.
+    let fixed_width = 44 + u16::from(show_5h) * 20 + u16::from(show_credits) * 11;
+    let budget = total_width.saturating_sub(fixed_width).max(14);
     let total = u32::from(widths.alias) + u32::from(widths.email) + u32::from(widths.plan);
     let mut excess = total.saturating_sub(u32::from(budget));
     for (width, minimum) in [
@@ -246,21 +269,39 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    let show_credits = app.accounts.iter().any(|entry| {
+        matches!(
+            &entry.usage,
+            UsageStatus::Loaded(usage)
+                if usage.credits_balance.is_some() || usage.unlimited_credits == Some(true)
+        )
+    });
+    let show_5h = app
+        .accounts
+        .iter()
+        .any(|entry| matches!(&entry.usage, UsageStatus::Loaded(usage) if usage.primary.is_some()));
+
     let hdr = base().fg(C_CYAN).add_modifier(Modifier::BOLD);
-    let header = Row::new(vec![
+    let mut header_cells = vec![
         Cell::from(" ").style(base().fg(DIM)),
         Cell::from("Alias").style(hdr),
         Cell::from("Email").style(hdr),
         Cell::from("Plan").style(hdr),
         Cell::from("Status").style(hdr),
-        Cell::from("5h").style(hdr),
-        Cell::from("7d").style(hdr),
-        Cell::from("5h Reset").style(hdr),
-        Cell::from("7d Reset").style(hdr),
-        Cell::from("Cards").style(hdr),
-        Cell::from("Credits").style(hdr),
-    ])
-    .height(1);
+    ];
+    if show_5h {
+        header_cells.push(Cell::from("5h").style(hdr));
+    }
+    header_cells.push(Cell::from("7d").style(hdr));
+    if show_5h {
+        header_cells.push(Cell::from("5h Reset").style(hdr));
+    }
+    header_cells.push(Cell::from("7d Reset").style(hdr));
+    header_cells.push(Cell::from("Cards").style(hdr));
+    if show_credits {
+        header_cells.push(Cell::from("Credits").style(hdr));
+    }
+    let header = Row::new(header_cells).height(1);
 
     let mut rows: Vec<Row> = Vec::new();
     let mut render_selected: usize = 0;
@@ -457,7 +498,7 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                 UsageStatus::Loaded(u) => (credits_table_text(u), credits_table_color(u)),
             };
 
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(Span::styled(marker, marker_style)),
                 Cell::from(entry.alias.clone()).style(row_style),
                 Cell::from(email).style(row_style),
@@ -469,14 +510,20 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
                         Modifier::empty()
                     },
                 )),
-                Cell::from(pct_5h.clone()).style(usage_pct_style(&pct_5h, is_selected)),
-                Cell::from(pct_7d.clone()).style(usage_pct_style(&pct_7d, is_selected)),
-                Cell::from(reset_5h).style(base().fg(reset_5h_color)),
-                Cell::from(reset_7d).style(base().fg(reset_7d_color)),
-                Cell::from(reset_cards).style(base().fg(reset_cards_color)),
-                Cell::from(credits_text).style(base().fg(credits_color)),
-            ])
-            .height(1)
+            ];
+            if show_5h {
+                cells.push(Cell::from(pct_5h.clone()).style(usage_pct_style(&pct_5h, is_selected)));
+            }
+            cells.push(Cell::from(pct_7d.clone()).style(usage_pct_style(&pct_7d, is_selected)));
+            if show_5h {
+                cells.push(Cell::from(reset_5h).style(base().fg(reset_5h_color)));
+            }
+            cells.push(Cell::from(reset_7d).style(base().fg(reset_7d_color)));
+            cells.push(Cell::from(reset_cards).style(base().fg(reset_cards_color)));
+            if show_credits {
+                cells.push(Cell::from(credits_text).style(base().fg(credits_color)));
+            }
+            Row::new(cells).height(1)
         };
 
         if view_i == app.selected {
@@ -537,34 +584,40 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     let plans: Vec<&str> = plan_labels.iter().map(String::as_str).collect();
-    let text_widths = table_text_widths(area.width, &aliases, &emails, &plans);
+    let text_widths =
+        table_text_widths(area.width, &aliases, &emails, &plans, show_5h, show_credits);
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(2),                 // marker
-            Constraint::Length(text_widths.alias), // alias
-            Constraint::Length(text_widths.email), // email
-            Constraint::Length(text_widths.plan),  // plan
-            Constraint::Length(8),                 // status
-            Constraint::Length(6),                 // 5h %
-            Constraint::Length(6),                 // 7d %
-            Constraint::Length(12),                // 5h reset
-            Constraint::Length(12),                // 7d reset
-            Constraint::Length(7),                 // reset cards
-            Constraint::Length(10),                // credits
-        ],
-    )
-    .header(header)
-    .block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(base().fg(C_BLUE))
-            .style(base()),
-    )
-    .row_highlight_style(highlight())
-    .style(base());
+    let mut constraints = vec![
+        Constraint::Length(2),                 // marker
+        Constraint::Length(text_widths.alias), // alias
+        Constraint::Length(text_widths.email), // email
+        Constraint::Length(text_widths.plan),  // plan
+        Constraint::Length(8),                 // status
+    ];
+    if show_5h {
+        constraints.push(Constraint::Length(6)); // 5h %
+    }
+    constraints.push(Constraint::Length(6)); // 7d %
+    if show_5h {
+        constraints.push(Constraint::Length(12)); // 5h reset
+    }
+    constraints.push(Constraint::Length(12)); // 7d reset
+    constraints.push(Constraint::Length(7)); // reset cards
+    if show_credits {
+        constraints.push(Constraint::Length(10)); // credits
+    }
+
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(base().fg(C_BLUE))
+                .style(base()),
+        )
+        .row_highlight_style(highlight())
+        .style(base());
 
     f.render_stateful_widget(table, area, &mut table_state);
 }
@@ -984,6 +1037,9 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     // Confirmation prompt
     if let Some(confirm) = &app.confirm {
         let msg = match confirm {
+            super::app::ConfirmAction::DiscardSettings => {
+                "Discard unsaved settings and quit? (y/n)".to_string()
+            }
             super::app::ConfirmAction::Delete(alias) => {
                 format!("Delete profile '{alias}'? (y/n)")
             }
@@ -1831,6 +1887,8 @@ mod tests {
             &["oai001_20x", "a-very-long-account-alias"],
             &["oai001@ozi.xyz"],
             &["Pro 20×", "Team - NightCity Workspace"],
+            true,
+            true,
         );
 
         assert!(widths.alias >= "a-very-long-account-alias".chars().count() as u16);
@@ -1844,6 +1902,8 @@ mod tests {
             &["a-very-long-account-alias"],
             &["a-very-long-address@example.com"],
             &["Team - NightCity Workspace"],
+            true,
+            true,
         );
 
         assert!(widths.alias + widths.email + widths.plan <= 16);
@@ -1854,7 +1914,7 @@ mod tests {
         let alias = "a".repeat(45);
         let email = format!("{}@example.com", "e".repeat(40));
         let plan = format!("Team - {}", "Workspace".repeat(5));
-        let widths = table_text_widths(260, &[&alias], &[&email], &[&plan]);
+        let widths = table_text_widths(260, &[&alias], &[&email], &[&plan], true, true);
 
         assert_eq!(widths.alias, alias.len() as u16);
         assert_eq!(widths.email, email.len() as u16);
@@ -1897,34 +1957,53 @@ mod tests {
     }
 
     #[test]
-    fn account_table_renders_the_credits_column() {
+    fn account_table_only_renders_optional_columns_present_in_account_data() {
         let mut app = App::new();
         app.accounts.push(AccountEntry {
-            alias: "payg".into(),
+            alias: "plain".into(),
             info: AccountInfo::default(),
-            usage: UsageStatus::Loaded(Box::new(UsageInfo {
-                credits_balance: Some(15.5),
-                ..UsageInfo::default()
-            })),
+            usage: UsageStatus::Loaded(Box::default()),
             is_current: true,
         });
         app.view_indices.push(0);
 
-        let backend = TestBackend::new(120, 6);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| render_account_table(frame, &app, frame.area()))
-            .unwrap();
+        let render = |app: &App| {
+            let backend = TestBackend::new(120, 6);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render_account_table(frame, app, frame.area()))
+                .unwrap();
+            (0..6)
+                .map(|y| row_text(terminal.backend(), y))
+                .collect::<Vec<_>>()
+        };
 
-        let rows: Vec<String> = (0..6).map(|y| row_text(terminal.backend(), y)).collect();
+        let rows = render(&app);
         let header = rows
             .iter()
             .find(|line| line.contains("Alias"))
             .expect("header row must render");
-        assert!(
-            header.contains("Credits"),
-            "header must include the Credits column: {header}"
-        );
+        assert!(!header.contains("Credits"), "unexpected column: {header}");
+        assert!(!header.contains("5h"), "unexpected 5h columns: {header}");
+        assert!(header.contains("7d"), "7d column must remain: {header}");
+
+        let UsageStatus::Loaded(usage) = &mut app.accounts[0].usage else {
+            unreachable!()
+        };
+        usage.credits_balance = Some(15.5);
+        usage.primary = Some(WindowUsage {
+            used_percent: Some(20.0),
+            resets_at: Some(crate::auth::now_unix_secs() + 3600),
+            window_minutes: Some(300),
+        });
+
+        let rows = render(&app);
+        let header = rows
+            .iter()
+            .find(|line| line.contains("Alias"))
+            .expect("header row must render");
+        assert!(header.contains("Credits"), "missing column: {header}");
+        assert!(header.contains("5h"), "missing 5h columns: {header}");
         let joined = rows.join("\n");
         assert!(
             joined.contains("$15.50"),

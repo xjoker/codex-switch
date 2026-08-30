@@ -354,7 +354,14 @@ async fn check_and_switch() -> Result<PollOutcome> {
             best_alias,
             best_score,
         );
-        profile::switch_profile(&best_alias)?;
+        if !profile::switch_profile_if_current(&current, &best_alias)? {
+            tracing::info!(
+                "Skipping stale switch decision '{} -> {}': current profile changed during polling",
+                current,
+                best_alias,
+            );
+            return Ok(PollOutcome::NoAction);
+        }
         cache::set_last_used(&best_alias)?;
 
         if cfg.daemon.notify {

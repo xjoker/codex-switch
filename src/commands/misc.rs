@@ -2,6 +2,18 @@ use crate::output::{format_local_datetime, print_json, user_println};
 use crate::{auth, cache, color, config, profile, usage, warmup};
 use anyhow::{Context, Result};
 
+pub(crate) fn format_resync_confirm_prompt(
+    alias: &str,
+    live_last_refresh: Option<&str>,
+    profile_last_refresh: Option<&str>,
+) -> String {
+    let live_ts = live_last_refresh.unwrap_or("unknown");
+    let profile_ts = profile_last_refresh.unwrap_or("unknown");
+    format!(
+        "Update profile '{alias}' with live credentials? (live last_refresh={live_ts} -> profile last_refresh={profile_ts}) [Y/n] "
+    )
+}
+
 pub(crate) async fn reset_card_cmd(alias: &str, yes: bool, json: bool) -> Result<()> {
     profile::validate_alias(alias)?;
     if json && !yes {
@@ -255,4 +267,19 @@ pub(crate) async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
         anyhow::bail!("one or more warmup operations failed");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_resync_confirm_prompt;
+
+    #[test]
+    fn resync_prompt_shows_direction_and_missing_timestamps() {
+        let prompt = format_resync_confirm_prompt("acme", Some("2026-07-20T00:00:00Z"), None);
+
+        assert_eq!(
+            prompt,
+            "Update profile 'acme' with live credentials? (live last_refresh=2026-07-20T00:00:00Z -> profile last_refresh=unknown) [Y/n] "
+        );
+    }
 }

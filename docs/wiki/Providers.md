@@ -150,7 +150,7 @@ The generated Codex catalog only advertises thinking levels when a model has a s
 
 ## TUI
 
-`codex-switch tui` has three tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (alias, models, base URL), and **Settings** (`config.toml`). Switch with `Tab` / `Shift+Tab`.
+`codex-switch tui` has four tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (alias, models, base URL), **Settings** (`config.toml`), and **Logs** (session diagnostics). Switch with `Tab` / `Shift+Tab`.
 
 On the Providers tab:
 

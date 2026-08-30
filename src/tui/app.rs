@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use tokio::sync::Semaphore;
 
@@ -150,6 +150,7 @@ impl SortMode {
 }
 
 pub enum ConfirmAction {
+    DiscardSettings,
     Delete(String),
     BatchDelete(Vec<String>),
     ConsumeResetCard {
@@ -193,6 +194,9 @@ pub enum Tab {
 pub struct App {
     pub log_writer: crate::logging::TuiLogWriter,
     pub log_scroll: u16,
+    pub log_render_revision: Option<u64>,
+    pub log_render_width: u16,
+    pub log_visual_lines: Vec<String>,
     pub accounts: Vec<AccountEntry>,
     /// Custom API provider profiles (OpenRouter, etc.), shown on the Providers
     /// tab; they carry no OAuth/usage and never join `accounts`.
@@ -272,6 +276,9 @@ impl App {
         App {
             log_writer: crate::logging::tui_log_writer(),
             log_scroll: 0,
+            log_render_revision: None,
+            log_render_width: 0,
+            log_visual_lines: vec!["No logs in this session.".to_string()],
             accounts: vec![],
             providers: vec![],
             provider_selected: 0,
@@ -1628,12 +1635,13 @@ impl App {
         }
     }
 
-    pub fn confirm_action(&mut self) {
+    pub fn confirm_action(&mut self) -> bool {
         let action = match self.confirm.take() {
             Some(a) => a,
-            None => return,
+            None => return false,
         };
         match action {
+            ConfirmAction::DiscardSettings => return true,
             ConfirmAction::Delete(alias) => match cmd_delete(&alias) {
                 Ok(()) => {
                     self.set_status(format!("Deleted {alias} (recoverable)"), 3);
@@ -1683,6 +1691,7 @@ impl App {
                 self.consume_reset_card(&alias, &credit_id);
             }
         }
+        false
     }
 
     fn consume_reset_card(&mut self, alias: &str, credit_id: &str) {
@@ -1775,6 +1784,15 @@ impl App {
 
     pub fn cancel_confirm(&mut self) {
         self.confirm = None;
+    }
+
+    pub fn request_quit(&mut self) -> bool {
+        if self.settings.is_dirty() {
+            self.confirm = Some(ConfirmAction::DiscardSettings);
+            false
+        } else {
+            true
+        }
     }
 
     pub fn handle_rename_key(&mut self, code: KeyCode) -> bool {
@@ -2124,6 +2142,9 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+            if !accepts_key_event(&key) {
+                continue;
+            }
 
             // Search and rename inputs need raw case-sensitive keystrokes.
             if app.rename.is_some() {
@@ -2195,14 +2216,16 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
 
             if app.confirm.is_some() {
                 match code {
-                    KeyCode::Char('y') => app.confirm_action(),
+                    KeyCode::Char('y') if app.confirm_action() => break,
+                    KeyCode::Char('y') => {}
                     _ => app.cancel_confirm(),
                 }
                 continue;
             }
 
             match code {
-                KeyCode::Char('q') => break,
+                KeyCode::Char('q') if app.request_quit() => break,
+                KeyCode::Char('q') => {}
                 KeyCode::Char('h') => app.open_help(),
                 KeyCode::Tab => app.cycle_tab(true),
                 KeyCode::BackTab => app.cycle_tab(false),
@@ -2708,6 +2731,17 @@ fn handle_help_key(app: &mut App, code: KeyCode) {
     }
 }
 
+fn accepts_key_event(key: &KeyEvent) -> bool {
+    !matches!(key.code, KeyCode::Char(_))
+        || !key.modifiers.intersects(
+            KeyModifiers::CONTROL
+                | KeyModifiers::ALT
+                | KeyModifiers::SUPER
+                | KeyModifiers::HYPER
+                | KeyModifiers::META,
+        )
+}
+
 /// Convert a char-based cursor position to a byte offset in a string.
 fn char_to_byte(s: &str, char_pos: usize) -> usize {
     s.char_indices()
@@ -2729,7 +2763,7 @@ mod tests {
         usage::{Refresh, ResetCredit, UsageInfo},
         warmup::ModelEntry,
     };
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// Isolate `CODEX_SWITCH_HOME`/`CODEX_HOME` for tests that touch provider
     /// storage. Serialized via the shared env lock so it can't race sibling
@@ -3430,5 +3464,39 @@ mod tests {
         assert!(app.settings.is_dirty());
         let loaded = crate::config::load_current().expect("disk still default");
         assert!(!loaded.daemon.auto_warmup);
+    }
+
+    #[test]
+    fn dirty_settings_require_confirmation_before_quit() {
+        let _home = EnvHome::new();
+        let mut app = App::new();
+        app.active_tab = Tab::Settings;
+        for _ in 0..10 {
+            app.handle_settings_key(KeyCode::Down);
+        }
+        app.handle_settings_key(KeyCode::Enter);
+        assert!(app.settings.is_dirty());
+
+        assert!(!app.request_quit());
+        assert!(matches!(app.confirm, Some(ConfirmAction::DiscardSettings)));
+        assert!(app.confirm_action());
+    }
+
+    #[test]
+    fn modified_character_keys_do_not_trigger_plain_text_bindings() {
+        for code in ['c', 'q', 's'] {
+            assert!(!super::accepts_key_event(&KeyEvent::new(
+                KeyCode::Char(code),
+                KeyModifiers::CONTROL,
+            )));
+        }
+        assert!(super::accepts_key_event(&KeyEvent::new(
+            KeyCode::Char('W'),
+            KeyModifiers::SHIFT,
+        )));
+        assert!(super::accepts_key_event(&KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
     }
 }

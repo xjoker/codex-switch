@@ -143,7 +143,7 @@ pub(super) fn merge_cached_reset_credits(
         return;
     }
     let Some(cached) = cached else { return };
-    usage.reset_credits = cached
+    let cached_credits: Vec<_> = cached
         .reset_credits
         .iter()
         .filter(|credit| {
@@ -155,6 +155,13 @@ pub(super) fn merge_cached_reset_credits(
         })
         .cloned()
         .collect();
+    if usage
+        .reset_credits_available_count
+        .is_some_and(|count| count < cached_credits.len() as u64)
+    {
+        return;
+    }
+    usage.reset_credits = cached_credits;
     usage.reset_credits_error = cached.reset_credits_error.clone();
 }
 
@@ -684,6 +691,36 @@ mod tests {
 
         assert!(fresh.reset_credits.is_empty());
         assert_eq!(fresh.reset_credits_available_count, Some(0));
+    }
+
+    #[test]
+    fn lower_fresh_count_discards_ambiguous_cached_cards_and_refetches_details() {
+        let now = chrono::Utc::now();
+        let cached = UsageInfo {
+            reset_credits_available_count: Some(2),
+            reset_credits: vec![
+                ResetCredit {
+                    id: "first".into(),
+                    granted_at: None,
+                    expires_at: Some("2099-01-01T00:00:00Z".into()),
+                },
+                ResetCredit {
+                    id: "second".into(),
+                    granted_at: None,
+                    expires_at: Some("2099-01-02T00:00:00Z".into()),
+                },
+            ],
+            ..UsageInfo::default()
+        };
+        let mut fresh = UsageInfo {
+            reset_credits_available_count: Some(1),
+            ..UsageInfo::default()
+        };
+
+        merge_cached_reset_credits(&mut fresh, Some(&cached), now);
+
+        assert!(fresh.reset_credits.is_empty());
+        assert!(should_fetch_reset_credit_details(&fresh));
     }
 
     #[test]

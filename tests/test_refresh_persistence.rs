@@ -502,6 +502,58 @@ async fn rotated_refresh_token_is_persisted_even_when_usage_fails_afterwards() {
     server.shutdown();
 }
 
+/// Once rotation succeeds, a later Usage retry delay must not extend the
+/// interval in which the only valid refresh token exists solely in memory.
+#[tokio::test]
+async fn proactive_rotation_is_persisted_before_usage_rate_limit_backoff() {
+    let _lock = ENV_LOCK.lock().await;
+    let expiring_access = jwt_expiring_in(30);
+    let server = MockServer::start(
+        vec![(
+            "access_1".to_string(),
+            vec![reply(
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"detail": "slow down"}),
+            )],
+        )],
+        vec![rotation(1)],
+    )
+    .await;
+    let fx = fixture(&server, "early-persist", &expiring_access);
+    let profile_path = fx.profile_path.clone();
+    let fetch_path = profile_path.clone();
+
+    let fetch = tokio::spawn(async move {
+        codex_switch::usage::fetch_usage_retried_force(
+            "early-persist",
+            &fetch_path,
+            "early-persist",
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if server.usage_calls().iter().any(|token| token == "access_1") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("post-refresh Usage request must reach the server");
+
+    assert_eq!(
+        stored_refresh_token(&profile_path),
+        "refresh_1",
+        "the rotated token must reach disk before any Usage 429 sleep"
+    );
+
+    fetch.abort();
+    let _ = fetch.await;
+    server.shutdown();
+}
+
 /// D2: once a refresh succeeds the old refresh_token is dead server-side.
 /// Later retry rounds must present the rotated token, otherwise a transient
 /// usage failure escalates into a permanent `refresh_token_reused` lockout.
@@ -805,8 +857,8 @@ async fn refresh_that_cannot_be_saved_does_not_burn_another_rotation() {
     );
     assert_eq!(
         server.usage_calls(),
-        vec!["old_access".to_string(), "access_1".to_string()],
-        "the account must stop retrying once the rotated token failed to persist"
+        vec!["old_access".to_string()],
+        "the account must not make a follow-up Usage request before the rotated token is durable"
     );
     server.shutdown();
 }
@@ -1625,6 +1677,38 @@ async fn opportunistic_refresh_remembers_a_terminal_verdict_it_discovers() {
         server.token_calls(),
         vec!["refresh_dead_tail".to_string()],
         "a terminal verdict discovered by opportunistic refresh must prevent the next replay"
+    );
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn successful_usage_after_proactive_rejection_still_records_terminal_verdict() {
+    let _lock = ENV_LOCK.lock().await;
+    let expiring_access = jwt_expiring_in(30);
+    let server = MockServer::start(
+        vec![(expiring_access.clone(), vec![usage_ok()])],
+        vec![reused_refresh_reply()],
+    )
+    .await;
+    let fx = fixture(&server, "proactive_rejection", &expiring_access);
+
+    let usage = codex_switch::usage::fetch_usage_retried(
+        "proactive_rejection",
+        &fx.profile_path,
+        "proactive_rejection",
+    )
+    .await
+    .expect("the still-valid access token should return current usage");
+    assert!(usage.primary.is_some());
+    assert_eq!(server.token_calls(), vec!["refresh_old".to_string()]);
+
+    let failures = codex_switch::usage::refresh_expiring_tokens().await;
+
+    assert!(failures.is_empty());
+    assert_eq!(
+        server.token_calls(),
+        vec!["refresh_old".to_string()],
+        "the background refresher must not replay a credential already rejected during a successful usage fetch"
     );
     server.shutdown();
 }

@@ -29,6 +29,7 @@ pub(crate) struct TuiLogWriter {
 struct TuiLogState {
     lines: VecDeque<String>,
     capacity: usize,
+    revision: u64,
 }
 
 impl TuiLogWriter {
@@ -37,6 +38,7 @@ impl TuiLogWriter {
             state: Arc::new(Mutex::new(TuiLogState {
                 lines: VecDeque::new(),
                 capacity: MAX_TUI_LOG_LINES,
+                revision: 0,
             })),
         }
     }
@@ -47,15 +49,30 @@ impl TuiLogWriter {
             state: Arc::new(Mutex::new(TuiLogState {
                 lines: VecDeque::new(),
                 capacity,
+                revision: 0,
             })),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn lines(&self) -> Vec<String> {
         self.state
             .lock()
             .map(|state| state.lines.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn lines_if_changed(
+        &self,
+        previous_revision: Option<u64>,
+    ) -> Option<(u64, Vec<String>)> {
+        let state = self.state.lock().ok()?;
+        (previous_revision != Some(state.revision)).then(|| {
+            (
+                state.revision,
+                state.lines.iter().cloned().collect::<Vec<_>>(),
+            )
+        })
     }
 }
 
@@ -79,11 +96,16 @@ impl Write for TuiLogSink {
             .state
             .lock()
             .map_err(|_| io::Error::other("TUI log writer lock poisoned"))?;
+        let mut changed = false;
         for line in String::from_utf8_lossy(buf).lines() {
             if state.lines.len() == state.capacity {
                 state.lines.pop_front();
             }
             state.lines.push_back(line.to_string());
+            changed = true;
+        }
+        if changed {
+            state.revision = state.revision.wrapping_add(1);
         }
         Ok(buf.len())
     }
@@ -338,7 +360,15 @@ mod tests {
         let mut sink = writer.make_writer();
         sink.write_all(b"first\nsecond\n").unwrap();
 
-        assert_eq!(writer.lines(), vec!["first", "second"]);
+        let (revision, lines) = writer.lines_if_changed(None).unwrap();
+        assert_eq!(lines, vec!["first", "second"]);
+        assert!(writer.lines_if_changed(Some(revision)).is_none());
+
+        sink.write_all(b"third\n").unwrap();
+        assert_eq!(
+            writer.lines_if_changed(Some(revision)).unwrap().1,
+            vec!["first", "second", "third"]
+        );
     }
 
     #[test]
@@ -411,31 +441,12 @@ mod tests {
     // several `read_dir` passes over the log directory. At debug level that
     // turned every single log line into a directory walk.
 
-    /// The scan has to happen on the first write of a process — there is no
-    /// earlier one to have done it — and then only when a budget is spent.
     #[test]
-    fn the_first_write_of_a_process_always_runs_maintenance() {
-        assert!(maintenance_due(None, Instant::now(), 0));
-    }
-
-    #[test]
-    fn an_ordinary_record_shortly_after_a_scan_does_not_rescan() {
+    fn maintenance_runs_only_on_first_write_or_after_a_budget_is_spent() {
         let now = Instant::now();
-        assert!(
-            !maintenance_due(Some(now), now, 64),
-            "a handful of bytes moments after a scan must not trigger another one"
-        );
-    }
-
-    #[test]
-    fn maintenance_runs_again_once_the_byte_budget_is_spent() {
-        let now = Instant::now();
+        assert!(maintenance_due(None, now, 0));
+        assert!(!maintenance_due(Some(now), now, 64));
         assert!(maintenance_due(Some(now), now, MAINTENANCE_BYTE_BUDGET));
-    }
-
-    #[test]
-    fn maintenance_runs_again_once_the_interval_has_passed() {
-        let now = Instant::now();
         let last = now.checked_sub(MAINTENANCE_INTERVAL).unwrap();
         assert!(maintenance_due(Some(last), now, 1));
     }

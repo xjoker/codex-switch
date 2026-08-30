@@ -273,13 +273,27 @@ fn start_launchd() -> Result<()> {
 #[cfg(target_os = "macos")]
 fn stop_launchd() -> Result<()> {
     let path = plist_path()?;
+    stop_launchd_at(&path, |path| {
+        let status = std::process::Command::new("launchctl")
+            .args(["unload", &path.display().to_string()])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("launchctl unload failed ({status})");
+        }
+        Ok(())
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn stop_launchd_at(
+    path: &std::path::Path,
+    unload: impl FnOnce(&std::path::Path) -> Result<()>,
+) -> Result<()> {
     if !path.exists() {
         user_println("LaunchAgent not installed");
         return Ok(());
     }
-    let _ = std::process::Command::new("launchctl")
-        .args(["unload", &path.display().to_string()])
-        .status();
+    unload(path)?;
     user_println("Stopped LaunchAgent");
     Ok(())
 }
@@ -555,8 +569,8 @@ fn uninstall_task_scheduler() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_code_indicates_installed, launchd_plist, systemd_unit, task_scheduler_command,
-        task_scheduler_failure_message, uninstall_may_continue,
+        exit_code_indicates_installed, launchd_plist, stop_launchd_at, systemd_unit,
+        task_scheduler_command, task_scheduler_failure_message, uninstall_may_continue,
     };
     use std::path::Path;
 
@@ -602,6 +616,18 @@ mod tests {
         );
         assert!(plist.contains("<key>CODEX_SWITCH_HOME</key>"));
         assert!(plist.contains("<string>/Users/alice/relocated &amp; store</string>"));
+    }
+
+    #[test]
+    fn launchd_stop_propagates_an_unload_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let plist = dir.path().join("com.codex-switch.daemon.plist");
+        std::fs::write(&plist, "plist").unwrap();
+
+        let error = stop_launchd_at(&plist, |_| anyhow::bail!("launchctl unload failed"))
+            .expect_err("a loaded KeepAlive service must not be reported as stopped");
+
+        assert!(error.to_string().contains("launchctl unload failed"));
     }
 
     #[test]

@@ -119,7 +119,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 ## TUI 操作说明
 
-运行 `codex-switch tui`。三页：**Accounts**（ChatGPT 额度与选号）、**Providers**（自定义提供方）与 **Settings**（编辑 `config.toml`）。`Tab` / `Shift+Tab` 循环切换；`h` 帮助；`q` 退出。TUI 内按 `h` 看到的快捷键表与代码同源，以当前版本为准。
+运行 `codex-switch tui`。四页：**Accounts**（ChatGPT 额度与选号）、**Providers**（自定义提供方）、**Settings**（编辑 `config.toml`）与 **Logs**（本次会话诊断）。`Tab` / `Shift+Tab` 循环切换；`h` 帮助；`q` 退出。设置未保存时，退出前会要求确认。TUI 内按 `h` 看到的快捷键表与代码同源，以当前版本为准。
 
 设置 `NO_COLOR` 时，**CLI** 仍遵守无颜色；**TUI** 仍使用设计好的深色配色，避免浅色终端把按键提示洗成黑字。
 

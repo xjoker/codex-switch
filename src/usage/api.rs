@@ -419,15 +419,27 @@ async fn fetch_usage_retried_inner(
             refresh_token = Some(stored.refresh_token);
         }
 
-        let outcome = fetch_usage_with_refresh(
+        let (outcome, rejected_refresh) = fetch_usage_with_refresh_capturing_rejection(
             alias,
             &at,
             id_token.as_deref(),
             refresh_token.as_deref(),
             account_id.as_deref(),
             is_fedramp,
+            true,
         )
         .await;
+
+        if let Some(terminal) = &rejected_refresh
+            && let Some(presented) = refresh_token.as_deref()
+            && profile_still_holds_refresh_token(profile_path, presented)
+        {
+            let error = UsageError {
+                summary: terminal.summary(),
+                detail: terminal.to_string(),
+            };
+            remember_terminal_verdict(alias, &terminal.code, Some(presented), &error).await;
+        }
 
         // The auth server rotates `refresh_token` on every use and rejects the
         // previous one as reused. Persist and adopt the new credentials before
@@ -515,7 +527,30 @@ pub async fn fetch_usage_with_refresh(
     account_id: Option<&str>,
     is_fedramp: bool,
 ) -> UsageFetchOutcome {
+    fetch_usage_with_refresh_capturing_rejection(
+        alias,
+        access_token,
+        id_token,
+        refresh_token,
+        account_id,
+        is_fedramp,
+        false,
+    )
+    .await
+    .0
+}
+
+async fn fetch_usage_with_refresh_capturing_rejection(
+    alias: &str,
+    access_token: &str,
+    id_token: Option<&str>,
+    refresh_token: Option<&str>,
+    account_id: Option<&str>,
+    is_fedramp: bool,
+    persist_rotated_tokens: bool,
+) -> (UsageFetchOutcome, Option<TerminalAuthError>) {
     let mut refreshed = None;
+    let mut rejected_refresh = None;
     let result = fetch_usage_capturing_refresh(
         alias,
         access_token,
@@ -524,9 +559,11 @@ pub async fn fetch_usage_with_refresh(
         account_id,
         is_fedramp,
         &mut refreshed,
+        &mut rejected_refresh,
+        persist_rotated_tokens,
     )
     .await;
-    UsageFetchOutcome { refreshed, result }
+    (UsageFetchOutcome { refreshed, result }, rejected_refresh)
 }
 
 /// Inner body of [`fetch_usage_with_refresh`]. Every successful refresh is
@@ -541,6 +578,8 @@ async fn fetch_usage_capturing_refresh(
     account_id: Option<&str>,
     is_fedramp: bool,
     refreshed: &mut Option<RefreshedTokens>,
+    terminal_refresh: &mut Option<TerminalAuthError>,
+    persist_rotated_tokens: bool,
 ) -> Result<UsageInfo> {
     let client = auth::build_http_client()?;
     let usage_url = usage_url();
@@ -557,6 +596,10 @@ async fn fetch_usage_capturing_refresh(
             Ok(new_tokens) => {
                 let bearer = new_tokens.access_token.clone();
                 *refreshed = Some(new_tokens);
+                if persist_rotated_tokens {
+                    persist_refreshed_tokens(alias, rt, refreshed.as_ref().unwrap())
+                        .map_err(|error| anyhow::anyhow!(error.detail))?;
+                }
 
                 let resp = apply_account_routing_headers(
                     client
@@ -587,8 +630,9 @@ async fn fetch_usage_capturing_refresh(
                 anyhow::bail!("Usage API failed (HTTP {status}) after proactive token refresh");
             }
             Err(e) => {
-                if e.downcast_ref::<TerminalAuthError>().is_some() {
+                if let Some(terminal) = e.downcast_ref::<TerminalAuthError>() {
                     info!("[{alias}] proactive token refresh rejected permanently: {e:#}");
+                    *terminal_refresh = Some(terminal.clone());
                     rejected_refresh = Some(e);
                 } else {
                     info!(
@@ -641,6 +685,10 @@ async fn fetch_usage_capturing_refresh(
             Ok(new_tokens) => {
                 let bearer = new_tokens.access_token.clone();
                 *refreshed = Some(new_tokens);
+                if persist_rotated_tokens {
+                    persist_refreshed_tokens(alias, rt, refreshed.as_ref().unwrap())
+                        .map_err(|error| anyhow::anyhow!(error.detail))?;
+                }
 
                 let resp2 = apply_account_routing_headers(
                     client
