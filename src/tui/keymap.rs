@@ -297,6 +297,12 @@ pub const KEYMAP: &[Binding] = &[
         in_status_bar: true,
     },
     Binding {
+        keys: "mouse",
+        section: Section::Global,
+        label: "click tabs/rows; wheel scrolls logs/help/menus; click outside closes popups",
+        in_status_bar: false,
+    },
+    Binding {
         keys: "q",
         section: Section::Global,
         label: "quit",

@@ -1,4 +1,5 @@
 pub mod app;
+pub mod hitmap;
 pub mod keymap;
 pub mod menu;
 pub mod popup;

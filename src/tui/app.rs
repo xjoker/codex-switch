@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::DefaultTerminal;
 use tokio::sync::Semaphore;
 
@@ -257,6 +260,8 @@ pub struct App {
     pub detail_visible: bool,
     pub help_popup: Option<super::popup::PopupState>,
     pub menu: Option<super::menu::MenuState>,
+    /// Regions from the last drawn frame, used for mouse hit-testing.
+    pub hitmap: super::hitmap::HitMap,
     /// Session-level per-alias model list cache (no TTL). Populated lazily
     /// for the selected account or when its account details are opened.
     pub model_cache: HashMap<String, ModelStatus>,
@@ -326,6 +331,7 @@ impl App {
             detail_visible: true,
             help_popup: None,
             menu: None,
+            hitmap: super::hitmap::HitMap::default(),
             model_cache: HashMap::new(),
             pending_models: model_rx,
             model_sender: model_tx,
@@ -628,7 +634,7 @@ impl App {
     /// Entering Settings reloads `config.toml` from disk unless the form has
     /// unsaved edits.
     pub fn cycle_tab(&mut self, forward: bool) {
-        self.active_tab = if forward {
+        let next = if forward {
             match self.active_tab {
                 Tab::Accounts => Tab::Providers,
                 Tab::Providers => Tab::Settings,
@@ -643,10 +649,107 @@ impl App {
                 Tab::Logs => Tab::Settings,
             }
         };
+        self.select_tab(next);
+    }
+
+    /// Switch to `tab` (no-op if already there). Reloads Settings from disk
+    /// when entering that tab without unsaved edits.
+    pub fn select_tab(&mut self, tab: Tab) {
+        if self.active_tab == tab {
+            return;
+        }
+        self.active_tab = tab;
         self.status_msg = None;
         if self.active_tab == Tab::Settings && !self.settings.is_dirty() {
             let cfg = crate::config::load_current().unwrap_or_else(|_| crate::config::get());
             self.settings = super::settings::SettingsState::from_config(cfg);
+        }
+    }
+
+    /// Handle a mouse event against the last frame's hit map.
+    ///
+    /// Scope (P1+P2): wheel scroll on logs/help/menus; left-click tabs and
+    /// list rows; click outside dismissible overlays closes them. Forms,
+    /// launch picker, confirm, and text edits absorb mouse without action.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        use super::hitmap::{HitMap, OverlayHit};
+
+        let col = mouse.column;
+        let row = mouse.row;
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
+                match self.hitmap.overlay {
+                    OverlayHit::Modal => {}
+                    OverlayHit::Dismissible { panel } => {
+                        if !HitMap::contains(panel, col, row) {
+                            return;
+                        }
+                        if self.help_popup.is_some() {
+                            if let Some(state) = self.help_popup.as_mut() {
+                                if down {
+                                    state.scroll_down(u16::MAX);
+                                } else {
+                                    state.scroll_up();
+                                }
+                            }
+                        } else if let Some(menu) = self.menu.as_mut() {
+                            menu.handle_key(if down { KeyCode::Down } else { KeyCode::Up });
+                        }
+                    }
+                    OverlayHit::None => {
+                        if self.active_tab == Tab::Logs
+                            && self
+                                .hitmap
+                                .logs
+                                .is_some_and(|area| HitMap::contains(area, col, row))
+                        {
+                            if down {
+                                self.log_scroll = self.log_scroll.saturating_add(1);
+                            } else {
+                                self.log_scroll = self.log_scroll.saturating_sub(1);
+                            }
+                        }
+                    }
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => match self.hitmap.overlay {
+                OverlayHit::Modal => {}
+                OverlayHit::Dismissible { panel } => {
+                    if !HitMap::contains(panel, col, row) {
+                        if self.help_popup.is_some() {
+                            self.close_help();
+                        } else if self.menu.is_some() {
+                            self.close_menu();
+                        }
+                    }
+                }
+                OverlayHit::None => {
+                    if let Some(tab) = self.hitmap.tab_at(col, row) {
+                        self.select_tab(tab);
+                        return;
+                    }
+                    match self.active_tab {
+                        Tab::Accounts => {
+                            if let Some(list) = self.hitmap.account_list.as_ref()
+                                && let Some(idx) = HitMap::list_index_at(list, col, row)
+                            {
+                                self.selected = idx;
+                            }
+                        }
+                        Tab::Providers => {
+                            if let Some(list) = self.hitmap.provider_list.as_ref()
+                                && let Some(idx) = HitMap::list_index_at(list, col, row)
+                            {
+                                self.provider_selected = idx;
+                            }
+                        }
+                        Tab::Settings | Tab::Logs => {}
+                    }
+                }
+            },
+            _ => {}
         }
     }
 
@@ -2155,12 +2258,15 @@ pub async fn run() -> Result<()> {
     // Ensure terminal is restored even on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        disable_mouse_capture();
         ratatui::restore();
         original_hook(info);
     }));
 
     let mut terminal = ratatui::init();
+    enable_mouse_capture();
     let result = run_app(&mut terminal).await;
+    disable_mouse_capture();
     ratatui::restore();
     result
 }
@@ -2191,182 +2297,188 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
             .draw(|f| super::ui::render(f, &mut app))
             .context("drawing TUI")?;
 
-        if event::poll(Duration::from_millis(100)).context("polling terminal events")?
-            && let Event::Key(key) = event::read().context("reading terminal event")?
-        {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            if !accepts_key_event(&key) {
-                continue;
-            }
+        if event::poll(Duration::from_millis(100)).context("polling terminal events")? {
+            match event::read().context("reading terminal event")? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    if !accepts_key_event(&key) {
+                        continue;
+                    }
 
-            // Search and rename inputs need raw case-sensitive keystrokes.
-            if app.rename.is_some() {
-                app.handle_rename_key(key.code);
-                continue;
-            }
-            if app.search_active {
-                app.handle_search_key(key.code);
-                continue;
-            }
-            // The provider form needs raw, case-sensitive keystrokes.
-            if app.provider_form.is_some() {
-                app.handle_provider_form_key(key.code);
-                continue;
-            }
-            if app.active_tab == Tab::Settings && app.settings.is_editing() {
-                app.handle_settings_key(key.code);
-                continue;
-            }
-            if app.provider_launch.is_some() {
-                if let Some((alias, model, reasoning, extra_args)) =
-                    app.handle_provider_launch_key(key.code)
-                {
-                    perform_launch(
-                        terminal,
-                        &mut app,
-                        alias,
-                        Some(model),
-                        reasoning,
-                        extra_args,
-                    )
-                    .await;
-                }
-                continue;
-            }
-
-            // Capital 'W' is a distinct global binding (toggle auto-warmup),
-            // separate from menu 'w' (per-account warmup). Detect it before
-            // case normalization so it survives the lowercase dispatch below.
-            // Only meaningful in the main view (no popup/menu/confirm overlay).
-            if matches!(key.code, KeyCode::Char('W'))
-                && app.active_tab == Tab::Accounts
-                && app.help_popup.is_none()
-                && app.menu.is_none()
-                && app.confirm.is_none()
-            {
-                app.toggle_auto_warmup();
-                continue;
-            }
-
-            // Normalize letter case for top-level dispatch:
-            // any uppercase letter is treated as its lowercase equivalent.
-            let code = match key.code {
-                KeyCode::Char(c) if c.is_ascii_uppercase() => KeyCode::Char(c.to_ascii_lowercase()),
-                other => other,
-            };
-
-            // Help popup: any key (esc/q/h preferred) closes it; arrows scroll.
-            if app.help_popup.is_some() {
-                handle_help_key(&mut app, code);
-                continue;
-            }
-
-            // Active menu intercepts everything.
-            if app.menu.is_some() {
-                handle_menu_key(&mut app, terminal, code).await;
-                continue;
-            }
-
-            if app.confirm.is_some() {
-                match code {
-                    KeyCode::Char('y') if app.confirm_action() => break,
-                    KeyCode::Char('y') => {}
-                    _ => app.cancel_confirm(),
-                }
-                continue;
-            }
-
-            match code {
-                KeyCode::Char('q') if app.request_quit() => break,
-                KeyCode::Char('q') => {}
-                KeyCode::Char('h') => app.open_help(),
-                KeyCode::Tab => app.cycle_tab(true),
-                KeyCode::BackTab => app.cycle_tab(false),
-                _ => match app.active_tab {
-                    Tab::Accounts => match code {
-                        KeyCode::Esc => {
-                            if app.search.is_some() {
-                                app.search = None;
-                                app.update_view();
-                            } else if !app.marked.is_empty() {
-                                app.clear_marks();
-                            }
-                        }
-                        KeyCode::Down | KeyCode::Char('j')
-                            if app.selected + 1 < app.view_indices.len() =>
+                    // Search and rename inputs need raw case-sensitive keystrokes.
+                    if app.rename.is_some() {
+                        app.handle_rename_key(key.code);
+                        continue;
+                    }
+                    if app.search_active {
+                        app.handle_search_key(key.code);
+                        continue;
+                    }
+                    // The provider form needs raw, case-sensitive keystrokes.
+                    if app.provider_form.is_some() {
+                        app.handle_provider_form_key(key.code);
+                        continue;
+                    }
+                    if app.active_tab == Tab::Settings && app.settings.is_editing() {
+                        app.handle_settings_key(key.code);
+                        continue;
+                    }
+                    if app.provider_launch.is_some() {
+                        if let Some((alias, model, reasoning, extra_args)) =
+                            app.handle_provider_launch_key(key.code)
                         {
-                            app.selected += 1;
+                            perform_launch(
+                                terminal,
+                                &mut app,
+                                alias,
+                                Some(model),
+                                reasoning,
+                                extra_args,
+                            )
+                            .await;
                         }
-                        KeyCode::Up | KeyCode::Char('k') if app.selected > 0 => {
-                            app.selected -= 1;
+                        continue;
+                    }
+
+                    // Capital 'W' is a distinct global binding (toggle auto-warmup),
+                    // separate from menu 'w' (per-account warmup). Detect it before
+                    // case normalization so it survives the lowercase dispatch below.
+                    // Only meaningful in the main view (no popup/menu/confirm overlay).
+                    if matches!(key.code, KeyCode::Char('W'))
+                        && app.active_tab == Tab::Accounts
+                        && app.help_popup.is_none()
+                        && app.menu.is_none()
+                        && app.confirm.is_none()
+                    {
+                        app.toggle_auto_warmup();
+                        continue;
+                    }
+
+                    // Normalize letter case for top-level dispatch:
+                    // any uppercase letter is treated as its lowercase equivalent.
+                    let code = match key.code {
+                        KeyCode::Char(c) if c.is_ascii_uppercase() => {
+                            KeyCode::Char(c.to_ascii_lowercase())
                         }
-                        KeyCode::Enter => {
-                            if app.marked.is_empty() {
-                                app.open_account_menu();
-                            } else {
-                                app.open_batch_menu();
-                            }
+                        other => other,
+                    };
+
+                    // Help popup: any key (esc/q/h preferred) closes it; arrows scroll.
+                    if app.help_popup.is_some() {
+                        handle_help_key(&mut app, code);
+                        continue;
+                    }
+
+                    // Active menu intercepts everything.
+                    if app.menu.is_some() {
+                        handle_menu_key(&mut app, terminal, code).await;
+                        continue;
+                    }
+
+                    if app.confirm.is_some() {
+                        match code {
+                            KeyCode::Char('y') if app.confirm_action() => break,
+                            KeyCode::Char('y') => {}
+                            _ => app.cancel_confirm(),
                         }
-                        KeyCode::Char('a') => app.open_add_menu(),
-                        KeyCode::Char('o') if app.marked.is_empty() => {
-                            if let Some(alias) = app
-                                .selected_account_idx()
-                                .and_then(|idx| app.accounts.get(idx))
-                                .map(|entry| entry.alias.clone())
-                            {
-                                perform_launch(
-                                    terminal,
-                                    &mut app,
-                                    alias,
-                                    None,
-                                    crate::provider::ReasoningLaunch::Saved,
-                                    Vec::new(),
-                                )
-                                .await;
-                            } else {
-                                app.set_status_error("No account selected".to_string(), 3);
-                            }
-                        }
-                        KeyCode::Char('r') => app.refresh(Refresh::Forced),
-                        KeyCode::Char('t') => app.toggle_auto_refresh(),
-                        KeyCode::Char('i') => app.toggle_detail_panel(),
-                        KeyCode::Char('s') => app.cycle_sort(),
-                        KeyCode::Char(' ') => app.toggle_mark(),
-                        KeyCode::Char('/') => {
-                            if let Some(search) = &mut app.search {
-                                search.cursor = search.query.chars().count();
-                            } else {
-                                app.search = Some(SearchState {
-                                    query: String::new(),
-                                    cursor: 0,
-                                });
-                                app.update_view();
-                            }
-                            app.search_active = true;
-                        }
-                        _ => {}
-                    },
-                    Tab::Providers => app.handle_provider_list_key(code),
-                    Tab::Settings => app.handle_settings_key(code),
-                    Tab::Logs => match code {
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            app.log_scroll = app.log_scroll.saturating_sub(1);
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            app.log_scroll = app.log_scroll.saturating_add(1);
-                        }
-                        KeyCode::PageDown => {
-                            app.log_scroll = app.log_scroll.saturating_sub(10);
-                        }
-                        KeyCode::PageUp => {
-                            app.log_scroll = app.log_scroll.saturating_add(10);
-                        }
-                        KeyCode::End => app.log_scroll = 0,
-                        _ => {}
-                    },
-                },
+                        continue;
+                    }
+
+                    match code {
+                        KeyCode::Char('q') if app.request_quit() => break,
+                        KeyCode::Char('q') => {}
+                        KeyCode::Char('h') => app.open_help(),
+                        KeyCode::Tab => app.cycle_tab(true),
+                        KeyCode::BackTab => app.cycle_tab(false),
+                        _ => match app.active_tab {
+                            Tab::Accounts => match code {
+                                KeyCode::Esc => {
+                                    if app.search.is_some() {
+                                        app.search = None;
+                                        app.update_view();
+                                    } else if !app.marked.is_empty() {
+                                        app.clear_marks();
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('j')
+                                    if app.selected + 1 < app.view_indices.len() =>
+                                {
+                                    app.selected += 1;
+                                }
+                                KeyCode::Up | KeyCode::Char('k') if app.selected > 0 => {
+                                    app.selected -= 1;
+                                }
+                                KeyCode::Enter => {
+                                    if app.marked.is_empty() {
+                                        app.open_account_menu();
+                                    } else {
+                                        app.open_batch_menu();
+                                    }
+                                }
+                                KeyCode::Char('a') => app.open_add_menu(),
+                                KeyCode::Char('o') if app.marked.is_empty() => {
+                                    if let Some(alias) = app
+                                        .selected_account_idx()
+                                        .and_then(|idx| app.accounts.get(idx))
+                                        .map(|entry| entry.alias.clone())
+                                    {
+                                        perform_launch(
+                                            terminal,
+                                            &mut app,
+                                            alias,
+                                            None,
+                                            crate::provider::ReasoningLaunch::Saved,
+                                            Vec::new(),
+                                        )
+                                        .await;
+                                    } else {
+                                        app.set_status_error("No account selected".to_string(), 3);
+                                    }
+                                }
+                                KeyCode::Char('r') => app.refresh(Refresh::Forced),
+                                KeyCode::Char('t') => app.toggle_auto_refresh(),
+                                KeyCode::Char('i') => app.toggle_detail_panel(),
+                                KeyCode::Char('s') => app.cycle_sort(),
+                                KeyCode::Char(' ') => app.toggle_mark(),
+                                KeyCode::Char('/') => {
+                                    if let Some(search) = &mut app.search {
+                                        search.cursor = search.query.chars().count();
+                                    } else {
+                                        app.search = Some(SearchState {
+                                            query: String::new(),
+                                            cursor: 0,
+                                        });
+                                        app.update_view();
+                                    }
+                                    app.search_active = true;
+                                }
+                                _ => {}
+                            },
+                            Tab::Providers => app.handle_provider_list_key(code),
+                            Tab::Settings => app.handle_settings_key(code),
+                            Tab::Logs => match code {
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    app.log_scroll = app.log_scroll.saturating_sub(1);
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    app.log_scroll = app.log_scroll.saturating_add(1);
+                                }
+                                KeyCode::PageDown => {
+                                    app.log_scroll = app.log_scroll.saturating_sub(10);
+                                }
+                                KeyCode::PageUp => {
+                                    app.log_scroll = app.log_scroll.saturating_add(10);
+                                }
+                                KeyCode::End => app.log_scroll = 0,
+                                _ => {}
+                            },
+                        },
+                    }
+                }
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
+                _ => {}
             }
         }
     }
@@ -2474,6 +2586,7 @@ fn reset_plain_terminal_view() {
 }
 
 fn suspend_tui_for_plain_output() {
+    disable_mouse_capture();
     ratatui::restore();
     reset_plain_terminal_view();
 }
@@ -2481,6 +2594,7 @@ fn suspend_tui_for_plain_output() {
 fn resume_tui_after_plain_output(terminal: &mut DefaultTerminal) {
     reset_plain_terminal_view();
     *terminal = ratatui::init();
+    enable_mouse_capture();
     let _ = terminal.clear();
 }
 
@@ -2773,6 +2887,14 @@ async fn run_oauth_inner(mode: OAuthMode, device: bool) -> Result<String> {
     }
 }
 
+fn enable_mouse_capture() {
+    let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+}
+
+fn disable_mouse_capture() {
+    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+}
+
 fn handle_help_key(app: &mut App, code: KeyCode) {
     let Some(state) = app.help_popup.as_mut() else {
         return;
@@ -2820,7 +2942,112 @@ mod tests {
         usage::{Refresh, ResetCredit, UsageInfo},
         warmup::ModelEntry,
     };
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+
+    fn left_click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn scroll(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_click_selects_tab_and_account_row() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "a".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.accounts.push(AccountEntry {
+            alias: "b".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0, 1];
+        app.selected = 0;
+        app.hitmap.tabs = vec![
+            (
+                ratatui::layout::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 14,
+                    height: 1,
+                },
+                Tab::Accounts,
+            ),
+            (
+                ratatui::layout::Rect {
+                    x: 16,
+                    y: 0,
+                    width: 14,
+                    height: 1,
+                },
+                Tab::Providers,
+            ),
+        ];
+        app.hitmap.account_list = Some(crate::tui::hitmap::ListHit {
+            rows_area: ratatui::layout::Rect {
+                x: 1,
+                y: 3,
+                width: 40,
+                height: 5,
+            },
+            offset: 0,
+            row_count: 2,
+        });
+
+        app.handle_mouse(left_click(18, 0));
+        assert_eq!(app.active_tab, Tab::Providers);
+
+        app.select_tab(Tab::Accounts);
+        app.handle_mouse(left_click(5, 4));
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_logs_and_outside_click_closes_help() {
+        let mut app = App::new();
+        app.active_tab = Tab::Logs;
+        app.log_scroll = 3;
+        app.hitmap.logs = Some(ratatui::layout::Rect {
+            x: 0,
+            y: 1,
+            width: 40,
+            height: 10,
+        });
+        app.handle_mouse(scroll(MouseEventKind::ScrollUp, 5, 3));
+        assert_eq!(app.log_scroll, 2);
+        app.handle_mouse(scroll(MouseEventKind::ScrollDown, 5, 3));
+        assert_eq!(app.log_scroll, 3);
+
+        app.open_help();
+        app.hitmap.overlay = crate::tui::hitmap::OverlayHit::Dismissible {
+            panel: ratatui::layout::Rect {
+                x: 10,
+                y: 5,
+                width: 20,
+                height: 10,
+            },
+        };
+        app.handle_mouse(left_click(0, 0));
+        assert!(app.help_popup.is_none());
+    }
 
     fn capture_info_logs(action: impl FnOnce()) -> Vec<String> {
         let writer = crate::logging::TuiLogWriter::new();

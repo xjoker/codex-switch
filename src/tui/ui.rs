@@ -24,6 +24,7 @@ fn status_message_color(is_error: bool) -> Color {
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    app.hitmap.clear();
 
     // Paint the entire area with a solid background first
     f.render_widget(Block::default().style(base()), area);
@@ -72,17 +73,38 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Help popup takes top priority since the user invoked it explicitly.
     let active_tab = app.active_tab;
     if let Some(state) = app.help_popup.as_mut() {
-        render_help_popup(f, state, active_tab, area);
-    } else if let Some(form) = app.provider_form.as_mut() {
-        super::provider_form::render_provider_form(f, form, area);
-    } else if let Some(launch) = app.provider_launch.as_mut() {
-        super::provider_launch::render_provider_launch(f, launch, area);
-    } else if let Some(menu) = app.menu.as_mut() {
-        menu.render(f, area);
+        let panel = render_help_popup(f, state, active_tab, area);
+        app.hitmap.overlay = match panel {
+            Some(panel) => super::hitmap::OverlayHit::Dismissible { panel },
+            None => super::hitmap::OverlayHit::Modal,
+        };
+    } else if app.provider_form.is_some() {
+        if let Some(form) = app.provider_form.as_mut() {
+            super::provider_form::render_provider_form(f, form, area);
+        }
+        app.hitmap.overlay = super::hitmap::OverlayHit::Modal;
+    } else if app.provider_launch.is_some() {
+        if let Some(launch) = app.provider_launch.as_mut() {
+            super::provider_launch::render_provider_launch(f, launch, area);
+        }
+        app.hitmap.overlay = super::hitmap::OverlayHit::Modal;
+    } else if app.menu.is_some() {
+        let panel = app.menu.as_mut().and_then(|menu| menu.render(f, area));
+        app.hitmap.overlay = match panel {
+            Some(panel) => super::hitmap::OverlayHit::Dismissible { panel },
+            None => super::hitmap::OverlayHit::Modal,
+        };
+    } else if app.confirm.is_some()
+        || app.rename.is_some()
+        || app.search_active
+        || (app.active_tab == Tab::Settings && app.settings.is_editing())
+    {
+        app.hitmap.overlay = super::hitmap::OverlayHit::Modal;
     }
 }
 
 fn render_logs(f: &mut Frame, app: &mut App, area: Rect) {
+    app.hitmap.logs = Some(area);
     let inner_width = area.width.saturating_sub(2).max(1);
     let previous_revision = (app.log_render_width == inner_width)
         .then_some(app.log_render_revision)
@@ -144,7 +166,7 @@ fn render_help_popup(
     state: &mut popup::PopupState,
     active_tab: Tab,
     area: ratatui::layout::Rect,
-) {
+) -> Option<Rect> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let key_style = base().fg(C_YELLOW).add_modifier(Modifier::BOLD);
     let label_style = base().fg(C_WHITE);
@@ -189,11 +211,11 @@ fn render_help_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  esc / q / h to close \u{2022} j k arrows / PgUp PgDn to scroll",
+        "  esc / q / h to close \u{2022} j k arrows / PgUp PgDn / mouse wheel to scroll",
         dim_style,
     )));
 
-    popup::render_popup(f, "Help", &lines, state, area);
+    popup::render_popup(f, "Help", &lines, state, area)
 }
 
 fn display_width(s: &str) -> usize {
@@ -249,7 +271,7 @@ fn table_text_widths(
     widths
 }
 
-fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
+fn render_account_table(f: &mut Frame, app: &mut App, area: Rect) {
     if app.accounts.is_empty() {
         let block = Block::default()
             .title(" codex-switch ")
@@ -620,6 +642,11 @@ fn render_account_table(f: &mut Frame, app: &App, area: Rect) {
         .style(base());
 
     f.render_stateful_widget(table, area, &mut table_state);
+    app.hitmap.account_list = Some(super::hitmap::ListHit {
+        rows_area: super::hitmap::table_rows_area(area),
+        offset: table_state.offset(),
+        row_count: app.view_indices.len(),
+    });
 }
 
 fn usage_gauges_height(usage: &UsageInfo) -> u16 {
@@ -877,7 +904,7 @@ pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
 }
 
 /// Top tab bar: Accounts, Providers, Settings, Logs.
-fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
+fn render_tab_bar(f: &mut Frame, app: &mut App, area: Rect) {
     let active = base().fg(BG).bg(C_CYAN).add_modifier(Modifier::BOLD);
     let inactive = base().fg(C_GRAY);
     let style = |tab: Tab| {
@@ -887,20 +914,45 @@ fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
             inactive
         }
     };
+
+    let accounts = format!(" Accounts ({}) ", app.accounts.len());
+    let providers = format!(" Providers ({}) ", app.providers.len());
+    let settings = " Settings ".to_string();
+    let logs = " Logs ".to_string();
+    let gap_w = 2u16;
+
+    let mut x = area.x;
+    let tab_specs = [
+        (accounts.as_str(), Tab::Accounts),
+        (providers.as_str(), Tab::Providers),
+        (settings.as_str(), Tab::Settings),
+        (logs.as_str(), Tab::Logs),
+    ];
+    for (i, (label, tab)) in tab_specs.iter().enumerate() {
+        if i > 0 {
+            x = x.saturating_add(gap_w);
+        }
+        let width = label.chars().count() as u16;
+        app.hitmap.tabs.push((
+            Rect {
+                x,
+                y: area.y,
+                width,
+                height: area.height.max(1),
+            },
+            *tab,
+        ));
+        x = x.saturating_add(width);
+    }
+
     let line = Line::from(vec![
-        Span::styled(
-            format!(" Accounts ({}) ", app.accounts.len()),
-            style(Tab::Accounts),
-        ),
+        Span::styled(accounts, style(Tab::Accounts)),
         Span::styled("  ", base()),
-        Span::styled(
-            format!(" Providers ({}) ", app.providers.len()),
-            style(Tab::Providers),
-        ),
+        Span::styled(providers, style(Tab::Providers)),
         Span::styled("  ", base()),
-        Span::styled(" Settings ", style(Tab::Settings)),
+        Span::styled(settings, style(Tab::Settings)),
         Span::styled("  ", base()),
-        Span::styled(" Logs ", style(Tab::Logs)),
+        Span::styled(logs, style(Tab::Logs)),
         Span::styled("   Tab to switch", base().fg(DIM)),
     ]);
     f.render_widget(Paragraph::new(line).style(base()), area);
@@ -908,7 +960,7 @@ fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
 
 /// Providers tab: read-only list of configured custom API providers. The stored
 /// API key is never rendered.
-fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
+fn render_providers_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(" Custom providers ")
         .borders(Borders::ALL)
@@ -972,6 +1024,16 @@ fn render_providers_tab(f: &mut Frame, app: &App, area: Rect) {
 
     let mut state = TableState::default().with_selected(app.provider_selected);
     f.render_stateful_widget(table, inner, &mut state);
+    app.hitmap.provider_list = Some(super::hitmap::ListHit {
+        rows_area: Rect {
+            x: inner.x,
+            y: inner.y.saturating_add(1),
+            width: inner.width,
+            height: inner.height.saturating_sub(1),
+        },
+        offset: state.offset(),
+        row_count: app.providers.len(),
+    });
 }
 
 /// Compact pay-per-use credits balance for the table column. Mirrors the CLI
@@ -1966,7 +2028,7 @@ mod tests {
         });
         app.view_indices.push(0);
 
-        let render = |app: &App| {
+        let render = |app: &mut App| {
             let backend = TestBackend::new(120, 6);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
@@ -1977,7 +2039,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let rows = render(&app);
+        let rows = render(&mut app);
         let header = rows
             .iter()
             .find(|line| line.contains("Alias"))
@@ -1996,7 +2058,7 @@ mod tests {
             window_minutes: Some(300),
         });
 
-        let rows = render(&app);
+        let rows = render(&mut app);
         let header = rows
             .iter()
             .find(|line| line.contains("Alias"))

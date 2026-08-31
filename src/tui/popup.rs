@@ -67,18 +67,18 @@ impl PopupState {
 /// If terminal is too small, renders a single-line fallback at the bottom
 /// of `screen` instead of the popup.
 ///
-/// Returns the inner content area width (so callers can do their own
-/// truncation if needed); caller may ignore.
+/// Returns the popup panel rect for mouse hit-testing, or `None` when the
+/// terminal is too small for a normal popup.
 pub fn render_popup(
     f: &mut Frame,
     title: &str,
     lines: &[Line<'_>],
     state: &mut PopupState,
     screen: Rect,
-) {
+) -> Option<Rect> {
     if screen.width < MIN_TERM_W || screen.height < MIN_TERM_H {
         render_too_small_fallback(f, screen);
-        return;
+        return None;
     }
 
     // Measure content
@@ -155,6 +155,7 @@ pub fn render_popup(
     if scrollable && inner.width >= 1 && visible_h > 0 {
         render_scrollbar(f, inner, scroll, max_scroll, visible_h, total_lines);
     }
+    Some(area)
 }
 
 fn render_scrollbar(
@@ -340,7 +341,9 @@ mod tests {
             super::super::theme::key(),
         ))];
         terminal
-            .draw(|f| render_popup(f, "Title", &lines, &mut state, f.area()))
+            .draw(|f| {
+                let _ = render_popup(f, "Title", &lines, &mut state, f.area());
+            })
             .unwrap();
         let cell = terminal
             .backend()

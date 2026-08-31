@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20260831.4.0 — 2026-08-31
+
+- **TUI mouse navigation** — Click tabs to switch pages and click Accounts/Providers rows to select. Mouse wheel scrolls Logs, Help, and account menus; click outside a dismissible popup to close it. Forms, launch pickers, confirmations, and text edits still absorb mouse input so they do not click through.
+
 ## v20260831.3.0 — 2026-08-31
 
 - **Settings save no longer needs a daemon restart for most keys** — The TUI applies the new `config.toml` in-process immediately. A running daemon re-reads the file about once a minute, including poll/cache intervals (timers are rebuilt), switch threshold, notify, warmup, and selection keys. Only `daemon.log_level` still needs a restart. A temporarily missing config file keeps the last in-memory snapshot instead of resetting to defaults.

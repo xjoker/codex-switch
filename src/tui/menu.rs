@@ -383,7 +383,7 @@ impl MenuState {
         }
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect) {
+    pub fn render(&mut self, f: &mut Frame, area: Rect) -> Option<Rect> {
         let key_style = key();
         let label_style = base();
         let dim = dim_style();
@@ -571,7 +571,7 @@ impl MenuState {
                     "j k / arrows / PgUp PgDn scroll details · esc / q cancel",
                     dim,
                 )));
-                render_popup(f, title, &left_lines, popup, area);
+                render_popup(f, title, &left_lines, popup, area)
             }
             MenuState::Add { popup } => {
                 let title = "Add new account";
@@ -588,7 +588,7 @@ impl MenuState {
                 ));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, title, &lines, popup, area);
+                render_popup(f, title, &lines, popup, area)
             }
             MenuState::ReloginFlow {
                 alias,
@@ -614,7 +614,7 @@ impl MenuState {
                 ));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, "re-Login", &lines, popup, area);
+                render_popup(f, "re-Login", &lines, popup, area)
             }
             MenuState::Batch { count, popup } => {
                 let title = "Batch";
@@ -634,7 +634,7 @@ impl MenuState {
                 ));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, title, &lines, popup, area);
+                render_popup(f, title, &lines, popup, area)
             }
             MenuState::BatchReloginFlow { count, popup } => {
                 let mut lines: Vec<Line<'static>> = Vec::new();
@@ -655,7 +655,7 @@ impl MenuState {
                 ));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, "Batch re-Login", &lines, popup, area);
+                render_popup(f, "Batch re-Login", &lines, popup, area)
             }
         }
     }
@@ -759,7 +759,9 @@ mod tests {
             let mut terminal = Terminal::new(backend).unwrap();
 
             terminal
-                .draw(|frame| menu.render(frame, frame.area()))
+                .draw(|frame| {
+                    let _ = menu.render(frame, frame.area());
+                })
                 .unwrap();
 
             for needle in ["Reset cards", "1 available", "expires soon"] {
@@ -806,7 +808,9 @@ mod tests {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| menu.render(frame, frame.area()))
+            .draw(|frame| {
+                let _ = menu.render(frame, frame.area());
+            })
             .unwrap();
         assert!(
             find_text(terminal.backend(), "Credits").is_some(),
@@ -824,7 +828,9 @@ mod tests {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| menu.render(frame, frame.area()))
+            .draw(|frame| {
+                let _ = menu.render(frame, frame.area());
+            })
             .unwrap();
         assert!(find_text(terminal.backend(), "Credits").is_some());
         assert!(
@@ -999,7 +1005,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|frame| menu.render(frame, frame.area()))
+            .draw(|frame| {
+                let _ = menu.render(frame, frame.area());
+            })
             .unwrap();
 
         let models = find_text(terminal.backend(), "Models").expect("models heading");
