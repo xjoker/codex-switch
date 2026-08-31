@@ -227,6 +227,7 @@ pub(crate) async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
         let (alias, result) = res.context("warmup task panicked")?;
         match &result {
             Ok(()) => {
+                tracing::info!(action = "warmup", alias = %alias, outcome = "completed", "warmup completed");
                 if json {
                     results.push(serde_json::json!({"alias": alias, "ok": true}));
                 } else {

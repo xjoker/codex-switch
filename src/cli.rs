@@ -148,7 +148,7 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "auto", env = "CS_COLOR")]
     pub color: ColorMode,
 
-    /// Enable debug logging (shows HTTP requests, API responses, cache status)
+    /// Enable debug logging (shows HTTP status, retries, and cache status)
     #[arg(long, global = true)]
     pub debug: bool,
 

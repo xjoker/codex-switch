@@ -39,7 +39,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | `--json-pretty` | — | Indented structured output. |
 | `--proxy <URL>` | `CS_PROXY` | Override proxy configuration for this process; supports `http(s)://`, `socks4://`, `socks5://`, and `socks5h://` (remote DNS). |
 | `--color <auto\|always\|never>` | `CS_COLOR` | Control CLI terminal color. `NO_COLOR` disables CLI color regardless of this option. The TUI still paints its designed palette. |
-| `--debug` | — | Emit diagnostic information (HTTP requests, API responses, cache status) to stderr; redact it before sharing. |
+| `--debug` | — | Emit diagnostic information (HTTP status, retry, cache status) to stderr. Review it before sharing. |
 | `-V`, `--version` | — | Print the binary version. |
 
 ## Automation contract
@@ -146,7 +146,7 @@ Destructive or consumptive actions always require confirmation.
 
 ### Logs tab
 
-Session diagnostics stay inside the TUI instead of writing through the active terminal screen. Use `j` / `k` or `PgUp` / `PgDn` to scroll and `End` to return to the latest line. `Tab` continues to Accounts.
+Session diagnostics stay inside the TUI instead of writing through the active terminal screen. It shows `INFO` and above, including completed or failed account operations; `DEBUG` requires `--debug` or `RUST_LOG`. Use `j` / `k` or `PgUp` / `PgDn` to scroll and `End` to return to the latest line. `Tab` continues to Accounts.
 
 ## Next steps
 

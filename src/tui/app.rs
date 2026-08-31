@@ -790,12 +790,14 @@ impl App {
                     "Added"
                 };
                 if let Err(e) = crate::provider::save(&profile) {
+                    tracing::error!(action = "provider_save", alias = %profile.alias, error = %e, "provider save failed");
                     self.set_status_error(format!("{action} provider failed: {e}"), 6);
                     return;
                 }
                 if let Some(catalog) = fetched_catalog
                     && let Err(e) = profile.save_synced_model_catalog_blocking(&catalog)
                 {
+                    tracing::warn!(action = "provider_save", alias = %profile.alias, outcome = "partial", "provider saved but model metadata save failed");
                     self.set_status_error(
                         format!(
                             "{action} provider '{}', but saving fetched model metadata failed: {e}",
@@ -806,6 +808,7 @@ impl App {
                     return;
                 }
                 self.provider_form = None;
+                tracing::info!(action = "provider_save", alias = %profile.alias, outcome = "completed", "provider saved");
                 self.set_status(format!("{action} provider '{}'", profile.alias), 4);
                 self.active_tab = Tab::Providers;
                 self.load_profiles();
@@ -835,12 +838,25 @@ impl App {
             .collect();
         let (count, _, skipped) = self.warmup_indices(target_indices);
         if count == 0 {
+            tracing::info!(
+                action = "warmup",
+                alias,
+                outcome = "skipped",
+                skipped,
+                "warmup skipped"
+            );
             if skipped > 0 {
                 self.set_status(format!("{alias}: already active or in flight"), 4);
             } else {
                 self.set_status(format!("{alias}: nothing to warm up"), 4);
             }
         } else {
+            tracing::info!(
+                action = "warmup",
+                alias,
+                outcome = "started",
+                "warmup started"
+            );
             self.set_status(format!("Warming up {alias}..."), 6);
         }
     }
@@ -1168,10 +1184,7 @@ impl App {
             let _permit = limiter.acquire().await;
             let result = crate::warmup::warmup_account(&alias, &path)
                 .await
-                .map_err(|e| {
-                    tracing::error!(alias = %alias, error = %format!("{e:#}"), "warmup failed");
-                    format!("{e:#}")
-                });
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send((task_id, alias, result)).await;
         });
     }
@@ -1224,10 +1237,12 @@ impl App {
             }
             match result {
                 Ok(()) => {
+                    tracing::info!(action = "warmup", alias = %alias, outcome = "completed", "warmup completed");
                     self.set_status(format!("Warmed up {alias} — refreshing usage..."), 4);
                     to_refresh.insert(alias);
                 }
                 Err(e) => {
+                    tracing::error!(action = "warmup", alias = %alias, outcome = "failed", "warmup failed");
                     self.set_status_error(format!("Warmup failed ({alias}): {e}"), 6);
                 }
             }
@@ -1582,11 +1597,10 @@ impl App {
         };
         let mut refresh_open_account = false;
         while let Ok((alias, request_id, result)) = self.pending_results.try_recv() {
-            let is_current_request = self
-                .refreshing_requests
-                .get(&alias)
-                .is_some_and(|(active_id, _)| *active_id == request_id);
-            if !is_current_request {
+            let Some((active_id, refresh)) = self.refreshing_requests.get(&alias).copied() else {
+                continue;
+            };
+            if active_id != request_id {
                 continue;
             }
             self.refreshing_requests.remove(&alias);
@@ -1594,8 +1608,18 @@ impl App {
                 continue;
             };
             self.accounts[idx].usage = match result {
-                Ok(u) => UsageStatus::Loaded(Box::new(u)),
-                Err(e) => UsageStatus::Error(e),
+                Ok(u) => {
+                    if matches!(refresh, Refresh::Forced) {
+                        tracing::info!(action = "usage_refresh", alias = %alias, outcome = "completed", "usage refresh completed");
+                    }
+                    UsageStatus::Loaded(Box::new(u))
+                }
+                Err(e) => {
+                    if matches!(refresh, Refresh::Forced) {
+                        tracing::error!(action = "usage_refresh", alias = %alias, outcome = "failed", "usage refresh failed");
+                    }
+                    UsageStatus::Error(e)
+                }
             };
             self.usage_generations.insert(alias.clone(), request_id);
             let should_refresh_cards = matches!(
@@ -1641,8 +1665,12 @@ impl App {
                         a.is_current = a.alias == current;
                     }
                     self.set_status(format!("Switched to {alias}"), 3);
+                    tracing::info!(action = "switch", alias = %alias, outcome = "completed", "account switched");
                 }
-                Err(e) => self.set_status_error(format!("Switch failed: {e}"), 5),
+                Err(e) => {
+                    tracing::error!(action = "switch", alias = %alias, outcome = "failed", error = %e, "account switch failed");
+                    self.set_status_error(format!("Switch failed: {e}"), 5)
+                }
             }
         }
     }
@@ -1781,11 +1809,26 @@ impl App {
         let candidate = target_indices.len();
         let (count, _, skipped) = self.warmup_indices(target_indices);
         if count == 0 {
+            tracing::info!(
+                action = "warmup",
+                scope = "marked",
+                outcome = "skipped",
+                candidate,
+                "marked warmup skipped"
+            );
             self.set_status(
                 format!("All {candidate} marked already active or skipped"),
                 4,
             );
         } else {
+            tracing::info!(
+                action = "warmup",
+                scope = "marked",
+                outcome = "started",
+                count,
+                skipped,
+                "marked warmup started"
+            );
             let mut msg = format!("Warming up {count} marked account(s)");
             if skipped > 0 {
                 msg.push_str(&format!(" ({skipped} skipped)"));
@@ -2541,6 +2584,7 @@ async fn perform_oauth(
 
     match result {
         Ok(msg) => {
+            tracing::info!(action = "oauth", outcome = "completed", "OAuth completed");
             app.set_status(msg, 5);
             app.load_profiles_preserving_selection();
             app.refresh(Refresh::Forced);
@@ -2550,6 +2594,7 @@ async fn perform_oauth(
             }
         }
         Err(e) => {
+            tracing::error!(action = "oauth", outcome = "failed", "OAuth failed");
             app.set_status_error(format!("OAuth failed: {e}"), 7);
         }
     }
@@ -2776,6 +2821,18 @@ mod tests {
         warmup::ModelEntry,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn capture_info_logs(action: impl FnOnce()) -> Vec<String> {
+        let writer = crate::logging::TuiLogWriter::new();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, action);
+        writer.lines()
+    }
 
     /// Isolate `CODEX_SWITCH_HOME`/`CODEX_HOME` for tests that touch provider
     /// storage. Serialized via the shared env lock so it can't race sibling
@@ -3272,6 +3329,43 @@ mod tests {
 
         assert!(matches!(app.accounts[0].usage, UsageStatus::Loaded(_)));
         assert_eq!(app.loading_count(), 1);
+    }
+
+    #[test]
+    fn skipped_warmup_and_completed_forced_refresh_are_recorded_at_info() {
+        let mut app = App::new();
+        let skipped = capture_info_logs(|| app.warmup_one("missing"));
+        assert!(
+            skipped.iter().any(|line| {
+                line.contains("warmup skipped")
+                    && line.contains("action=\"warmup\"")
+                    && line.contains("outcome=\"skipped\"")
+            }),
+            "missing structured warmup event: {skipped:?}"
+        );
+
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Loaded(Box::default()),
+            is_current: true,
+        });
+        app.view_indices.push(0);
+        app.refreshing_requests
+            .insert("account".into(), (1, Refresh::Forced));
+        app.result_sender
+            .try_send(("account".into(), 1, Ok(UsageInfo::default())))
+            .unwrap();
+
+        let refreshed = capture_info_logs(|| app.poll_results());
+        assert!(
+            refreshed.iter().any(|line| {
+                line.contains("usage refresh completed")
+                    && line.contains("action=\"usage_refresh\"")
+                    && line.contains("outcome=\"completed\"")
+            }),
+            "missing structured refresh event: {refreshed:?}"
+        );
     }
 
     #[test]

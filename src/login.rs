@@ -120,10 +120,6 @@ fn redirect_uri(port: u16) -> String {
     format!("http://{REDIRECT_HOST}:{port}/auth/callback")
 }
 
-fn redacted_device_poll_log_body(body: &serde_json::Value) -> String {
-    crate::auth::redact_sensitive_log_body(body)
-}
-
 // ── Main flow ─────────────────────────────────────────────
 
 /// Run PKCE OAuth flow: open browser → wait for callback → exchange tokens
@@ -789,8 +785,7 @@ pub async fn run_device_code_auth() -> Result<LoginTokens> {
             }
             Err(_) => bail!("Device authorization timed out. Please try again."),
         };
-        let log_body = redacted_device_poll_log_body(&body);
-        debug!("Device poll response: {log_body}");
+        debug!(status = %poll_status, "Device poll response parsed");
 
         if poll_status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let encoded = serde_json::to_vec(&body).unwrap_or_default();
@@ -1181,28 +1176,6 @@ mod tests {
                 .expect("account_id key should exist")
                 .is_null()
         );
-    }
-
-    #[test]
-    fn test_redacted_device_poll_log_body_masks_sensitive_fields() {
-        let body = serde_json::json!({
-            "authorization_code": "auth-code",
-            "code_verifier": "verifier",
-            "access_token": "access",
-            "refresh_token": "refresh",
-            "id_token": "id",
-            "status": "ok",
-        });
-
-        let redacted: serde_json::Value =
-            serde_json::from_str(&redacted_device_poll_log_body(&body)).unwrap();
-
-        assert_eq!(redacted["authorization_code"], "***");
-        assert_eq!(redacted["code_verifier"], "***");
-        assert_eq!(redacted["access_token"], "***");
-        assert_eq!(redacted["refresh_token"], "***");
-        assert_eq!(redacted["id_token"], "***");
-        assert_eq!(redacted["status"], "ok");
     }
 
     #[test]

@@ -166,8 +166,7 @@ pub fn parse_usage(body: &Value) -> UsageInfo {
     } else {
         if secondary_raw.is_some() && secondary_parsed.is_none() {
             warn!(
-                "parse_usage: secondary_window present but failed to parse (missing used_percent?): {:?}",
-                secondary_raw
+                "parse_usage: secondary_window present but failed to parse (missing used_percent?)"
             );
         }
         (primary_parsed, secondary_parsed)

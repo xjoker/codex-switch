@@ -15,6 +15,10 @@ const LOG_PREFIX: &str = "codex-switch";
 const MAX_LOG_AGE_DAYS: u64 = 3;
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_TUI_LOG_LINES: usize = 1000;
+/// TUI diagnostics are intended for short operational history, not response dumps.
+const MAX_TUI_LOG_LINE_BYTES: usize = 8 * 1024;
+const MAX_TUI_LOG_BYTES: usize = 512 * 1024;
+const TUI_TRUNCATION_MARKER: &str = "… [truncated]";
 static TUI_LOG_WRITER: OnceLock<TuiLogWriter> = OnceLock::new();
 
 pub(crate) fn tui_log_writer() -> TuiLogWriter {
@@ -29,6 +33,9 @@ pub(crate) struct TuiLogWriter {
 struct TuiLogState {
     lines: VecDeque<String>,
     capacity: usize,
+    max_line_bytes: usize,
+    max_bytes: usize,
+    bytes: usize,
     revision: u64,
 }
 
@@ -38,17 +45,23 @@ impl TuiLogWriter {
             state: Arc::new(Mutex::new(TuiLogState {
                 lines: VecDeque::new(),
                 capacity: MAX_TUI_LOG_LINES,
+                max_line_bytes: MAX_TUI_LOG_LINE_BYTES,
+                max_bytes: MAX_TUI_LOG_BYTES,
+                bytes: 0,
                 revision: 0,
             })),
         }
     }
 
     #[cfg(test)]
-    fn new_for_test(capacity: usize) -> Self {
+    fn new_for_test(capacity: usize, max_line_bytes: usize, max_bytes: usize) -> Self {
         Self {
             state: Arc::new(Mutex::new(TuiLogState {
                 lines: VecDeque::new(),
                 capacity,
+                max_line_bytes,
+                max_bytes,
+                bytes: 0,
                 revision: 0,
             })),
         }
@@ -98,10 +111,23 @@ impl Write for TuiLogSink {
             .map_err(|_| io::Error::other("TUI log writer lock poisoned"))?;
         let mut changed = false;
         for line in String::from_utf8_lossy(buf).lines() {
+            let line = truncate_tui_line(line, state.max_line_bytes.min(state.max_bytes));
+            while state.lines.len() >= state.capacity
+                || state.bytes.saturating_add(line.len()) > state.max_bytes
+            {
+                let Some(removed) = state.lines.pop_front() else {
+                    break;
+                };
+                state.bytes = state.bytes.saturating_sub(removed.len());
+            }
+            if line.len() > state.max_bytes {
+                continue;
+            }
             if state.lines.len() == state.capacity {
                 state.lines.pop_front();
             }
-            state.lines.push_back(line.to_string());
+            state.bytes = state.bytes.saturating_add(line.len());
+            state.lines.push_back(line);
             changed = true;
         }
         if changed {
@@ -113,6 +139,34 @@ impl Write for TuiLogSink {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+fn truncate_tui_line(line: &str, max_bytes: usize) -> String {
+    if line.len() <= max_bytes {
+        return line.to_string();
+    }
+    if TUI_TRUNCATION_MARKER.len() >= max_bytes {
+        return utf8_prefix(TUI_TRUNCATION_MARKER, max_bytes).to_string();
+    }
+
+    let content_bytes = max_bytes - TUI_TRUNCATION_MARKER.len();
+    format!(
+        "{}{}",
+        utf8_prefix(line, content_bytes),
+        TUI_TRUNCATION_MARKER
+    )
+}
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let next = index + character.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    &value[..end]
 }
 
 /// How long retention may go unenforced, and how many bytes may be appended in
@@ -161,7 +215,13 @@ fn create_private_log_dir(dir: &Path) -> io::Result<()> {
         builder.recursive(true).mode(0o700).create(dir)?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        fs::create_dir_all(dir)?;
+        crate::auth::harden_windows_private_directory(dir)
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         fs::create_dir_all(dir)
     }
@@ -248,9 +308,13 @@ fn append_log(dir: &Path, today: NaiveDate, bytes: &[u8], run_maintenance: bool)
         use std::os::unix::fs::OpenOptionsExt;
         lock_options.mode(0o600);
     }
-    let lock = lock_options.open(dir.join(".lock"))?;
+    let lock_path = dir.join(".lock");
+    let lock = lock_options.open(&lock_path)?;
     #[cfg(unix)]
     tighten_file_permissions(&lock)?;
+    #[cfg(windows)]
+    crate::auth::harden_windows_private_file(&lock_path)
+        .map_err(|e| io::Error::other(e.to_string()))?;
     FileExt::lock(&lock)?;
     let result = (|| {
         if run_maintenance {
@@ -263,9 +327,13 @@ fn append_log(dir: &Path, today: NaiveDate, bytes: &[u8], run_maintenance: bool)
             use std::os::unix::fs::OpenOptionsExt;
             log_options.mode(0o600);
         }
-        let mut file = log_options.open(log_path(dir, today))?;
+        let log_path = log_path(dir, today);
+        let mut file = log_options.open(&log_path)?;
         #[cfg(unix)]
         tighten_file_permissions(&file)?;
+        #[cfg(windows)]
+        crate::auth::harden_windows_private_file(&log_path)
+            .map_err(|e| io::Error::other(e.to_string()))?;
         file.write_all(bytes)
     })();
     FileExt::unlock(&lock)?;
@@ -356,7 +424,7 @@ mod tests {
 
     #[test]
     fn tui_writer_keeps_logs_in_memory_without_terminal_output() {
-        let writer = TuiLogWriter::new_for_test(3);
+        let writer = TuiLogWriter::new_for_test(3, MAX_TUI_LOG_LINE_BYTES, MAX_TUI_LOG_BYTES);
         let mut sink = writer.make_writer();
         sink.write_all(b"first\nsecond\n").unwrap();
 
@@ -373,11 +441,35 @@ mod tests {
 
     #[test]
     fn tui_writer_discards_oldest_lines_at_capacity() {
-        let writer = TuiLogWriter::new_for_test(2);
+        let writer = TuiLogWriter::new_for_test(2, MAX_TUI_LOG_LINE_BYTES, MAX_TUI_LOG_BYTES);
         let mut sink = writer.make_writer();
         sink.write_all(b"first\nsecond\nthird\n").unwrap();
 
         assert_eq!(writer.lines(), vec!["second", "third"]);
+    }
+
+    #[test]
+    fn tui_writer_truncates_long_utf8_lines_and_bounds_total_bytes() {
+        let writer = TuiLogWriter::new_for_test(10, MAX_TUI_LOG_LINE_BYTES, MAX_TUI_LOG_BYTES);
+        let mut sink = writer.make_writer();
+        let oversized = "界".repeat(4_000);
+        sink.write_all(format!("{oversized}\nsmall\n").as_bytes())
+            .unwrap();
+
+        let lines = writer.lines();
+        assert!(lines[0].contains("[truncated"));
+        assert!(std::str::from_utf8(lines[0].as_bytes()).is_ok());
+        assert!(lines.iter().map(|line| line.len()).sum::<usize>() <= MAX_TUI_LOG_BYTES);
+        assert_eq!(lines.last().unwrap(), "small");
+    }
+
+    #[test]
+    fn tui_writer_discards_oldest_lines_to_stay_within_total_byte_budget() {
+        let writer = TuiLogWriter::new_for_test(10, 16, 10);
+        let mut sink = writer.make_writer();
+        sink.write_all(b"first\nsecond\nthird\n").unwrap();
+
+        assert_eq!(writer.lines(), vec!["third"]);
     }
 
     fn create_log(dir: &Path, day: NaiveDate, bytes: u64) {

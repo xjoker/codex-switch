@@ -30,6 +30,7 @@ pub(crate) async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> 
     }
     match action {
         profile::SaveAction::Created(a) => {
+            tracing::info!(action = "login", alias = %a, outcome = "created", "profile login completed");
             if !json {
                 println!(
                     "{}",
@@ -45,6 +46,7 @@ pub(crate) async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> 
             }
         }
         profile::SaveAction::Updated(a) => {
+            tracing::info!(action = "login", alias = %a, outcome = "updated", "profile login completed");
             if !json {
                 println!(
                     "{}",
@@ -85,6 +87,12 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
     if let Err(err) = workspace::refresh_for_auth(&auth_val).await {
         tracing::debug!("workspace metadata unavailable after re-login: {err}");
     }
+    tracing::info!(
+        action = "login",
+        alias,
+        outcome = "reauthorized",
+        "profile login completed"
+    );
 
     if json {
         print_json(&output::JsonOk {

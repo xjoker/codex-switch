@@ -37,7 +37,7 @@ Accounts are added by logging in with `codex-switch login` or by importing an ex
 | `$CODEX_SWITCH_HOME/cache.json` | Per-profile usage cache. |
 | `$CODEX_SWITCH_HOME/config.toml` | Optional settings. |
 | `$CODEX_SWITCH_HOME/daemon-state.json` | Last Beta daemon state snapshot. |
-| `$CODEX_SWITCH_HOME/logs/` | Diagnostic logs: one file per day, 3 calendar days retained, 10 MiB total cap. |
+| `$CODEX_SWITCH_HOME/logs/` | Diagnostic logs: one file per day, 3 calendar days retained, with a 10 MiB approximate total target. |
 | `$CODEX_SWITCH_HOME/*.lock` | Cross-process coordination files. |
 
 Unset variables default to `~/.codex` and `~/.codex-switch` respectively (`%USERPROFILE%\.codex-switch` on Windows).
@@ -132,7 +132,7 @@ Do not commit credentials in configuration files.
 
 ## Logging
 
-Every command writes diagnostic logs to `$CODEX_SWITCH_HOME/logs/`, one file per calendar day, keeping 3 days and at most 10 MiB. Level resolution: `--debug` wins over `RUST_LOG`, which wins over `daemon.log_level`; the default is `error`. `daemon.log_level` applies only to `daemon` commands — it does not change logging for `list`, `use`, or other commands.
+Commands write best-effort diagnostic events to `$CODEX_SWITCH_HOME/logs/`, one file per calendar day, keeping 3 days and an approximately 10 MiB total target; concurrent processes can temporarily exceed that target. The TUI keeps `INFO` and above in its Logs tab and in its file log, while ordinary CLI stderr remains `ERROR` by default. `--debug` wins over `RUST_LOG`, which overrides `daemon.log_level`; `daemon.log_level` applies only to daemon commands and does not change `list`, `use`, or other commands.
 
 ## Platform integration
 

@@ -566,10 +566,12 @@ async fn fetch_usage_retried_inner(
             }
             Err(e) => {
                 let msg = format!("{e:#}");
-                warn!(
-                    "[{alias}] attempt {}/{max_attempts} failed: {msg}",
-                    attempt + 1
-                );
+                if attempt + 1 < max_attempts {
+                    debug!(
+                        "[{alias}] attempt {}/{max_attempts} failed: {msg}",
+                        attempt + 1
+                    );
+                }
                 if let Some(terminal) = e.downcast_ref::<TerminalAuthError>() {
                     let error = UsageError {
                         summary: terminal.summary(),
@@ -715,10 +717,7 @@ async fn fetch_usage_capturing_refresh(
                     let body: Value = serde_json::from_slice(&resp.body).map_err(|e| {
                         anyhow::anyhow!("failed to parse usage response (HTTP {status}): {e}")
                     })?;
-                    debug!(
-                        "[{alias}] Usage API raw body (proactive): {}",
-                        crate::auth::redact_sensitive_log_body(&body)
-                    );
+                    debug!(alias, status = %status, bytes = resp.body.len(), "Usage API response parsed after proactive refresh");
                     return parse_usage_checked(&body);
                 }
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -728,13 +727,15 @@ async fn fetch_usage_capturing_refresh(
             }
             Err(e) => {
                 if let Some(terminal) = e.downcast_ref::<TerminalAuthError>() {
-                    info!("[{alias}] proactive token refresh rejected permanently: {e:#}");
+                    warn!(
+                        alias,
+                        code = terminal.code,
+                        "proactive token refresh rejected permanently"
+                    );
                     *terminal_refresh = Some(terminal.clone());
                     rejected_refresh = Some(e);
                 } else {
-                    info!(
-                        "[{alias}] proactive token refresh failed, trying with existing token: {e:#}"
-                    );
+                    warn!("[{alias}] proactive token refresh failed, trying with existing token");
                 }
             }
         }
@@ -756,10 +757,7 @@ async fn fetch_usage_capturing_refresh(
     if status.is_success() {
         let body: Value = serde_json::from_slice(&resp.body)
             .map_err(|e| anyhow::anyhow!("failed to parse usage response (HTTP {status}): {e}"))?;
-        debug!(
-            "[{alias}] Usage API raw body: {}",
-            crate::auth::redact_sensitive_log_body(&body)
-        );
+        debug!(alias, status = %status, bytes = resp.body.len(), "Usage API response parsed");
         return parse_usage_checked(&body);
     }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -814,7 +812,7 @@ async fn fetch_usage_capturing_refresh(
                 anyhow::bail!("Usage API still failed (HTTP {status2}) after token refresh");
             }
             Err(e) => {
-                info!("[{alias}] token refresh failed: {e:#}");
+                info!("[{alias}] token refresh failed");
                 // `.context` (not `bail!`) so the typed terminal-auth error
                 // stays downcastable by the retry loop.
                 return Err(e.context(format!(
@@ -972,18 +970,17 @@ pub(crate) async fn do_refresh_token(
     let status = resp.status();
     debug!("[{alias}] token refresh response: HTTP {status}");
 
-    // Read raw body first so we can log it on parse failure
+    // Read the body once for parsing, but never log its contents: unknown
+    // server error bodies can carry credentials outside our known schema.
     let body_text = resp.text().await.map_err(|e| {
         anyhow::anyhow!("failed to read token refresh response body (HTTP {status}): {e}")
     })?;
 
     let r: RefreshResponse = serde_json::from_str(&body_text).map_err(|e| {
-        // A token refresh body may contain access/refresh/id tokens; redact them
-        // before logging so `--debug` output is safe to share in bug reports.
-        let redacted = serde_json::from_str::<Value>(&body_text)
-            .map(|v| crate::auth::redact_sensitive_log_body(&v))
-            .unwrap_or_else(|_| format!("<non-JSON body, {} bytes>", body_text.len()));
-        debug!("[{alias}] token refresh parse failure, raw body: {redacted}");
+        debug!(
+            "[{alias}] token refresh parse failure (HTTP {status}, {} bytes)",
+            body_text.len()
+        );
         anyhow::anyhow!("Failed to parse token refresh response (HTTP {status}): {e}")
     })?;
 

@@ -235,13 +235,13 @@ pub(crate) async fn fetch_models(
                 if !retryable || attempt == 3 {
                     bail!("models endpoint returned {status}");
                 }
-                warn!("models fetch attempt {attempt}/3 returned {status}; retrying");
+                debug!("models fetch attempt {attempt}/3 returned {status}; retrying");
             }
             Err(error) => {
                 if attempt == 3 {
                     return Err(error.context("models fetch failed after 3 attempts"));
                 }
-                warn!("models fetch attempt {attempt}/3 failed: {error}; retrying");
+                debug!("models fetch attempt {attempt}/3 failed: {error}; retrying");
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
@@ -517,9 +517,7 @@ async fn warmup_additional_models(
             .map_err(|e| crate::auth::format_reqwest_error("additional warmup failed", &e))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            let snippet: String = text.chars().take(160).collect();
-            bail!("additional model {model}: HTTP {status} — {snippet}");
+            bail!("additional model {model}: HTTP {status}");
         }
         let _ = resp.chunk().await;
     }
@@ -628,7 +626,12 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
     if let Some(ref rt) = refresh_token
         && crate::jwt::is_token_expiring(&access_token, 60) == Some(true)
     {
-        debug!("[{alias}] access_token expiring soon, refreshing before warmup");
+        tracing::info!(
+            action = "token_refresh",
+            alias,
+            trigger = "warmup_expiry",
+            "token refresh started"
+        );
         match crate::usage::do_refresh_token(
             alias,
             &client,
@@ -645,13 +648,15 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                 refresh_token = Some(refreshed.refresh_token);
             }
             Err(e) => {
-                if e.downcast_ref::<crate::usage::TerminalAuthError>()
-                    .is_some()
-                {
-                    warn!("[{alias}] pre-warmup token refresh rejected permanently: {e:#}");
+                if let Some(terminal) = e.downcast_ref::<crate::usage::TerminalAuthError>() {
+                    warn!(
+                        alias,
+                        code = terminal.code,
+                        "pre-warmup token refresh rejected permanently"
+                    );
                     rejected_refresh = Some(e);
                 } else {
-                    warn!("[{alias}] pre-warmup token refresh failed: {e}");
+                    warn!("[{alias}] pre-warmup token refresh failed");
                 }
             }
         }
@@ -751,12 +756,9 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                     )
                     .await;
                 }
-                let retry_text = retry_resp.text().await.unwrap_or_default();
-                let snippet: String = retry_text.chars().take(160).collect();
-                bail!("{alias}: HTTP {retry_status} after model refresh — {snippet}")
+                bail!("{alias}: HTTP {retry_status} after model refresh")
             }
-            let snippet: String = text.chars().take(160).collect();
-            bail!("{alias}: HTTP 400 — {snippet}")
+            bail!("{alias}: HTTP 400")
         }
         401 | 403 => {
             // The pre-warmup proactive refresh already got a terminal rejection
@@ -815,11 +817,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
             )
         }
         429 => bail!("{alias}: rate limited"),
-        code => {
-            let text = resp.text().await.unwrap_or_default();
-            let snippet: String = text.chars().take(160).collect();
-            bail!("{alias}: HTTP {code} — {snippet}")
-        }
+        code => bail!("{alias}: HTTP {code}"),
     }
 }
 
@@ -869,9 +867,19 @@ pub(crate) async fn fetch_models_for_profile(
             // Still worth a diagnosable trace — silently swallowing this
             // sent people chasing an unrelated /models error instead of the
             // real cause (a rejected/expired refresh_token).
-            Err(e) => warn!(
-                "[{alias}] proactive token refresh failed, continuing with existing token: {e:#}"
-            ),
+            Err(e) => {
+                if let Some(terminal) = e.downcast_ref::<crate::usage::TerminalAuthError>() {
+                    warn!(
+                        alias,
+                        code = terminal.code,
+                        "proactive token refresh rejected, continuing with existing token"
+                    );
+                } else {
+                    warn!(
+                        "[{alias}] proactive token refresh failed, continuing with existing token"
+                    );
+                }
+            }
         }
     }
 

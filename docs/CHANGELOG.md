@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20260831.2.0 — 2026-08-31
+
+- **Session logs now preserve normal operations** — The TUI Logs tab keeps `INFO` events for account switches, explicit refreshes, warmups, login, and provider saves; CLI/TUI log files retain available `INFO` diagnostics while ordinary CLI stderr remains `ERROR` by default. TUI memory is bounded by line and byte budgets, retry attempts move to `DEBUG`, and unknown API response bodies are no longer logged.
+
 ## v20260831.1.0 — 2026-08-31
 
 - **Dependency safety fixes** — Updated `lru` to 0.18.2 to close RUSTSEC-2026-0253 and updated `chacha20` to 0.10.2 to replace the yanked SSE2 backend release. No new dependencies were added.

@@ -5,6 +5,42 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+struct LogFilters {
+    stderr: EnvFilter,
+    file: EnvFilter,
+    tui: EnvFilter,
+}
+
+fn log_filters(
+    debug: bool,
+    rust_log: Option<&str>,
+    is_daemon: bool,
+    daemon_level: &str,
+) -> LogFilters {
+    let all_sinks = if debug {
+        Some("codex_switch=debug")
+    } else {
+        rust_log
+    };
+    if let Some(filter) = all_sinks {
+        return LogFilters {
+            stderr: EnvFilter::new(filter),
+            file: EnvFilter::new(filter),
+            tui: EnvFilter::new(filter),
+        };
+    }
+
+    LogFilters {
+        stderr: EnvFilter::new("codex_switch=error"),
+        file: EnvFilter::new(if is_daemon {
+            format!("codex_switch={daemon_level}")
+        } else {
+            "codex_switch=info".to_string()
+        }),
+        tui: EnvFilter::new("codex_switch=info"),
+    }
+}
+
 /// Best-effort read of the `last_refresh` field from an auth.json at `path`.
 fn read_last_refresh(path: Result<std::path::PathBuf>) -> Option<String> {
     let val = auth::read_auth(&path.ok()?).ok()?;
@@ -37,17 +73,14 @@ pub async fn run_cli() {
         std::process::exit(1);
     }
 
-    // Priority: --debug flag > RUST_LOG env > config.toml daemon.log_level > default "error"
-    let filter = if cli.debug {
-        EnvFilter::new("codex_switch=debug")
-    } else if std::env::var_os("RUST_LOG").is_some() {
-        EnvFilter::from_default_env()
-    } else if matches!(&cli.command, Commands::Daemon(_)) {
-        let level = config::daemon_log_level();
-        EnvFilter::new(format!("codex_switch={level}"))
-    } else {
-        EnvFilter::new("codex_switch=error")
-    };
+    // Priority: --debug flag > RUST_LOG env > config.toml daemon.log_level > defaults.
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let filters = log_filters(
+        cli.debug,
+        rust_log.as_deref(),
+        matches!(&cli.command, Commands::Daemon(_)),
+        &config::daemon_log_level(),
+    );
     // Keep diagnostic logs even when the daemon detaches and discards stdio.
     // File logging failure must not prevent normal account switching.
     let file_writer = match logging::file_log_writer() {
@@ -61,33 +94,45 @@ pub async fn run_cli() {
         }
     };
     if is_tui {
-        use tracing_subscriber::fmt::writer::MakeWriterExt;
+        use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
         let tui_writer = logging::tui_log_writer();
+        let tui_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(tui_writer)
+            .with_filter(filters.tui);
         if let Some(file_writer) = file_writer {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
+            let file_layer = tracing_subscriber::fmt::layer()
                 .with_ansi(false)
-                .with_writer(tui_writer.and(file_writer))
+                .with_writer(file_writer)
+                .with_filter(filters.file);
+            tracing_subscriber::registry()
+                .with(tui_layer)
+                .with(file_layer)
                 .init();
         } else {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_ansi(false)
-                .with_writer(tui_writer)
-                .init();
+            tracing_subscriber::registry().with(tui_layer).init();
         }
     } else if let Some(file_writer) = file_writer {
-        use tracing_subscriber::fmt::writer::MakeWriterExt;
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
+        use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+        let stderr_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
-            .with_writer(std::io::stderr.and(file_writer))
+            .with_writer(std::io::stderr)
+            .with_filter(filters.stderr);
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(file_writer)
+            .with_filter(filters.file);
+        tracing_subscriber::registry()
+            .with(stderr_layer)
+            .with(file_layer)
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
+        use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
             .with_writer(std::io::stderr)
-            .init();
+            .with_filter(filters.stderr);
+        tracing_subscriber::registry().with(stderr_layer).init();
     }
     for warning in config::startup_warnings() {
         eprintln!("{}", color::warn(&format!("Warning: {warning}")));
@@ -287,5 +332,36 @@ fn check_auth_change() -> AuthCheckResult {
         AuthCheckResult::Synced
     } else {
         AuthCheckResult::Detected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_filters_keep_cli_quiet_but_preserve_operation_history() {
+        let filters = log_filters(false, None, false, "warn");
+
+        assert_eq!(filters.stderr.to_string(), "codex_switch=error");
+        assert_eq!(filters.file.to_string(), "codex_switch=info");
+        assert_eq!(filters.tui.to_string(), "codex_switch=info");
+    }
+
+    #[test]
+    fn log_filter_precedence_is_debug_then_rust_log_then_daemon_level() {
+        let debug = log_filters(true, Some("codex_switch=trace"), true, "warn");
+        assert_eq!(debug.stderr.to_string(), "codex_switch=debug");
+        assert_eq!(debug.file.to_string(), "codex_switch=debug");
+        assert_eq!(debug.tui.to_string(), "codex_switch=debug");
+
+        let rust_log = log_filters(false, Some("codex_switch=warn"), true, "debug");
+        assert_eq!(rust_log.stderr.to_string(), "codex_switch=warn");
+        assert_eq!(rust_log.file.to_string(), "codex_switch=warn");
+        assert_eq!(rust_log.tui.to_string(), "codex_switch=warn");
+
+        let daemon = log_filters(false, None, true, "warn");
+        assert_eq!(daemon.stderr.to_string(), "codex_switch=error");
+        assert_eq!(daemon.file.to_string(), "codex_switch=warn");
     }
 }
