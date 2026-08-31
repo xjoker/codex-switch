@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20260831.3.0 — 2026-08-31
+
+- **Settings save no longer needs a daemon restart for most keys** — The TUI applies the new `config.toml` in-process immediately. A running daemon re-reads the file about once a minute, including poll/cache intervals (timers are rebuilt), switch threshold, notify, warmup, and selection keys. Only `daemon.log_level` still needs a restart. A temporarily missing config file keeps the last in-memory snapshot instead of resetting to defaults.
+
 ## v20260831.2.0 — 2026-08-31
 
 - **Session logs now preserve normal operations** — The TUI Logs tab keeps `INFO` events for account switches, explicit refreshes, warmups, login, and provider saves; CLI/TUI log files retain available `INFO` diagnostics while ordinary CLI stderr remains `ERROR` by default. TUI memory is bounded by line and byte budgets, retry attempts move to `DEBUG`, and unknown API response bodies are no longer logged.

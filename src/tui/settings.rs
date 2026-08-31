@@ -415,7 +415,7 @@ impl SettingsState {
             message.push_str(&warnings.join(" "));
         }
         message.push_str(
-            ". Restart the daemon to apply poll/cache intervals; warmup slots and timezone are re-read about once a minute.",
+            ". Applied in this process now; a running daemon reloads within about a minute. Only daemon.log_level still needs a daemon restart.",
         );
         SettingsOutcome::Saved { message }
     }
@@ -940,6 +940,14 @@ mod tests {
         match settings.try_save() {
             SettingsOutcome::Saved { message } => {
                 assert!(message.contains("Saved config.toml"), "{message}");
+                assert!(
+                    message.contains("daemon.log_level still needs a daemon restart"),
+                    "{message}"
+                );
+                assert!(
+                    !message.contains("Restart the daemon to apply poll/cache"),
+                    "{message}"
+                );
             }
             SettingsOutcome::Continue => panic!("save should succeed"),
         }

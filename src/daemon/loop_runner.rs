@@ -57,17 +57,14 @@ pub async fn run_daemon_loop() -> Result<()> {
     let mut shutdown = ShutdownListener::new()?;
 
     let cfg = config::get();
-    let poll_secs = cfg.daemon.poll_interval_secs;
-    let cache_refresh_secs = cfg.daemon.cache_refresh_interval_secs;
+    let mut poll_secs = cfg.daemon.poll_interval_secs.max(1);
+    let mut cache_refresh_secs = cfg.daemon.cache_refresh_interval_secs.max(1);
 
+    // First poll fires immediately so a freshly started daemon checks soon;
+    // cache refresh waits one full period so startup does not hammer the API.
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
     poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let cache_refresh_period = std::time::Duration::from_secs(cache_refresh_secs);
-    let mut cache_refresh_interval = tokio::time::interval_at(
-        tokio::time::Instant::now() + cache_refresh_period,
-        cache_refresh_period,
-    );
-    cache_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut cache_refresh_interval = delayed_interval(cache_refresh_secs);
     let mut warmup_interval = tokio::time::interval(std::time::Duration::from_secs(60));
     warmup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -93,6 +90,12 @@ pub async fn run_daemon_loop() -> Result<()> {
     loop {
         tokio::select! {
             _ = poll_interval.tick() => {
+                sync_runtime_timers(
+                    &mut poll_secs,
+                    &mut cache_refresh_secs,
+                    &mut poll_interval,
+                    &mut cache_refresh_interval,
+                );
                 // Failure backoff suspends polling only; cache refresh and
                 // scheduled warmup keep running.
                 let now = auth::now_unix_secs();
@@ -150,7 +153,13 @@ pub async fn run_daemon_loop() -> Result<()> {
                 state::write(&mut st);
             }
             _ = cache_refresh_interval.tick() => {
-                let daemon = live_daemon_cfg();
+                sync_runtime_timers(
+                    &mut poll_secs,
+                    &mut cache_refresh_secs,
+                    &mut poll_interval,
+                    &mut cache_refresh_interval,
+                );
+                let daemon = config::get().daemon;
                 let warm = warmup_on_cache_refresh(daemon.auto_warmup, &daemon.warmup_times);
                 match refresh_profile_cache(warm).await {
                     Ok(summary) => tracing::debug!(
@@ -165,6 +174,14 @@ pub async fn run_daemon_loop() -> Result<()> {
                 state::write(&mut st);
             }
             _ = warmup_interval.tick() => {
+                // Always-on ~60s tick: picks up Settings saves even when poll/cache
+                // periods are long, and rebuilds those timers when intervals change.
+                sync_runtime_timers(
+                    &mut poll_secs,
+                    &mut cache_refresh_secs,
+                    &mut poll_interval,
+                    &mut cache_refresh_interval,
+                );
                 run_due_scheduled_warmup(&mut st).await;
             }
             _ = shutdown.recv() => {
@@ -180,18 +197,79 @@ pub async fn run_daemon_loop() -> Result<()> {
     Ok(())
 }
 
-fn live_daemon_cfg() -> crate::config::DaemonConfig {
-    match config::load_current() {
-        Ok(cfg) => cfg.daemon,
-        Err(e) => {
-            tracing::debug!("Using in-memory daemon config; failed to re-read file: {e}");
-            config::get().daemon
-        }
+fn delayed_interval(secs: u64) -> tokio::time::Interval {
+    let period = std::time::Duration::from_secs(secs.max(1));
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
+/// Diff used when rebuilding daemon timers after a config.toml re-read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IntervalDelta {
+    poll: Option<u64>,
+    cache_refresh: Option<u64>,
+}
+
+fn interval_delta(old_poll: u64, old_cache: u64, new_poll: u64, new_cache: u64) -> IntervalDelta {
+    IntervalDelta {
+        poll: (new_poll != old_poll).then_some(new_poll),
+        cache_refresh: (new_cache != old_cache).then_some(new_cache),
     }
 }
 
+/// Re-read `config.toml` into the process snapshot and rebuild poll/cache timers
+/// when those intervals changed. Other daemon keys (threshold, notify, warmup, …)
+/// take effect on the next poll/refresh via `config::get()`.
+///
+/// A missing file is left alone: `load_current` maps NotFound to defaults, and
+/// applying those would wipe a last-known-good snapshot after a temporary
+/// `mv`/`rm` while editing.
+fn sync_runtime_timers(
+    poll_secs: &mut u64,
+    cache_refresh_secs: &mut u64,
+    poll_interval: &mut tokio::time::Interval,
+    cache_refresh_interval: &mut tokio::time::Interval,
+) {
+    let path = match config::config_path() {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::debug!("Using in-memory config; failed to resolve config path: {e}");
+            return;
+        }
+    };
+    if !path.is_file() {
+        tracing::debug!("Using in-memory config; {} is absent", path.display());
+        return;
+    }
+    let cfg = match config::load_current() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::debug!("Using in-memory config; failed to re-read file: {e}");
+            return;
+        }
+    };
+    let new_poll = cfg.daemon.poll_interval_secs.max(1);
+    let new_cache = cfg.daemon.cache_refresh_interval_secs.max(1);
+    let delta = interval_delta(*poll_secs, *cache_refresh_secs, new_poll, new_cache);
+    if let Some(secs) = delta.poll {
+        tracing::info!("Hot-reloaded poll_interval_secs: {} -> {secs}", *poll_secs);
+        *poll_secs = secs;
+        *poll_interval = delayed_interval(secs);
+    }
+    if let Some(secs) = delta.cache_refresh {
+        tracing::info!(
+            "Hot-reloaded cache_refresh_interval_secs: {} -> {secs}",
+            *cache_refresh_secs
+        );
+        *cache_refresh_secs = secs;
+        *cache_refresh_interval = delayed_interval(secs);
+    }
+    config::replace_runtime(cfg);
+}
+
 async fn run_due_scheduled_warmup(st: &mut DaemonState) {
-    let daemon = live_daemon_cfg();
+    let daemon = config::get().daemon;
     if !daemon.auto_warmup || daemon.warmup_times.is_empty() {
         return;
     }
@@ -381,7 +459,10 @@ async fn check_and_switch() -> Result<PollOutcome> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheRefreshSummary, current_usage_percent_for_switch, poll_backoff_secs};
+    use super::{
+        CacheRefreshSummary, IntervalDelta, current_usage_percent_for_switch, interval_delta,
+        poll_backoff_secs,
+    };
     use crate::usage::{UsageInfo, WindowUsage};
     use std::sync::{
         Arc,
@@ -394,6 +475,132 @@ mod tests {
         assert_eq!(poll_backoff_secs(60, 2), 240);
         assert_eq!(poll_backoff_secs(60, 4), 960);
         assert_eq!(poll_backoff_secs(60, 10), 960);
+    }
+
+    #[test]
+    fn interval_delta_only_reports_changed_timers() {
+        assert_eq!(
+            interval_delta(60, 300, 60, 300),
+            IntervalDelta {
+                poll: None,
+                cache_refresh: None,
+            }
+        );
+        assert_eq!(
+            interval_delta(60, 300, 90, 300),
+            IntervalDelta {
+                poll: Some(90),
+                cache_refresh: None,
+            }
+        );
+        assert_eq!(
+            interval_delta(60, 300, 60, 120),
+            IntervalDelta {
+                poll: None,
+                cache_refresh: Some(120),
+            }
+        );
+        assert_eq!(
+            interval_delta(60, 300, 15, 45),
+            IntervalDelta {
+                poll: Some(15),
+                cache_refresh: Some(45),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_runtime_timers_reloads_intervals_from_disk() {
+        let _lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prev_cs = std::env::var_os("CODEX_SWITCH_HOME");
+        unsafe {
+            std::env::set_var("CODEX_SWITCH_HOME", dir.path());
+        }
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.daemon.poll_interval_secs = 90;
+        cfg.daemon.cache_refresh_interval_secs = 120;
+        cfg.daemon.switch_threshold = 55.0;
+        crate::config::save(&cfg).expect("write config.toml");
+
+        let mut poll_secs = 60u64;
+        let mut cache_secs = 300u64;
+        let mut poll_interval = super::delayed_interval(poll_secs);
+        let mut cache_interval = super::delayed_interval(cache_secs);
+        super::sync_runtime_timers(
+            &mut poll_secs,
+            &mut cache_secs,
+            &mut poll_interval,
+            &mut cache_interval,
+        );
+        assert_eq!(poll_secs, 90);
+        assert_eq!(cache_secs, 120);
+
+        // Unchanged intervals must not be reported as a delta on the next sync.
+        let before_poll = poll_secs;
+        let before_cache = cache_secs;
+        super::sync_runtime_timers(
+            &mut poll_secs,
+            &mut cache_secs,
+            &mut poll_interval,
+            &mut cache_interval,
+        );
+        assert_eq!(poll_secs, before_poll);
+        assert_eq!(cache_secs, before_cache);
+
+        // Missing config.toml must keep the in-memory timers, not apply defaults.
+        std::fs::remove_file(crate::config::config_path().unwrap()).unwrap();
+        super::sync_runtime_timers(
+            &mut poll_secs,
+            &mut cache_secs,
+            &mut poll_interval,
+            &mut cache_interval,
+        );
+        assert_eq!(poll_secs, 90);
+        assert_eq!(cache_secs, 120);
+
+        unsafe {
+            match prev_cs {
+                Some(v) => std::env::set_var("CODEX_SWITCH_HOME", v),
+                None => std::env::remove_var("CODEX_SWITCH_HOME"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_runtime_timers_skips_when_config_file_is_absent() {
+        let _lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prev_cs = std::env::var_os("CODEX_SWITCH_HOME");
+        unsafe {
+            std::env::set_var("CODEX_SWITCH_HOME", dir.path());
+        }
+
+        let mut poll_secs = 45u64;
+        let mut cache_secs = 180u64;
+        let mut poll_interval = super::delayed_interval(poll_secs);
+        let mut cache_interval = super::delayed_interval(cache_secs);
+        assert!(!crate::config::config_path().unwrap().exists());
+        super::sync_runtime_timers(
+            &mut poll_secs,
+            &mut cache_secs,
+            &mut poll_interval,
+            &mut cache_interval,
+        );
+        assert_eq!(poll_secs, 45);
+        assert_eq!(cache_secs, 180);
+
+        unsafe {
+            match prev_cs {
+                Some(v) => std::env::set_var("CODEX_SWITCH_HOME", v),
+                None => std::env::remove_var("CODEX_SWITCH_HOME"),
+            }
+        }
     }
 
     #[test]
