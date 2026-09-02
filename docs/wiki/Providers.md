@@ -96,6 +96,8 @@ Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are
 
 OpenRouter is the intended first provider: its `/api/v1` base URL plus a full model slug (including the vendor prefix) is what Codex expects. One OpenRouter provider can hold every slug that shares that key:
 
+Provider base URLs use HTTPS by default because the API key is sent as a bearer credential. Plain HTTP is rejected until the user explicitly disables **HTTPS only** in the TUI form or passes `--allow-insecure-http` to `provider add`. The opt-in is stored on that provider and applies to model fetching, probing, and launch; use it only on a network you trust.
+
 ```bash
 codex-switch provider add openrouter \
   --base-url https://openrouter.ai/api/v1 \

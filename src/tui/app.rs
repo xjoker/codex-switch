@@ -260,6 +260,8 @@ pub struct App {
     pub detail_visible: bool,
     pub help_popup: Option<super::popup::PopupState>,
     pub menu: Option<super::menu::MenuState>,
+    /// Last list-row press used to recognize a bounded double-click.
+    last_list_click: Option<(Tab, String, Instant)>,
     /// Regions from the last drawn frame, used for mouse hit-testing.
     pub hitmap: super::hitmap::HitMap,
     /// Session-level per-alias model list cache (no TTL). Populated lazily
@@ -331,6 +333,7 @@ impl App {
             detail_visible: true,
             help_popup: None,
             menu: None,
+            last_list_click: None,
             hitmap: super::hitmap::HitMap::default(),
             model_cache: HashMap::new(),
             pending_models: model_rx,
@@ -706,17 +709,18 @@ impl App {
                                 .is_some_and(|area| HitMap::contains(area, col, row))
                         {
                             if down {
-                                self.log_scroll = self.log_scroll.saturating_add(1);
-                            } else {
                                 self.log_scroll = self.log_scroll.saturating_sub(1);
+                            } else {
+                                self.log_scroll = self.log_scroll.saturating_add(1);
                             }
                         }
                     }
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => match self.hitmap.overlay {
-                OverlayHit::Modal => {}
+                OverlayHit::Modal => self.last_list_click = None,
                 OverlayHit::Dismissible { panel } => {
+                    self.last_list_click = None;
                     if !HitMap::contains(panel, col, row) {
                         if self.help_popup.is_some() {
                             self.close_help();
@@ -727,6 +731,7 @@ impl App {
                 }
                 OverlayHit::None => {
                     if let Some(tab) = self.hitmap.tab_at(col, row) {
+                        self.last_list_click = None;
                         self.select_tab(tab);
                         return;
                     }
@@ -734,18 +739,57 @@ impl App {
                         Tab::Accounts => {
                             if let Some(list) = self.hitmap.account_list.as_ref()
                                 && let Some(idx) = HitMap::list_index_at(list, col, row)
+                                && let Some(account_idx) = self.view_indices.get(idx).copied()
+                                && let Some(alias) = self
+                                    .accounts
+                                    .get(account_idx)
+                                    .map(|account| account.alias.clone())
                             {
                                 self.selected = idx;
+                                let now = Instant::now();
+                                let double = self.last_list_click.as_ref().is_some_and(
+                                    |(tab, previous, at)| {
+                                        *tab == Tab::Accounts
+                                            && previous == &alias
+                                            && now.duration_since(*at) <= Duration::from_millis(500)
+                                    },
+                                );
+                                self.last_list_click =
+                                    (!double).then_some((Tab::Accounts, alias, now));
+                                if double {
+                                    self.open_account_menu();
+                                }
+                            } else {
+                                self.last_list_click = None;
                             }
                         }
                         Tab::Providers => {
                             if let Some(list) = self.hitmap.provider_list.as_ref()
                                 && let Some(idx) = HitMap::list_index_at(list, col, row)
+                                && let Some(alias) = self
+                                    .providers
+                                    .get(idx)
+                                    .map(|provider| provider.alias.clone())
                             {
                                 self.provider_selected = idx;
+                                let now = Instant::now();
+                                let double = self.last_list_click.as_ref().is_some_and(
+                                    |(tab, previous, at)| {
+                                        *tab == Tab::Providers
+                                            && previous == &alias
+                                            && now.duration_since(*at) <= Duration::from_millis(500)
+                                    },
+                                );
+                                self.last_list_click =
+                                    (!double).then_some((Tab::Providers, alias, now));
+                                if double {
+                                    self.open_provider_launch();
+                                }
+                            } else {
+                                self.last_list_click = None;
                             }
                         }
-                        Tab::Settings | Tab::Logs => {}
+                        Tab::Settings | Tab::Logs => self.last_list_click = None,
                     }
                 }
             },
@@ -2263,15 +2307,23 @@ pub async fn run() -> Result<()> {
         original_hook(info);
     }));
 
+    let mut shutdown =
+        crate::signals::ShutdownListener::new().context("registering TUI shutdown handlers")?;
     let mut terminal = ratatui::init();
     enable_mouse_capture();
-    let result = run_app(&mut terminal).await;
+    let result = run_app(&mut terminal, &mut shutdown).await;
     disable_mouse_capture();
     ratatui::restore();
-    result
+    if let Some(signal) = result? {
+        std::process::exit(signal.exit_code());
+    }
+    Ok(())
 }
 
-async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
+async fn run_app(
+    terminal: &mut DefaultTerminal,
+    shutdown: &mut crate::signals::ShutdownListener,
+) -> Result<Option<crate::signals::ShutdownSignal>> {
     let mut app = App::new();
     app.load_profiles();
     app.update_view();
@@ -2297,8 +2349,18 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
             .draw(|f| super::ui::render(f, &mut app))
             .context("drawing TUI")?;
 
-        if event::poll(Duration::from_millis(100)).context("polling terminal events")? {
-            match event::read().context("reading terminal event")? {
+        let event = tokio::select! {
+            signal = shutdown.recv_signal() => return Ok(Some(signal)),
+            event = tokio::task::spawn_blocking(|| -> Result<Option<Event>> {
+                if event::poll(Duration::from_millis(100)).context("polling terminal events")? {
+                    Ok(Some(event::read().context("reading terminal event")?))
+                } else {
+                    Ok(None)
+                }
+            }) => event.context("terminal event task panicked")??,
+        };
+        if let Some(event) = event {
+            match event {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press {
                         continue;
@@ -2328,16 +2390,18 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                     if app.provider_launch.is_some() {
                         if let Some((alias, model, reasoning, extra_args)) =
                             app.handle_provider_launch_key(key.code)
-                        {
-                            perform_launch(
+                            && let Some(signal) = perform_launch(
                                 terminal,
                                 &mut app,
                                 alias,
                                 Some(model),
                                 reasoning,
                                 extra_args,
+                                shutdown,
                             )
-                            .await;
+                            .await
+                        {
+                            return Ok(Some(signal));
                         }
                         continue;
                     }
@@ -2373,7 +2437,11 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
 
                     // Active menu intercepts everything.
                     if app.menu.is_some() {
-                        handle_menu_key(&mut app, terminal, code).await;
+                        if let Some(signal) =
+                            handle_menu_key(&mut app, terminal, code, shutdown).await
+                        {
+                            return Ok(Some(signal));
+                        }
                         continue;
                     }
 
@@ -2424,15 +2492,19 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
                                         .and_then(|idx| app.accounts.get(idx))
                                         .map(|entry| entry.alias.clone())
                                     {
-                                        perform_launch(
+                                        if let Some(signal) = perform_launch(
                                             terminal,
                                             &mut app,
                                             alias,
                                             None,
                                             crate::provider::ReasoningLaunch::Saved,
                                             Vec::new(),
+                                            shutdown,
                                         )
-                                        .await;
+                                        .await
+                                        {
+                                            return Ok(Some(signal));
+                                        }
                                     } else {
                                         app.set_status_error("No account selected".to_string(), 3);
                                     }
@@ -2483,13 +2555,16 @@ async fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
-async fn handle_menu_key(app: &mut App, terminal: &mut DefaultTerminal, code: KeyCode) {
-    let Some(menu) = app.menu.as_mut() else {
-        return;
-    };
+async fn handle_menu_key(
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
+    code: KeyCode,
+    shutdown: &mut crate::signals::ShutdownListener,
+) -> Option<crate::signals::ShutdownSignal> {
+    let menu = app.menu.as_mut()?;
     let action = menu.handle_key(code);
     use super::menu::MenuAction;
     match action {
@@ -2507,15 +2582,19 @@ async fn handle_menu_key(app: &mut App, terminal: &mut DefaultTerminal, code: Ke
         }
         MenuAction::Launch(alias) => {
             app.close_menu();
-            perform_launch(
+            if let Some(signal) = perform_launch(
                 terminal,
                 app,
                 alias,
                 None,
                 crate::provider::ReasoningLaunch::Saved,
                 Vec::new(),
+                shutdown,
             )
-            .await;
+            .await
+            {
+                return Some(signal);
+            }
         }
         MenuAction::ReloginRequest(alias, email) => {
             app.open_relogin_flow_menu(alias, email);
@@ -2568,6 +2647,7 @@ async fn handle_menu_key(app: &mut App, terminal: &mut DefaultTerminal, code: Ke
             app.request_batch_delete();
         }
     }
+    None
 }
 
 enum OAuthMode {
@@ -2605,7 +2685,8 @@ async fn perform_launch(
     model: Option<String>,
     reasoning: crate::provider::ReasoningLaunch,
     extra_args: Vec<String>,
-) {
+    shutdown: &mut crate::signals::ShutdownListener,
+) -> Option<crate::signals::ShutdownSignal> {
     suspend_tui_for_plain_output();
     crate::output::set_message_mode(crate::output::MessageMode::Stdout);
 
@@ -2615,17 +2696,29 @@ async fn perform_launch(
     }
 
     let result =
-        crate::launch::launch_for_tui(&alias, model.as_deref(), reasoning, extra_args).await;
+        crate::launch::launch_for_tui(&alias, model.as_deref(), reasoning, extra_args, shutdown)
+            .await;
 
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     match &result {
-        Ok(exit_code) if *exit_code == 0 => println!("\nCodex exited successfully."),
-        Ok(exit_code) => println!("\nCodex exited with code {exit_code}."),
+        Ok(crate::launch::TuiLaunchOutcome::Exited(0)) => {
+            println!("\nCodex exited successfully.")
+        }
+        Ok(crate::launch::TuiLaunchOutcome::Exited(exit_code)) => {
+            println!("\nCodex exited with code {exit_code}.")
+        }
+        Ok(crate::launch::TuiLaunchOutcome::Shutdown { .. }) => {
+            println!("\nShutdown requested.")
+        }
         Err(e) => eprintln!("\nError: {e}"),
     }
     println!("\nReturning to TUI...");
-    if result.is_err() || result.as_ref().is_ok_and(|code| *code != 0) {
+    if result.is_err()
+        || result
+            .as_ref()
+            .is_ok_and(|outcome| !matches!(outcome, crate::launch::TuiLaunchOutcome::Exited(0)))
+    {
         tokio::time::sleep(Duration::from_millis(1200)).await;
     }
 
@@ -2633,7 +2726,7 @@ async fn perform_launch(
     resume_tui_after_plain_output(terminal);
 
     match result {
-        Ok(0) => {
+        Ok(crate::launch::TuiLaunchOutcome::Exited(0)) => {
             app.set_status(format!("Codex session ended ({alias})"), 4);
             app.load_profiles_preserving_selection();
             app.refresh(Refresh::Cached);
@@ -2641,11 +2734,21 @@ async fn perform_launch(
                 app.next_auto_refresh = Some(Instant::now() + app.auto_refresh_interval);
             }
         }
-        Ok(exit_code) => {
+        Ok(crate::launch::TuiLaunchOutcome::Exited(exit_code)) => {
             app.set_status_error(format!("Codex exited with code {exit_code}"), 5);
+        }
+        Ok(crate::launch::TuiLaunchOutcome::Shutdown {
+            signal,
+            cleanup_error,
+        }) => {
+            if let Some(error) = cleanup_error {
+                eprintln!("\nError while cleaning up interrupted launch: {error}");
+            }
+            return Some(signal);
         }
         Err(e) => app.set_status_error(format!("Launch failed: {e}"), 6),
     }
+    None
 }
 
 /// Suspend the TUI, run OAuth (browser PKCE or device code), persist the
@@ -3020,6 +3123,116 @@ mod tests {
         assert_eq!(app.selected, 1);
     }
 
+    #[tokio::test]
+    async fn mouse_double_click_opens_the_selected_account_menu() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "a".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.hitmap.account_list = Some(crate::tui::hitmap::ListHit {
+            rows_area: ratatui::layout::Rect {
+                x: 1,
+                y: 3,
+                width: 40,
+                height: 5,
+            },
+            offset: 0,
+            row_count: 1,
+        });
+
+        app.handle_mouse(left_click(5, 3));
+        assert!(app.menu.is_none());
+        app.handle_mouse(left_click(5, 3));
+        assert!(app.menu.is_some());
+    }
+
+    #[tokio::test]
+    async fn mouse_double_click_is_interrupted_by_a_blank_click() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "a".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.hitmap.account_list = Some(crate::tui::hitmap::ListHit {
+            rows_area: ratatui::layout::Rect {
+                x: 1,
+                y: 3,
+                width: 40,
+                height: 1,
+            },
+            offset: 0,
+            row_count: 1,
+        });
+
+        app.handle_mouse(left_click(5, 3));
+        app.handle_mouse(left_click(45, 3));
+        app.handle_mouse(left_click(5, 3));
+        assert!(app.menu.is_none());
+    }
+
+    #[tokio::test]
+    async fn mouse_double_click_does_not_follow_a_reordered_account_row() {
+        let mut app = App::new();
+        for alias in ["a", "b"] {
+            app.accounts.push(AccountEntry {
+                alias: alias.into(),
+                info: AccountInfo::default(),
+                usage: UsageStatus::Idle,
+                is_current: false,
+            });
+        }
+        app.view_indices = vec![0, 1];
+        app.hitmap.account_list = Some(crate::tui::hitmap::ListHit {
+            rows_area: ratatui::layout::Rect {
+                x: 1,
+                y: 3,
+                width: 40,
+                height: 1,
+            },
+            offset: 0,
+            row_count: 1,
+        });
+
+        app.handle_mouse(left_click(5, 3));
+        app.view_indices = vec![1, 0];
+        app.handle_mouse(left_click(5, 3));
+        assert!(app.menu.is_none());
+    }
+
+    #[test]
+    fn mouse_double_click_opens_the_selected_provider_launch_menu() {
+        let mut app = App::new();
+        app.active_tab = Tab::Providers;
+        app.providers.push(crate::provider::ProviderProfile::build(
+            "gateway",
+            "https://gateway.example/v1",
+            vec![crate::provider::ProviderModel::from_id("model")],
+            "sk",
+        ));
+        app.hitmap.provider_list = Some(crate::tui::hitmap::ListHit {
+            rows_area: ratatui::layout::Rect {
+                x: 1,
+                y: 3,
+                width: 40,
+                height: 5,
+            },
+            offset: 0,
+            row_count: 1,
+        });
+
+        app.handle_mouse(left_click(5, 3));
+        assert!(app.provider_launch.is_none());
+        app.handle_mouse(left_click(5, 3));
+        assert!(app.provider_launch.is_some());
+    }
+
     #[test]
     fn mouse_wheel_scrolls_logs_and_outside_click_closes_help() {
         let mut app = App::new();
@@ -3032,7 +3245,7 @@ mod tests {
             height: 10,
         });
         app.handle_mouse(scroll(MouseEventKind::ScrollUp, 5, 3));
-        assert_eq!(app.log_scroll, 2);
+        assert_eq!(app.log_scroll, 4);
         app.handle_mouse(scroll(MouseEventKind::ScrollDown, 5, 3));
         assert_eq!(app.log_scroll, 3);
 
@@ -3047,6 +3260,57 @@ mod tests {
         };
         app.handle_mouse(left_click(0, 0));
         assert!(app.help_popup.is_none());
+    }
+
+    #[test]
+    fn mouse_modal_absorbs_clicks_and_wheel_without_changing_page_state() {
+        let mut app = App::new();
+        app.active_tab = Tab::Logs;
+        app.log_scroll = 3;
+        app.help_popup = Some(crate::tui::popup::PopupState::new());
+        app.hitmap.logs = Some(ratatui::layout::Rect {
+            x: 0,
+            y: 1,
+            width: 40,
+            height: 10,
+        });
+        app.hitmap.overlay = crate::tui::hitmap::OverlayHit::Modal;
+
+        app.handle_mouse(left_click(5, 3));
+        app.handle_mouse(scroll(MouseEventKind::ScrollDown, 5, 3));
+
+        assert_eq!(app.log_scroll, 3);
+        assert!(app.help_popup.is_some());
+    }
+
+    #[tokio::test]
+    async fn mouse_menu_panel_wheel_navigates_and_outside_click_closes() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "a".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.open_account_menu();
+        app.hitmap.overlay = crate::tui::hitmap::OverlayHit::Dismissible {
+            panel: ratatui::layout::Rect {
+                x: 10,
+                y: 5,
+                width: 20,
+                height: 10,
+            },
+        };
+
+        app.handle_mouse(scroll(MouseEventKind::ScrollDown, 12, 6));
+        let Some(crate::tui::menu::MenuState::Account { popup, .. }) = app.menu.as_ref() else {
+            panic!("account menu should remain open");
+        };
+        assert_eq!(popup.scroll, 1);
+
+        app.handle_mouse(left_click(0, 0));
+        assert!(app.menu.is_none());
     }
 
     fn capture_info_logs(action: impl FnOnce()) -> Vec<String> {

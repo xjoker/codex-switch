@@ -136,6 +136,9 @@ fn run_cmd(env: &TestEnv, args: &[&str]) -> Output {
         .to_string();
     Command::new(bin)
         .args(args)
+        // Each fixture sets daemon.log_level explicitly. Do not let the host's
+        // RUST_LOG override that contract in the spawned daemon process.
+        .env_remove("RUST_LOG")
         .env("HOME", &env.home)
         .env("CODEX_HOME", &env.codex_home)
         .env("TZ", "UTC")

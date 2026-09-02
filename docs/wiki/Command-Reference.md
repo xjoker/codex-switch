@@ -11,7 +11,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | `list [-f]` | Show profiles, usage, and availability; `-f` / `--force` bypasses the cache. |
 | `use [alias] [--consume-card]` | Switch explicitly, or omit the alias to auto-select with the unified scoring algorithm. When the pool is exhausted, `--consume-card` consumes the earliest-expiring reset card to revive an account (auto-select only; ignored when an alias is given). |
 | `launch [alias] [--consume-card] [--model <id>] [-- <codex-args>]` | Start Codex with the best (or specified) ChatGPT profile's auth, or with a custom API provider when `alias` names one. For a provider, `--model` before `--` selects a saved model; after `--` it is Codex's own `--model`. A known Codex subcommand (`exec`, `resume`, …) can start the argv without `--`. Tokens on both sides of `--` are kept. Auto-select (no alias) is ChatGPT-only. |
-| `provider add <alias> --base-url <URL> (--model <id> \| --fetch-models)` | Save a custom API provider. `--model` is repeatable; the first is the default. `--fetch-models` imports chat slugs from `GET {base_url}/models` (embedding/reranker omitted; catalogs larger than 48 must use `--model` or TUI `f`). `--reasoning` / `--no-web-search` attach to the most recent `--model`. The API key is read from a hidden prompt, or from stdin with `--api-key-stdin` — never from argv. |
+| `provider add <alias> --base-url <URL> (--model <id> \| --fetch-models)` | Save a custom API provider. HTTPS is required unless `--allow-insecure-http` is explicitly passed. `--model` is repeatable; the first is the default. `--fetch-models` imports chat slugs from `GET {base_url}/models` (embedding/reranker omitted; catalogs larger than 48 must use `--model` or TUI `f`). The API key is read from a hidden prompt, or from stdin with `--api-key-stdin` — never from argv. |
 | `provider list` | List saved providers (no keys). |
 | `provider show <alias>` | Show one provider; the key is redacted. |
 | `provider fetch-models <alias> [--model <id>]` | Replace saved models with chat slugs from the provider's `GET /models`. Matching ids keep reasoning / `web_search`. Large catalogs require `--model`. |
@@ -78,7 +78,9 @@ See [Custom API providers](Providers) for OpenRouter, DeepSeek-via-gateway, stor
 
 ## TUI shortcuts
 
-Four tabs: **Accounts**, **Providers**, **Settings**, and **Logs**. `Tab` / `Shift+Tab` cycles them. `q` and `h` are global.
+Four tabs: **Accounts**, **Providers**, **Settings**, and **Logs**. `Tab` / `Shift+Tab` cycles them. `q` and `h` are main-view shortcuts; forms, text edits, menus, and confirmations use their own `Esc` and confirmation rules.
+
+Mouse input is available alongside the keyboard: click a tab to switch pages, click an Accounts or Providers row to select it, and double-click the selected row to open its account menu or provider launch menu. Use the wheel to scroll Logs, Help, and account menus. Clicking outside a dismissible popup closes it. Forms, launch pickers, confirmations, and active text edits consume mouse input without clicking through to the page behind them.
 
 ### Accounts tab
 
@@ -105,9 +107,9 @@ Four tabs: **Accounts**, **Providers**, **Settings**, and **Logs**. `Tab` / `Shi
 | `n` (account menu) | Rename the selected account |
 | `d` (account menu) | Delete the selected account (confirmation required) |
 | `r` / `w` / `l` / `d` (batch menu) | Refresh, warm up, re-login, or delete the marked accounts |
-| `h` | Show the complete shortcut list |
+| `h` | Show the complete shortcut list (main view) |
 | `Esc` | Clear filter/marks or close the current popup |
-| `q` | Quit |
+| `q` | Quit (main view) |
 
 ### Providers tab
 
@@ -120,8 +122,8 @@ Four tabs: **Accounts**, **Providers**, **Settings**, and **Logs**. `Tab` / `Shi
 | `n` | Rename the selected provider |
 | `d` | Remove the selected provider (confirmation required) |
 | `Tab` | Next tab (Settings) |
-| `h` | Show help |
-| `q` | Quit |
+| `h` | Show help (main view) |
+| `q` | Quit (main view) |
 
 The Providers table never renders the stored key. `Enter` or `o` picks a saved model (and optionally changes reasoning or extra Codex argv for this session) then launches, or run `codex-switch launch <alias>` from the shell. `e` opens the edit form (including env key, wire API, and extra `-c`). `l` is re-login on the Accounts tab, not launch.
 
@@ -139,8 +141,8 @@ Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and u
 | `s` | Save `config.toml` |
 | `Esc` | Cancel the current field edit (does not discard other unsaved fields) |
 | `Tab` | Next tab (Logs). Ignored while a field is being edited. Unsaved edits are kept. |
-| `h` | Show help |
-| `q` | Quit |
+| `h` | Show help (main view) |
+| `q` | Quit (main view) |
 
 Destructive or consumptive actions always require confirmation.
 

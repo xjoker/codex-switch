@@ -41,6 +41,7 @@ pub enum FormMode {
 enum Focus {
     Alias,
     BaseUrl,
+    RequireHttps,
     ApiKey,
     EnvKey,
     WireApi,
@@ -148,6 +149,7 @@ pub struct ProviderFormState {
     editing: bool,
     alias: String,
     base_url: String,
+    require_https: bool,
     api_key: String,
     original_key: String,
     metadata_fallback: String,
@@ -184,6 +186,7 @@ impl ProviderFormState {
             editing: true,
             alias: String::new(),
             base_url: String::new(),
+            require_https: true,
             api_key: String::new(),
             original_key: String::new(),
             metadata_fallback: String::new(),
@@ -229,6 +232,7 @@ impl ProviderFormState {
             editing: false,
             alias: profile.alias.clone(),
             base_url: profile.base_url.clone(),
+            require_https: !profile.allow_insecure_http,
             api_key: String::new(),
             original_key: profile.api_key.clone(),
             metadata_fallback: profile.metadata_fallback.clone(),
@@ -274,6 +278,10 @@ impl ProviderFormState {
             KeyCode::Esc => FormOutcome::Cancel,
             KeyCode::Char('s') => self.try_save(),
             KeyCode::Enter => {
+                if self.focus == Focus::RequireHttps {
+                    self.require_https = !self.require_https;
+                    return FormOutcome::Continue;
+                }
                 if self.is_add_row() {
                     self.add_model_and_edit();
                 } else {
@@ -332,6 +340,10 @@ impl ProviderFormState {
             }
             KeyCode::Char('w') => {
                 self.toggle_web_search();
+                FormOutcome::Continue
+            }
+            KeyCode::Char(' ') if self.focus == Focus::RequireHttps => {
+                self.require_https = !self.require_https;
                 FormOutcome::Continue
             }
             KeyCode::Char('f') => {
@@ -423,6 +435,7 @@ impl ProviderFormState {
         let value = match self.focus {
             Focus::Alias => self.alias.clone(),
             Focus::BaseUrl => self.base_url.clone(),
+            Focus::RequireHttps => return,
             Focus::ApiKey => self.api_key.clone(),
             Focus::EnvKey => self.env_key.clone(),
             Focus::WireApi => self.wire_api.clone(),
@@ -550,7 +563,7 @@ impl ProviderFormState {
             self.error = Some("API key cannot be empty".into());
             return;
         };
-        match fetch_gateway_models_blocking(url, key) {
+        match fetch_gateway_models_blocking(url, key, !self.require_https) {
             Ok(remote) => self.ingest_remote(&remote),
             Err(err) => self.error = Some(format!("Fetch models failed: {err}")),
         }
@@ -780,6 +793,7 @@ impl ProviderFormState {
             | Focus::EnvKey
             | Focus::WireApi
             | Focus::Extra => self.begin_edit(),
+            Focus::RequireHttps => {}
             Focus::Models => {
                 if self.model_idx < self.models.len() && self.models[self.model_idx].id.is_empty() {
                     self.begin_edit();
@@ -807,6 +821,7 @@ impl ProviderFormState {
             Focus::EnvKey => self.env_key = value,
             Focus::WireApi => self.wire_api = value,
             Focus::Extra => self.extra_sets = value,
+            Focus::RequireHttps => {}
             Focus::Models if self.model_idx < self.models.len() => {
                 self.models[self.model_idx].id = value;
             }
@@ -820,7 +835,8 @@ impl ProviderFormState {
     fn focus_next(&mut self) {
         self.focus = match (self.mode, self.focus) {
             (FormMode::Add, Focus::Alias) => Focus::BaseUrl,
-            (_, Focus::BaseUrl) => Focus::ApiKey,
+            (_, Focus::BaseUrl) => Focus::RequireHttps,
+            (_, Focus::RequireHttps) => Focus::ApiKey,
             (_, Focus::ApiKey) => Focus::EnvKey,
             (_, Focus::EnvKey) => Focus::WireApi,
             (_, Focus::WireApi) => Focus::Extra,
@@ -834,10 +850,10 @@ impl ProviderFormState {
     /// Add's Enter path keeps Alias → URL → Key → Models. Tab still visits
     /// env key / wire API / extra `-c`.
     fn focus_next_add_enter(&mut self) {
-        if self.focus == Focus::ApiKey {
-            self.focus = Focus::Models;
-        } else {
-            self.focus_next();
+        match self.focus {
+            Focus::BaseUrl => self.focus = Focus::ApiKey,
+            Focus::ApiKey => self.focus = Focus::Models,
+            _ => self.focus_next(),
         }
     }
 
@@ -846,7 +862,8 @@ impl ProviderFormState {
             (FormMode::Add, Focus::Alias) => Focus::Models,
             (_, Focus::BaseUrl) if self.mode == FormMode::Add => Focus::Alias,
             (_, Focus::BaseUrl) => Focus::Models,
-            (_, Focus::ApiKey) => Focus::BaseUrl,
+            (_, Focus::RequireHttps) => Focus::BaseUrl,
+            (_, Focus::ApiKey) => Focus::RequireHttps,
             (_, Focus::EnvKey) => Focus::ApiKey,
             (_, Focus::WireApi) => Focus::EnvKey,
             (_, Focus::Extra) => Focus::WireApi,
@@ -936,6 +953,7 @@ impl ProviderFormState {
         }
         let default_idx = self.default_idx.min(models.len() - 1);
         let mut profile = ProviderProfile::build(alias, self.base_url.trim(), models, api_key);
+        profile.allow_insecure_http = !self.require_https;
         profile.default_model = profile.models[default_idx].id.clone();
         profile.metadata_fallback = self.metadata_fallback.clone();
         let env_key = self.env_key.trim();
@@ -1171,6 +1189,18 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             field_value(form, Focus::BaseUrl, &form.base_url, false),
             url_style,
         ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("HTTPS only", dim()),
+        Span::styled(
+            if form.require_https { "  [x]" } else { "  [ ]" },
+            if form.focus == Focus::RequireHttps {
+                focus_style
+            } else {
+                label
+            },
+        ),
+        Span::styled("  (off sends the API key over HTTP)", dim()),
     ]));
     lines.push(Line::from(vec![
         Span::styled("API key   ", dim()),
@@ -1475,6 +1505,26 @@ mod tests {
     }
 
     #[test]
+    fn form_requires_the_user_to_turn_off_https_only_for_http() {
+        let _home = EnvHome::new();
+        let original = ProviderProfile::build(
+            "gateway",
+            "https://gateway.example/v1",
+            vec![ProviderModel::from_id("model")],
+            "sk",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.base_url = "http://gateway.example/v1".into();
+        assert!(form.build_profile().is_err());
+
+        form.handle_key(KeyCode::Tab);
+        assert_eq!(form.focus, Focus::RequireHttps);
+        form.handle_key(KeyCode::Char(' '));
+        let profile = form.build_profile().expect("explicit opt-in allows HTTP");
+        assert!(profile.allow_insecure_http);
+    }
+
+    #[test]
     fn edit_form_keeps_the_key_when_left_blank() {
         let _home = EnvHome::new();
         let original = ProviderProfile::build(
@@ -1533,6 +1583,7 @@ mod tests {
             "sk",
         );
         let mut form = ProviderFormState::edit(&original);
+        form.handle_key(KeyCode::Tab); // HTTPS only
         form.handle_key(KeyCode::Tab); // ApiKey
         form.handle_key(KeyCode::Tab); // EnvKey
         form.handle_key(KeyCode::Tab); // WireApi

@@ -12,6 +12,7 @@ pub(crate) async fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()>
         ProviderCommand::Add {
             alias,
             base_url,
+            allow_insecure_http,
             model: _,
             env_key,
             wire_api,
@@ -25,6 +26,7 @@ pub(crate) async fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()>
             add(
                 alias,
                 base_url,
+                allow_insecure_http,
                 env_key,
                 wire_api,
                 set,
@@ -48,6 +50,7 @@ pub(crate) async fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()>
 async fn add(
     alias: String,
     base_url: String,
+    allow_insecure_http: bool,
     env_key: Option<String>,
     wire_api: String,
     set: Vec<String>,
@@ -75,7 +78,8 @@ async fn add(
     let mut fetched_default = None;
     let mut fetched_catalog = None;
     if fetch_models {
-        let remote = provider::fetch_gateway_models_at(&base_url, &api_key).await?;
+        let remote =
+            provider::fetch_gateway_models_at(&base_url, &api_key, allow_insecure_http).await?;
         let default_hint = models.first().map(|model| model.id.clone());
         let (merged, default) =
             provider::apply_fetched_models(&[], default_hint.as_deref(), &remote, &models)?;
@@ -88,6 +92,7 @@ async fn add(
     }
 
     let mut profile = ProviderProfile::build(&alias, base_url, models, api_key);
+    profile.allow_insecure_http = allow_insecure_http;
     if let Some(env_key) = env_key {
         profile.env_key = env_key;
     }
@@ -252,6 +257,7 @@ fn list(json: bool) -> Result<()> {
                     "alias": p.alias,
                     "provider_id": p.provider_id,
                     "base_url": p.base_url,
+                    "allow_insecure_http": p.allow_insecure_http,
                     "default_model": p.default_model,
                     "models": models_json(&p),
                     "wire_api": p.wire_api,
@@ -289,6 +295,7 @@ fn show(alias: &str, json: bool) -> Result<()> {
             "alias": p.alias,
             "provider_id": p.provider_id,
             "base_url": p.base_url,
+            "allow_insecure_http": p.allow_insecure_http,
             "default_model": p.default_model,
             "models": models_json(&p),
             "wire_api": p.wire_api,
@@ -301,6 +308,10 @@ fn show(alias: &str, json: bool) -> Result<()> {
     user_println(&format!("alias       {}", p.alias));
     user_println(&format!("provider_id {}", p.provider_id));
     user_println(&format!("base_url    {}", p.base_url));
+    user_println(&format!(
+        "https_only  {}",
+        if p.allow_insecure_http { "no" } else { "yes" }
+    ));
     user_println(&format!("default     {}", p.default_model));
     for model in &p.models {
         let mut extras = Vec::new();

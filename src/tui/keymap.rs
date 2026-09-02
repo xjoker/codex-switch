@@ -293,19 +293,19 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "h",
         section: Section::Global,
-        label: "show this help",
+        label: "show this help (main view)",
         in_status_bar: true,
     },
     Binding {
         keys: "mouse",
         section: Section::Global,
-        label: "click tabs/rows; wheel scrolls logs/help/menus; click outside closes popups",
+        label: "click tabs/rows; double-click rows opens menus; wheel scrolls logs/help/menus",
         in_status_bar: false,
     },
     Binding {
         keys: "q",
         section: Section::Global,
-        label: "quit",
+        label: "quit (main view)",
         in_status_bar: true,
     },
 ];
@@ -401,5 +401,20 @@ mod tests {
         let log_text = format!("{logs:?}");
         assert!(log_text.contains("scroll session logs"));
         assert!(!log_text.contains("add provider"));
+    }
+
+    #[test]
+    fn help_labels_q_and_h_as_main_view_shortcuts() {
+        for key in ["h", "q"] {
+            let binding = super::KEYMAP
+                .iter()
+                .find(|binding| binding.section == super::Section::Global && binding.keys == key)
+                .unwrap_or_else(|| panic!("missing global {key} binding"));
+            assert!(
+                binding.label.contains("main view"),
+                "{key} must not claim to apply inside forms or popups: {}",
+                binding.label
+            );
+        }
     }
 }

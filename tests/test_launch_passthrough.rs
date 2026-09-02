@@ -82,11 +82,15 @@ try:
     data = json.loads(open(path, encoding="utf-8").read())
 except Exception:
     data = []
-data.append({"argv": sys.argv[1:]})
+data.append({"argv": sys.argv[1:], "pid": os.getpid()})
 open(path, "w", encoding="utf-8").write(json.dumps(data))
 if sys.argv[1:] == ["--version"]:
     sys.stdout.write("codex-cli 0.0.0-test\n")
 else:
+    delay = float(os.environ.get("CS_FAKE_CODEX_SLEEP", "0"))
+    if delay:
+        import time
+        time.sleep(delay)
     size = int(os.environ.get("CS_FAKE_CODEX_STDOUT_BYTES", "0"))
     sys.stdout.write("x" * size if size else "codex-ok\n")
 sys.exit(0)
@@ -122,6 +126,20 @@ fn last_non_version_argv(log: &Path) -> Vec<String> {
         .expect("fake codex must have been launched with real args")
 }
 
+fn last_non_version_pid(log: &Path) -> Option<u32> {
+    let raw = fs::read_to_string(log).ok()?;
+    let data: Vec<Value> = serde_json::from_str(&raw).ok()?;
+    data.into_iter()
+        .rev()
+        .find(|entry| {
+            entry["argv"]
+                .as_array()
+                .is_some_and(|argv| argv.iter().any(|arg| arg.as_str() != Some("--version")))
+        })
+        .and_then(|entry| entry["pid"].as_u64())
+        .and_then(|pid| u32::try_from(pid).ok())
+}
+
 fn command(home: &Path, fake_bin: &Path, log: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_codex-switch"));
     cmd.args(args);
@@ -153,6 +171,7 @@ fn setup_provider_at(home: &Path, base_url: &str) {
 provider_id = "openrouter"
 name = "openrouter"
 base_url = "{base_url}"
+allow_insecure_http = true
 env_key = "CODEX_SWITCH_OPENROUTER_KEY"
 default_model = "openai/gpt-5.3-codex"
 wire_api = "responses"
@@ -384,6 +403,39 @@ fn launch_provider_puts_c_overrides_after_exec_and_keeps_json() {
     assert!(
         !argv.iter().any(|a| a.contains("sk-test-passthrough")),
         "API key must not appear in argv: {argv:?}"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn cli_provider_sigterm_reaps_codex_and_exits_143() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let home = temp_home("provider-sigterm");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let mut child = command(&home, &fake_bin, &log, &["launch", "openrouter"])
+        .env("CS_FAKE_CODEX_SLEEP", "30")
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let codex_pid = loop {
+        if let Some(pid) = last_non_version_pid(&log) {
+            break pid;
+        }
+        assert!(std::time::Instant::now() < deadline, "Codex did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(143), "status={status:?}");
+    assert_eq!(status.signal(), None);
+    assert_eq!(
+        unsafe { libc::kill(codex_pid as i32, 0) },
+        -1,
+        "provider Codex child must be reaped"
     );
     let _ = fs::remove_dir_all(home);
 }

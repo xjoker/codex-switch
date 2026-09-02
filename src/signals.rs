@@ -9,6 +9,21 @@
 
 use anyhow::Result;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownSignal {
+    Interrupt,
+    Terminate,
+}
+
+impl ShutdownSignal {
+    pub(crate) fn exit_code(self) -> i32 {
+        match self {
+            Self::Interrupt => 130,
+            Self::Terminate => 143,
+        }
+    }
+}
+
 /// Listens for the signals that mean "wind down now".
 pub(crate) struct ShutdownListener {
     #[cfg(unix)]
@@ -63,13 +78,17 @@ impl ShutdownListener {
     /// registration lives in `self`, so a signal that arrives while this future
     /// is not being polled is still observed by the next call.
     pub(crate) async fn recv(&mut self) {
+        let _ = self.recv_signal().await;
+    }
+
+    pub(crate) async fn recv_signal(&mut self) -> ShutdownSignal {
         #[cfg(unix)]
         {
             match self.sigterm.as_mut() {
                 Some(sigterm) => {
                     tokio::select! {
-                        _ = sigterm.recv() => {},
-                        _ = self.sigint.recv() => {},
+                        _ = sigterm.recv() => ShutdownSignal::Terminate,
+                        _ = self.sigint.recv() => ShutdownSignal::Interrupt,
                     }
                 }
                 // `None` only means the stream ended, which tokio does not do
@@ -77,12 +96,14 @@ impl ShutdownListener {
                 // safe reading either way.
                 None => {
                     self.sigint.recv().await;
+                    ShutdownSignal::Interrupt
                 }
             }
         }
         #[cfg(not(unix))]
         {
             self.ctrl_c.recv().await;
+            ShutdownSignal::Interrupt
         }
     }
 }

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v20260902.1.0 — 2026-09-02
+
+- **Stable release candidate** — Brings the development channel since v20260804.1.0 together for stable promotion: custom Responses-compatible API providers and model catalogs, TUI Providers/Settings/Logs tabs with mouse navigation, scheduled warmup with IANA time zones, safer concurrent launches and credential refreshes, bounded operational logging, stronger installer provenance checks, and the accompanying CLI, daemon, documentation, and regression-test updates.
+- **Dependency refresh** — Updated the Rust lockfile to the newest Rust 1.88-compatible releases that had been published for at least seven days at release preparation time. Ten newer dependency releases remain on their previously validated versions until they complete that stability window; `chacha20` 0.10.2 is the explicitly accepted security-fix exception.
+- **Provider and launch safety** — Provider aliases now fail closed before path construction, per-launch Codex homes live outside mutable provider directories so rename/remove cannot discard session configuration, and a missing isolated config is never interpreted as deleting the user's settings. Provider endpoints require HTTPS unless the user explicitly opts that provider into insecure HTTP. ChatGPT and provider launches now terminate and reap their Codex child on SIGINT/SIGTERM, finish required cleanup, and preserve normal signal exit codes.
+- **TUI mouse actions** — Single-click selects tabs and account/provider rows; double-clicking a row opens its account menu or provider launch menu. Existing wheel scrolling and outside-click dismissal remain available.
+
 ## v20260831.4.0 — 2026-08-31
 
 - **TUI mouse navigation** — Click tabs to switch pages and click Accounts/Providers rows to select. Mouse wheel scrolls Logs, Help, and account menus; click outside a dismissible popup to close it. Forms, launch pickers, confirmations, and text edits still absorb mouse input so they do not click through.
@@ -37,7 +44,7 @@
 
 ## v20260828.5.0 — 2026-08-28
 
-- **Concurrent provider launches** — Each `launch` gets its own Codex home under `$CODEX_SWITCH_HOME/providers/<alias>/runs/`. `prompts/`, `skills/`, and `AGENTS.md` are linked to the user home so edits are the real files. MCP and other non-model keys are copied into that run `config.toml` and three-way-merged back on exit (short lock). ChatGPT `model` / `model_reasoning_effort` in the user `config.toml` are left alone for the whole session, so overlapping models cannot restore over each other.
+- **Concurrent provider launches** — Each `launch` gets its own Codex home under `$CODEX_SWITCH_HOME/provider-runs/<alias>/`. `prompts/`, `skills/`, and `AGENTS.md` are linked to the user home so edits are the real files. MCP and other non-model keys are copied into that run `config.toml` and three-way-merged back on exit (short lock). ChatGPT `model` / `model_reasoning_effort` in the user `config.toml` are left alone for the whole session, so overlapping models cannot restore over each other.
 
 ## v20260828.4.0 — 2026-08-28
 

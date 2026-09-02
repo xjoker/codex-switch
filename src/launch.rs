@@ -1,6 +1,6 @@
 use crate::output::{print_json, user_println};
 use crate::provider::{self, ProviderProfile, ReasoningLaunch};
-use crate::signals::ShutdownListener;
+use crate::signals::{ShutdownListener, ShutdownSignal};
 use crate::{auth, config, profile};
 use anyhow::{Context, Result};
 
@@ -8,7 +8,23 @@ use anyhow::{Context, Result};
 #[derive(Debug, PartialEq, Eq)]
 enum LaunchWait {
     Elapsed,
-    Interrupted,
+    Interrupted(ShutdownSignal),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TuiLaunchOutcome {
+    Exited(i32),
+    Shutdown {
+        signal: ShutdownSignal,
+        cleanup_error: Option<String>,
+    },
+}
+
+fn shutdown_outcome(signal: ShutdownSignal, cleanup: Result<()>) -> TuiLaunchOutcome {
+    TuiLaunchOutcome::Shutdown {
+        signal,
+        cleanup_error: cleanup.err().map(|error| format!("{error:#}")),
+    }
 }
 
 /// Waits out that window, returning early if the user interrupts.
@@ -26,7 +42,23 @@ async fn wait_for_codex_to_read_auth(
 ) -> LaunchWait {
     tokio::select! {
         _ = tokio::time::sleep(delay) => LaunchWait::Elapsed,
-        _ = interrupt.recv() => LaunchWait::Interrupted,
+        signal = interrupt.recv_signal() => LaunchWait::Interrupted(signal),
+    }
+}
+
+async fn wait_for_child_or_shutdown(
+    child: &mut std::process::Child,
+    shutdown: &mut ShutdownListener,
+) -> std::io::Result<Result<std::process::ExitStatus, ShutdownSignal>> {
+    loop {
+        tokio::select! {
+            signal = shutdown.recv_signal() => return Ok(Err(signal)),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                if let Some(status) = child.try_wait()? {
+                    return Ok(Ok(status));
+                }
+            }
+        }
     }
 }
 
@@ -37,8 +69,18 @@ pub(crate) async fn launch_for_tui(
     model: Option<&str>,
     reasoning: ReasoningLaunch,
     extra_args: Vec<String>,
-) -> Result<i32> {
-    launch_interactive(Some(alias), extra_args, false, false, model, reasoning).await
+    shutdown: &mut ShutdownListener,
+) -> Result<TuiLaunchOutcome> {
+    launch_interactive(
+        Some(alias),
+        extra_args,
+        false,
+        false,
+        model,
+        reasoning,
+        Some(shutdown),
+    )
+    .await
 }
 
 pub(crate) async fn launch_cmd(
@@ -56,12 +98,25 @@ pub(crate) async fn launch_cmd(
             consume_card,
             model,
             ReasoningLaunch::Saved,
+            None,
         )
         .await?,
     )
 }
 
-fn finish_launch_cli(exit_code: i32) -> Result<()> {
+fn finish_launch_cli(outcome: TuiLaunchOutcome) -> Result<()> {
+    let exit_code = match outcome {
+        TuiLaunchOutcome::Exited(code) => code,
+        TuiLaunchOutcome::Shutdown {
+            signal,
+            cleanup_error,
+        } => {
+            if let Some(error) = cleanup_error {
+                eprintln!("Error while cleaning up interrupted launch: {error}");
+            }
+            signal.exit_code()
+        }
+    };
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
@@ -75,7 +130,8 @@ async fn launch_interactive(
     consume_card: bool,
     model: Option<&str>,
     reasoning: ReasoningLaunch,
-) -> Result<i32> {
+    tui_shutdown: Option<&mut ShutdownListener>,
+) -> Result<TuiLaunchOutcome> {
     use std::io::IsTerminal;
 
     // A custom API provider profile takes a separate, simpler path: it has no
@@ -86,7 +142,7 @@ async fn launch_interactive(
         && provider::exists(alias)
     {
         let profile = provider::load(alias)?;
-        return launch_provider(profile, model, reasoning, args, json).await;
+        return launch_provider(profile, model, reasoning, args, json, tui_shutdown).await;
     }
 
     let forwarded = chatgpt_codex_argv(model, args);
@@ -131,10 +187,17 @@ async fn launch_interactive(
     ));
 
     // Registered before the first byte of the user's auth.json moves, so a
-    // Ctrl+C anywhere from here to the restore is recorded rather than
+    // SIGINT or SIGTERM anywhere from here to the restore is recorded rather than
     // discarded. See `wait_for_codex_to_read_auth`.
-    let mut interrupt = ShutdownListener::interrupt_only()
-        .context("registering the interrupt handler that guards the staged auth.json")?;
+    let mut owned_shutdown;
+    let interrupt = match tui_shutdown {
+        Some(shutdown) => shutdown,
+        None => {
+            owned_shutdown = ShutdownListener::new()
+                .context("registering shutdown handlers that guard the staged auth.json")?;
+            &mut owned_shutdown
+        }
+    };
 
     // The dedicated launch lease covers only stage -> process start -> short
     // read window -> restore. It does not hold the auth write lock or wait for
@@ -213,12 +276,33 @@ async fn launch_interactive(
     // An interrupt anywhere since staging began — including one that landed
     // while the swap itself was running — lands here, and the restore below
     // still runs.
-    if wait_for_codex_to_read_auth(&mut interrupt, delay).await == LaunchWait::Interrupted && !json
-    {
-        user_println("Interrupted; restoring original auth.json...");
+    let shutdown = match wait_for_codex_to_read_auth(interrupt, delay).await {
+        LaunchWait::Elapsed => None,
+        LaunchWait::Interrupted(signal) => {
+            if !json {
+                user_println("Interrupted; restoring original auth.json...");
+            }
+            Some(signal)
+        }
+    };
+
+    if let Some(signal) = shutdown {
+        terminate_child(&mut child, pipes);
+        let restore_result = {
+            let codex_auth2 = codex_auth.clone();
+            let backup2 = backup.clone();
+            let alias2 = target_alias.clone();
+            tokio::task::spawn_blocking(move || {
+                restore_launch_auth(&codex_auth2, &backup2, had_original, &alias2)
+            })
+            .await
+            .context("lock task panicked")?
+        };
+        drop(launch_lease);
+        return Ok(shutdown_outcome(signal, restore_result));
     }
 
-    {
+    let restore_result = {
         let codex_auth2 = codex_auth.clone();
         let backup2 = backup.clone();
         let alias2 = target_alias.clone();
@@ -226,12 +310,27 @@ async fn launch_interactive(
             restore_launch_auth(&codex_auth2, &backup2, had_original, &alias2)
         })
         .await
-        .context("lock task panicked")??;
-    }
+        .context("lock task panicked")?
+    };
     drop(launch_lease);
+    if let Err(error) = restore_result {
+        terminate_child(&mut child, pipes);
+        return Err(error);
+    }
 
-    // Wait for codex to exit
-    let status = child.wait().context("waiting for codex")?;
+    // Tokio's Unix signal handler remains installed for the process lifetime,
+    // so keep consuming shutdown signals after the restore instead of leaving
+    // a later `kill` swallowed while Codex is still running.
+    let status = match wait_for_child_or_shutdown(&mut child, interrupt)
+        .await
+        .context("waiting for codex")?
+    {
+        Ok(status) => status,
+        Err(signal) => {
+            terminate_child(&mut child, pipes);
+            return Ok(shutdown_outcome(signal, Ok(())));
+        }
+    };
     let captured = join_codex_pipes(pipes);
 
     let exit_code = child_exit_code(&status);
@@ -259,7 +358,7 @@ async fn launch_interactive(
         user_println("codex exited");
     }
 
-    Ok(exit_code)
+    Ok(TuiLaunchOutcome::Exited(exit_code))
 }
 
 /// Codex argv for a ChatGPT `launch`: optional `--model` is spliced after a
@@ -397,6 +496,12 @@ fn spawn_codex(
 struct CodexPipes {
     stdout: Option<std::thread::JoinHandle<CapturedBytes>>,
     stderr: Option<std::thread::JoinHandle<CapturedBytes>>,
+}
+
+fn terminate_child(child: &mut std::process::Child, pipes: CodexPipes) {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = join_codex_pipes(pipes);
 }
 
 struct CapturedCodexIo {
@@ -541,8 +646,19 @@ async fn launch_provider(
     reasoning: ReasoningLaunch,
     args: Vec<String>,
     json: bool,
-) -> Result<i32> {
+    shutdown: Option<&mut ShutdownListener>,
+) -> Result<TuiLaunchOutcome> {
     ensure_codex_available()?;
+
+    let mut owned_shutdown;
+    let shutdown = match shutdown {
+        Some(shutdown) => shutdown,
+        None => {
+            owned_shutdown = ShutdownListener::new()
+                .context("registering shutdown handlers for provider launch")?;
+            &mut owned_shutdown
+        }
+    };
 
     let selected = profile.resolve_model(model)?.clone();
     let shown_model = passthrough_model_value(&args).unwrap_or_else(|| selected.id.clone());
@@ -589,11 +705,22 @@ async fn launch_provider(
     };
     let pipes = take_codex_pipes(&mut child, json);
 
-    let wait = child.wait();
+    let status = match wait_for_child_or_shutdown(&mut child, shutdown)
+        .await
+        .context("waiting for Codex")?
+    {
+        Ok(status) => status,
+        Err(signal) => {
+            terminate_child(&mut child, pipes);
+            let cleanup = session
+                .restore()
+                .context("merging Codex config after provider shutdown");
+            return Ok(shutdown_outcome(signal, cleanup));
+        }
+    };
     session
         .restore()
         .context("merging Codex config after provider launch")?;
-    let status = wait.context("waiting for Codex")?;
     let captured = join_codex_pipes(pipes);
     let exit_code = child_exit_code(&status);
 
@@ -614,7 +741,7 @@ async fn launch_provider(
         user_println("codex exited");
     }
 
-    Ok(exit_code)
+    Ok(TuiLaunchOutcome::Exited(exit_code))
 }
 
 /// Snapshot the live auth.json into `backup` before it is overwritten by the
@@ -792,12 +919,50 @@ mod tests {
 
     use super::{
         chatgpt_codex_argv, ensure_codex_available, passthrough_model_value, provider_codex_argv,
-        restore_launch_auth,
+        restore_launch_auth, shutdown_outcome,
     };
     // Only the permission assertions call this, and those are unix-only, so an
     // unconditional import is dead on Windows and fails `-D warnings` there.
     #[cfg(unix)]
-    use super::backup_launch_auth;
+    use super::{CodexPipes, backup_launch_auth, terminate_child};
+
+    #[cfg(unix)]
+    #[test]
+    fn terminating_a_launch_reaps_the_child_before_returning() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn child");
+
+        terminate_child(
+            &mut child,
+            CodexPipes {
+                stdout: None,
+                stderr: None,
+            },
+        );
+
+        assert!(
+            child.try_wait().expect("query child").is_some(),
+            "cleanup must not return while the launched process can still rewrite staged auth"
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_does_not_consume_the_shutdown_signal() {
+        let outcome = shutdown_outcome(
+            crate::signals::ShutdownSignal::Terminate,
+            Err(anyhow::anyhow!("restore failed")),
+        );
+
+        assert_eq!(
+            outcome,
+            super::TuiLaunchOutcome::Shutdown {
+                signal: crate::signals::ShutdownSignal::Terminate,
+                cleanup_error: Some("restore failed".to_string()),
+            }
+        );
+    }
 
     #[test]
     fn chatgpt_argv_puts_model_after_a_codex_subcommand() {
@@ -1017,14 +1182,14 @@ mod tests {
     #[tokio::test]
     async fn an_interrupt_arriving_during_staging_still_triggers_the_restore() {
         use super::{LaunchWait, wait_for_codex_to_read_auth};
-        use crate::signals::{RAISE_LOCK, ShutdownListener};
+        use crate::signals::{RAISE_LOCK, ShutdownListener, ShutdownSignal};
         use std::time::Duration;
         use tokio::signal::unix::{SignalKind, signal};
 
         let _raise = RAISE_LOCK.lock().await;
         // Registered where `launch_cmd` registers it: before the first byte of
         // the user's auth.json is touched.
-        let mut interrupt = ShutdownListener::interrupt_only().expect("interrupt listener");
+        let mut interrupt = ShutdownListener::new().expect("shutdown listener");
 
         // Turns "tokio finished broadcasting" into an awaitable event so the
         // assertion never depends on sleeping long enough.
@@ -1046,8 +1211,62 @@ mod tests {
         .expect("the wait must observe an interrupt that predates it");
         assert_eq!(
             outcome,
-            LaunchWait::Interrupted,
+            LaunchWait::Interrupted(ShutdownSignal::Interrupt),
             "the restore has to run, so the wait must report the interrupt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_termination_arriving_during_staging_still_triggers_the_restore() {
+        use super::{LaunchWait, wait_for_codex_to_read_auth};
+        use crate::signals::{RAISE_LOCK, ShutdownListener, ShutdownSignal};
+        use std::time::Duration;
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let _raise = RAISE_LOCK.lock().await;
+        let mut shutdown = ShutdownListener::new().expect("shutdown listener");
+        let mut witness = signal(SignalKind::terminate()).expect("witness listener");
+
+        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+        witness.recv().await;
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_codex_to_read_auth(&mut shutdown, Duration::from_secs(600)),
+        )
+        .await
+        .expect("the wait must observe a termination that predates it");
+        assert_eq!(outcome, LaunchWait::Interrupted(ShutdownSignal::Terminate));
+        assert_eq!(ShutdownSignal::Terminate.exit_code(), 143);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_tui_listener_survives_sequential_launches_and_catches_shutdown() {
+        use super::{LaunchWait, wait_for_codex_to_read_auth};
+        use crate::signals::{RAISE_LOCK, ShutdownListener, ShutdownSignal};
+        use std::time::Duration;
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let _raise = RAISE_LOCK.lock().await;
+        let mut shutdown = ShutdownListener::new().expect("TUI shutdown listener");
+
+        for _ in 0..2 {
+            assert_eq!(
+                wait_for_codex_to_read_auth(&mut shutdown, Duration::from_millis(1)).await,
+                LaunchWait::Elapsed
+            );
+        }
+
+        let mut witness = signal(SignalKind::terminate()).expect("witness listener");
+        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+        witness.recv().await;
+
+        assert_eq!(
+            wait_for_codex_to_read_auth(&mut shutdown, Duration::from_secs(600)).await,
+            LaunchWait::Interrupted(ShutdownSignal::Terminate),
+            "the same TUI-owned listener must handle shutdown after multiple launches"
         );
     }
 
@@ -1062,7 +1281,7 @@ mod tests {
         // Not raising anything, but a sibling test does, and a raise is
         // process-wide: without the lock this listener can catch it.
         let _raise = RAISE_LOCK.lock().await;
-        let mut interrupt = ShutdownListener::interrupt_only().expect("interrupt listener");
+        let mut interrupt = ShutdownListener::new().expect("shutdown listener");
         assert_eq!(
             wait_for_codex_to_read_auth(&mut interrupt, Duration::from_millis(10)).await,
             LaunchWait::Elapsed

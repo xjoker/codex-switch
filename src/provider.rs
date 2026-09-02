@@ -14,7 +14,7 @@
 //! launch the profile is translated into `codex -c …` overrides (model and
 //! endpoint) while the key is injected into the child process environment
 //! under `env_key` — never onto the command line. Each launch gets its own
-//! Codex home under `$CODEX_SWITCH_HOME/providers/<alias>/runs/` so concurrent
+//! Codex home under `$CODEX_SWITCH_HOME/provider-runs/<alias>/` so concurrent
 //! models do not share sqlite or rewrite the user's `config.toml` model keys.
 //! `prompts/`, `skills/`, and `AGENTS.md` are linked to the user home; MCP and
 //! other non-model keys are copied into the run `config.toml` and three-way
@@ -78,6 +78,9 @@ pub struct ProviderProfile {
     pub name: String,
     /// API base URL, e.g. `https://openrouter.ai/api/v1`.
     pub base_url: String,
+    /// Explicit opt-in for sending the provider bearer key over plain HTTP.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_insecure_http: bool,
     /// Environment variable Codex reads the key from. Derived from the alias and
     /// owned by codex-switch, so it never collides with a provider's own var.
     pub env_key: String,
@@ -130,7 +133,27 @@ fn providers_dir() -> Result<PathBuf> {
 }
 
 fn provider_dir(alias: &str) -> Result<PathBuf> {
+    crate::profile::validate_alias(alias)?;
     Ok(providers_dir()?.join(alias))
+}
+
+fn existing_provider_dir(alias: &str) -> Result<PathBuf> {
+    let root = providers_dir()?;
+    let dir = provider_dir(alias)?;
+    if !dir.exists() {
+        anyhow::bail!("provider '{alias}' not found");
+    }
+    let canonical_root = std::fs::canonicalize(&root)
+        .with_context(|| format!("resolving providers directory {}", root.display()))?;
+    let canonical_dir = std::fs::canonicalize(&dir)
+        .with_context(|| format!("resolving provider directory {}", dir.display()))?;
+    if canonical_dir.parent() != Some(canonical_root.as_path()) {
+        anyhow::bail!(
+            "provider '{alias}' resolves outside {}",
+            canonical_root.display()
+        );
+    }
+    Ok(dir)
 }
 
 pub fn provider_path(alias: &str) -> Result<PathBuf> {
@@ -227,6 +250,7 @@ impl ProviderProfile {
             provider_id: sanitize_provider_id(&alias),
             name: alias.clone(),
             base_url: base_url.into(),
+            allow_insecure_http: false,
             env_key: derive_env_key(&alias),
             default_model,
             models,
@@ -288,9 +312,7 @@ impl ProviderProfile {
         if self.name != self.alias {
             anyhow::bail!("provider name must equal alias");
         }
-        if !(self.base_url.starts_with("http://") || self.base_url.starts_with("https://")) {
-            anyhow::bail!("base_url must start with http:// or https://");
-        }
+        validate_base_url(&self.base_url, self.allow_insecure_http)?;
         if !is_valid_env_key(&self.env_key) {
             anyhow::bail!(
                 "env_key '{}' is not a valid environment variable name",
@@ -597,6 +619,23 @@ impl ProviderProfile {
     }
 }
 
+fn validate_base_url(base_url: &str, allow_insecure_http: bool) -> Result<()> {
+    let url = reqwest::Url::parse(base_url).context("base_url must be a valid URL")?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            if allow_insecure_http {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "base_url must use https; explicitly allow insecure HTTP for this provider to continue"
+                )
+            }
+        }
+        _ => anyhow::bail!("base_url must use http or https"),
+    }
+}
+
 fn saved_catalog_matches(path: &Path, saved_slugs: &[String]) -> bool {
     let Ok(body) = std::fs::read(path) else {
         return false;
@@ -762,7 +801,12 @@ fn same_models_endpoint(base_url: &str, fallback_source: &str) -> bool {
 
 /// `GET {base_url}/models` with the provider key for an explicit sync action.
 pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Vec<RemoteModel>> {
-    let models = fetch_gateway_models_at(&profile.base_url, &profile.api_key).await?;
+    let models = fetch_gateway_models_at(
+        &profile.base_url,
+        &profile.api_key,
+        profile.allow_insecure_http,
+    )
+    .await?;
     debug!(
         "provider '{}' gateway /models returned {} entries",
         profile.alias,
@@ -774,7 +818,9 @@ pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Ve
 pub(crate) async fn fetch_gateway_models_at(
     base_url: &str,
     api_key: &str,
+    allow_insecure_http: bool,
 ) -> Result<Vec<RemoteModel>> {
+    validate_base_url(base_url, allow_insecure_http)?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     fetch_models_url(&url, Some(api_key)).await
 }
@@ -783,17 +829,26 @@ pub(crate) async fn fetch_gateway_models_at(
 pub(crate) fn fetch_gateway_models_blocking(
     base_url: &str,
     api_key: &str,
+    allow_insecure_http: bool,
 ) -> Result<Vec<RemoteModel>> {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| {
-            handle.block_on(fetch_gateway_models_at(base_url, api_key))
+            handle.block_on(fetch_gateway_models_at(
+                base_url,
+                api_key,
+                allow_insecure_http,
+            ))
         }),
         Err(_) => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .context("starting runtime for gateway /models")?;
-            runtime.block_on(fetch_gateway_models_at(base_url, api_key))
+            runtime.block_on(fetch_gateway_models_at(
+                base_url,
+                api_key,
+                allow_insecure_http,
+            ))
         }
     }
 }
@@ -909,7 +964,9 @@ pub(crate) async fn probe_responses_support(
     base_url: &str,
     api_key: &str,
     model: &str,
+    allow_insecure_http: bool,
 ) -> Result<ResponsesProbe> {
+    validate_base_url(base_url, allow_insecure_http)?;
     let url = format!("{}/responses", base_url.trim_end_matches('/'));
     let client = auth::build_http_client()?;
     let response = client
@@ -964,7 +1021,15 @@ pub(crate) async fn probe_provider_models(
     };
     let mut results = Vec::with_capacity(slugs.len());
     for slug in slugs {
-        results.push(probe_responses_support(&profile.base_url, &profile.api_key, &slug).await?);
+        results.push(
+            probe_responses_support(
+                &profile.base_url,
+                &profile.api_key,
+                &slug,
+                profile.allow_insecure_http,
+            )
+            .await?,
+        );
     }
     Ok(results)
 }
@@ -1714,8 +1779,10 @@ fn unique_run_dir(alias: &str) -> Result<PathBuf> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    Ok(provider_dir(alias)?
-        .join("runs")
+    crate::profile::validate_alias(alias)?;
+    Ok(auth::app_home()?
+        .join("provider-runs")
+        .join(alias)
         .join(format!("{}-{nanos}-{seq}", std::process::id())))
 }
 
@@ -1802,6 +1869,12 @@ fn merge_isolated_config_into_user(
     base: Option<&toml::Value>,
     isolated_config_path: &Path,
 ) -> Result<()> {
+    if base.is_some() && !isolated_config_path.exists() {
+        anyhow::bail!(
+            "provider launch config {} disappeared before it could be merged",
+            isolated_config_path.display()
+        );
+    }
     let ours = load_toml_if_present(isolated_config_path)?;
     if base.is_none() && ours.is_none() {
         return Ok(());
@@ -1930,13 +2003,16 @@ pub fn list_providers() -> Result<Vec<String>> {
 
 /// Load a provider profile by alias.
 pub fn load(alias: &str) -> Result<ProviderProfile> {
-    let path = provider_path(alias)?;
+    let path = existing_provider_dir(alias)?.join("provider.toml");
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("reading provider profile {}", path.display()))?;
     let mut profile: ProviderProfile = toml::from_str(&raw)
         .with_context(|| format!("parsing provider profile {}", path.display()))?;
     profile.alias = alias.to_string();
     profile.normalize();
+    profile
+        .validate()
+        .with_context(|| format!("validating provider profile {}", path.display()))?;
     Ok(profile)
 }
 
@@ -1952,6 +2028,9 @@ pub fn save(profile: &ProviderProfile) -> Result<()> {
     stored.normalize();
     stored.validate()?;
     let dir = provider_dir(&stored.alias)?;
+    if dir.exists() {
+        existing_provider_dir(&stored.alias)?;
+    }
     ensure_private_dir(&dir)?;
     let path = dir.join("provider.toml");
     let toml = toml::to_string_pretty(&stored).context("serializing provider profile")?;
@@ -1961,10 +2040,7 @@ pub fn save(profile: &ProviderProfile) -> Result<()> {
 
 /// Remove a provider profile and its stored key.
 pub fn remove(alias: &str) -> Result<()> {
-    let dir = provider_dir(alias)?;
-    if !dir.exists() {
-        anyhow::bail!("provider '{alias}' not found");
-    }
+    let dir = existing_provider_dir(alias)?;
     std::fs::remove_dir_all(&dir)
         .with_context(|| format!("removing provider profile {}", dir.display()))
 }
@@ -1974,6 +2050,7 @@ pub fn remove(alias: &str) -> Result<()> {
 /// custom key name is kept so launch still injects into the variable the
 /// user configured. Display name follows the alias.
 pub fn rename(old: &str, new: &str) -> Result<()> {
+    crate::profile::validate_alias(old)?;
     crate::profile::validate_alias(new)?;
     if old == new {
         return Ok(());
@@ -1988,7 +2065,7 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
         anyhow::bail!("'{new}' already names a ChatGPT profile; choose a different alias");
     }
     let mut profile = load(old)?;
-    let old_dir = provider_dir(old)?;
+    let old_dir = existing_provider_dir(old)?;
     let new_dir = provider_dir(new)?;
     std::fs::rename(&old_dir, &new_dir).with_context(|| {
         format!(
@@ -2148,6 +2225,15 @@ mod tests {
     }
 
     #[test]
+    fn provider_paths_reject_absolute_and_parent_aliases() {
+        assert!(provider_path("/tmp/outside").is_err());
+        assert!(provider_path("..").is_err());
+        assert!(load("/tmp/outside").is_err());
+        assert!(remove("/tmp/outside").is_err());
+        assert!(rename("/tmp/outside", "safe").is_err());
+    }
+
+    #[test]
     fn validate_rejects_reserved_ids_empty_name_and_bad_url() {
         let mut reserved = sample("openai");
         reserved.provider_id = "openai".to_string();
@@ -2165,6 +2251,26 @@ mod tests {
         assert!(
             bad_url.validate().is_err(),
             "base_url without a scheme must be rejected"
+        );
+
+        let mut insecure_remote = sample("insecure-remote");
+        insecure_remote.base_url = "http://api.example.com/v1".to_string();
+        assert!(
+            insecure_remote.validate().is_err(),
+            "remote HTTP would expose the provider API key"
+        );
+        insecure_remote.allow_insecure_http = true;
+        assert!(
+            insecure_remote.validate().is_ok(),
+            "remote HTTP requires an explicit per-provider opt-in"
+        );
+
+        let mut loopback = sample("local-gateway");
+        loopback.base_url = "http://127.0.0.1:8080/v1".to_string();
+        loopback.allow_insecure_http = true;
+        assert!(
+            loopback.validate().is_ok(),
+            "loopback HTTP must remain usable"
         );
 
         let mut no_key = sample("p");
@@ -2238,6 +2344,34 @@ mod tests {
         assert!(!exists("openrouter"));
         assert!(list_providers().unwrap().is_empty());
         assert!(remove("openrouter").is_err(), "removing twice must error");
+    }
+
+    #[test]
+    fn load_rejects_an_insecure_remote_endpoint_from_disk() {
+        let _home = TestHome::new();
+        let profile = sample("legacy-http");
+        save(&profile).unwrap();
+        let path = provider_path("legacy-http").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            raw.replace("https://openrouter.ai/api/v1", "http://api.example.com/v1"),
+        )
+        .unwrap();
+
+        let error = load("legacy-http").expect_err("remote HTTP must fail closed on load");
+        assert!(format!("{error:#}").contains("must use https"));
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            raw.replace(
+                "base_url = \"http://api.example.com/v1\"",
+                "base_url = \"http://api.example.com/v1\"\nallow_insecure_http = true",
+            ),
+        )
+        .unwrap();
+        assert!(load("legacy-http").unwrap().allow_insecure_http);
     }
 
     #[test]
@@ -2622,6 +2756,62 @@ api_key = "sk-legacy-key"
     }
 
     #[test]
+    fn active_provider_homes_survive_provider_rename_and_remove() {
+        let _home = TestHome::new();
+        let home = crate::auth::user_codex_home().unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "model = \"gpt-5.3-codex\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n",
+        )
+        .unwrap();
+
+        save(&sample("rename-me")).unwrap();
+        let mut renamed_session = ProviderCodexHome::begin("rename-me").unwrap();
+        rename("rename-me", "renamed").unwrap();
+        upsert_mcp_server(
+            &renamed_session.path.join("config.toml"),
+            "renamed-session",
+            "true",
+        );
+        renamed_session.restore().unwrap();
+
+        save(&sample("remove-me")).unwrap();
+        let mut removed_session = ProviderCodexHome::begin("remove-me").unwrap();
+        remove("remove-me").unwrap();
+        upsert_mcp_server(
+            &removed_session.path.join("config.toml"),
+            "removed-session",
+            "true",
+        );
+        removed_session.restore().unwrap();
+
+        let restored = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(restored.contains("demo"));
+        assert!(restored.contains("renamed-session"));
+        assert!(restored.contains("removed-session"));
+    }
+
+    #[test]
+    fn missing_isolated_config_never_deletes_user_config() {
+        let _home = TestHome::new();
+        let home = crate::auth::user_codex_home().unwrap();
+        let config = home.join("config.toml");
+        std::fs::write(
+            &config,
+            "model = \"gpt-5.3-codex\"\n\n[mcp_servers.demo]\ncommand = \"echo\"\n",
+        )
+        .unwrap();
+        let mut session = ProviderCodexHome::begin("or").unwrap();
+        std::fs::remove_file(session.path.join("config.toml")).unwrap();
+
+        assert!(session.restore().is_err());
+        let restored = std::fs::read_to_string(config).unwrap();
+        assert!(restored.contains("gpt-5.3-codex"));
+        assert!(restored.contains("demo"));
+        session.restored = true;
+    }
+
+    #[test]
     fn provider_home_without_config_is_a_noop_then_keeps_mcp_not_gateway_model() {
         let _home = TestHome::new();
         let home = crate::auth::user_codex_home().unwrap();
@@ -2984,10 +3174,14 @@ api_key = "sk-legacy-key"
             axum::serve(listener, app).await.unwrap();
         });
 
-        let probe =
-            probe_responses_support(&format!("http://{addr}/v1"), "sk-test", "deepseek-v4-flash")
-                .await
-                .unwrap();
+        let probe = probe_responses_support(
+            &format!("http://{addr}/v1"),
+            "sk-test",
+            "deepseek-v4-flash",
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(probe.support, ResponsesSupport::Unsupported);
         assert_eq!(probe.status, 404);
         assert_eq!(probe.code.as_deref(), Some("bad_response_status_code"));
@@ -3025,10 +3219,14 @@ api_key = "sk-legacy-key"
             axum::serve(listener, app).await.unwrap();
         });
 
-        let probe =
-            probe_responses_support(&format!("http://{addr}/v1"), "sk-test", "glm-5.3-flash")
-                .await
-                .unwrap();
+        let probe = probe_responses_support(
+            &format!("http://{addr}/v1"),
+            "sk-test",
+            "glm-5.3-flash",
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(probe.support, ResponsesSupport::Supported);
         assert_eq!(probe.status, 400);
     }
@@ -3204,7 +3402,7 @@ api_key = "sk-legacy-key"
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let remote = fetch_gateway_models_at(&format!("http://{addr}/v1"), "sk-test")
+        let remote = fetch_gateway_models_at(&format!("http://{addr}/v1"), "sk-test", true)
             .await
             .expect("GET /v1/models");
         server.abort();
@@ -3212,5 +3410,13 @@ api_key = "sk-legacy-key"
             chat_slugs_from_gateway(&remote).unwrap(),
             vec!["glm-5.3-flash"]
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_gateway_models_rejects_remote_http_before_requesting() {
+        let error = fetch_gateway_models_at("http://api.example.com/v1", "sk-test", false)
+            .await
+            .expect_err("Bearer credentials must never be sent over remote HTTP");
+        assert!(error.to_string().contains("must use https"));
     }
 }

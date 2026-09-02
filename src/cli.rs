@@ -40,6 +40,9 @@ pub enum ProviderCommand {
         /// API base URL, e.g. https://openrouter.ai/api/v1
         #[arg(long)]
         base_url: String,
+        /// Allow sending the provider API key over plain HTTP (unsafe)
+        #[arg(long)]
+        allow_insecure_http: bool,
         /// Model id (repeatable; first is the default). For OpenRouter, the full slug
         #[arg(long, action = clap::ArgAction::Append)]
         model: Vec<String>,
@@ -481,6 +484,30 @@ mod tests {
                 assert!(fetch_models);
                 assert!(model.is_empty());
             }
+            _ => panic!("expected provider add"),
+        }
+    }
+
+    #[test]
+    fn provider_add_parses_explicit_insecure_http_opt_in() {
+        let cli = Cli::try_parse_from([
+            "codex-switch",
+            "provider",
+            "add",
+            "local-proxy",
+            "--base-url",
+            "http://gateway.example/v1",
+            "--allow-insecure-http",
+            "--model",
+            "model",
+            "--api-key-stdin",
+        ])
+        .expect("explicit HTTP opt-in must parse");
+        match cli.command {
+            Commands::Provider(ProviderCommand::Add {
+                allow_insecure_http,
+                ..
+            }) => assert!(allow_insecure_http),
             _ => panic!("expected provider add"),
         }
     }
