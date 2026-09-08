@@ -907,7 +907,7 @@ fn alias_is_taken(alias: &str) -> Result<bool> {
     Ok(profile_auth_path(alias)?.exists() || crate::provider::exists(alias))
 }
 
-fn reject_provider_alias(alias: &str) -> Result<()> {
+pub(crate) fn reject_provider_alias(alias: &str) -> Result<()> {
     if crate::provider::exists(alias) {
         anyhow::bail!("alias '{alias}' already belongs to a provider")
     }

@@ -63,6 +63,28 @@ fn write_json(path: impl AsRef<Path>, value: &Value) {
     fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
 }
 
+fn seed_provider_alias(home: &Path, alias: &str) {
+    let dir = home.join(format!(".codex-switch/providers/{alias}"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("provider.toml"),
+        format!(
+            r#"
+provider_id = "{alias}"
+name = "{alias}"
+base_url = "https://example.invalid/v1"
+env_key = "CS_TEST_PROVIDER_KEY"
+default_model = "test-model"
+api_key = "test-key"
+
+[[models]]
+id = "test-model"
+"#
+        ),
+    )
+    .unwrap();
+}
+
 fn write_cache_entry(
     home: &Path,
     alias: &str,
@@ -813,6 +835,7 @@ fn warmup_rejects_path_traversal_alias_before_profile_use() {
 struct MockServer {
     base_url: String,
     token_calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    unexpected_requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     _shutdown: tokio::sync::oneshot::Sender<()>,
     _rt: tokio::runtime::Runtime,
 }
@@ -827,6 +850,7 @@ struct MockState {
     /// lets one file in a directory import fail its usage check without
     /// forcing every other file in the same run to fail too.
     fail_access_tokens: std::collections::HashSet<String>,
+    unexpected_requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 async fn mock_usage_handler(
@@ -887,6 +911,15 @@ async fn mock_token_handler(
     )
 }
 
+async fn mock_unexpected_request_handler(
+    axum::extract::State(state): axum::extract::State<MockState>,
+) -> impl axum::response::IntoResponse {
+    state
+        .unexpected_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (axum::http::StatusCode::NOT_FOUND, "")
+}
+
 /// Auth server that rotates `refresh_old` -> `refresh_1` exactly once. With
 /// `usage_ok` false every usage call then fails, reproducing "token rotated,
 /// validation failed afterwards"; with it true the failure has to come from a
@@ -905,11 +938,13 @@ fn start_rotating_mock_with_failures(
     fail_access_tokens: &[&str],
 ) -> MockServer {
     let token_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let unexpected_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let state = MockState {
         rotated_id_token,
         usage_ok,
         token_calls: token_calls.clone(),
         fail_access_tokens: fail_access_tokens.iter().map(|s| s.to_string()).collect(),
+        unexpected_requests: unexpected_requests.clone(),
     };
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -925,6 +960,7 @@ fn start_rotating_mock_with_failures(
             axum::routing::get(mock_usage_handler),
         )
         .route("/oauth/token", axum::routing::post(mock_token_handler))
+        .fallback(mock_unexpected_request_handler)
         .with_state(state);
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     rt.spawn(async move {
@@ -937,6 +973,7 @@ fn start_rotating_mock_with_failures(
     MockServer {
         base_url: format!("http://{addr}"),
         token_calls,
+        unexpected_requests,
         _shutdown: shutdown,
         _rt: rt,
     }
@@ -1002,6 +1039,76 @@ fn import_rejects_an_invalid_alias_before_consuming_the_refresh_token() {
     assert!(
         !home.join(".codex-switch/recovery").exists(),
         "a preflight rejection must not need credential recovery"
+    );
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn import_rejects_a_provider_alias_before_authentication_network() {
+    let home = temp_home("import-provider-alias-preflight");
+    let alias = "shared";
+    seed_provider_alias(&home, alias);
+    let sample = auth_json_needing_refresh("alias@example.com", "acct_alias");
+    let rotated_id_token = sample["tokens"]["id_token"].as_str().unwrap().to_string();
+    let source = home.join("donor-auth.json");
+    write_json(&source, &sample);
+
+    let server = start_rotating_mock(rotated_id_token, true);
+    let output = run_import(
+        &home,
+        &["--json", "import", source.to_str().unwrap(), alias],
+        &server,
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("already belongs to a provider"),
+        "the provider namespace conflict must be reported: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(server.token_calls.lock().unwrap().is_empty());
+    assert!(
+        !home
+            .join(format!(".codex-switch/profiles/{alias}/auth.json"))
+            .exists()
+    );
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn login_rejects_a_provider_alias_before_authentication_network() {
+    let home = temp_home("login-provider-alias-preflight");
+    let alias = "shared";
+    seed_provider_alias(&home, alias);
+    let server = start_rotating_mock(String::new(), true);
+    let output = command(
+        &home,
+        &[
+            "--json",
+            "--proxy",
+            &server.base_url,
+            "login",
+            alias,
+            "--device",
+        ],
+    )
+    .output()
+    .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("already belongs to a provider"),
+        "the provider namespace conflict must be reported: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        server
+            .unexpected_requests
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "login must reject the alias before contacting the local proxy"
     );
 
     let _ = fs::remove_dir_all(home);

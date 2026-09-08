@@ -7,6 +7,7 @@ use anyhow::Result;
 pub(crate) async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> Result<()> {
     if let Some(a) = alias {
         profile::validate_alias(a)?;
+        profile::reject_provider_alias(a)?;
     }
 
     if let Some(a) = alias {

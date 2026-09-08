@@ -773,6 +773,18 @@ fn restore_launch_auth(
     alias: &str,
 ) -> Result<()> {
     let _lock = profile::lock_live_auth().context("acquiring auth lock for restore")?;
+    // Capture this before `preserve_refreshed_launch_auth` updates the profile.
+    // A same-account backup with a different refresh token is a distinct live
+    // credential and must be restored even when the staged account refreshed.
+    let backup_matches_staged = if had_original && backup.exists() {
+        let staged_path = profile::profile_auth_path(alias)?;
+        match (std::fs::read(staged_path), std::fs::read(backup)) {
+            (Ok(staged), Ok(original)) => launch_credentials_match(&staged, &original, alias),
+            _ => false,
+        }
+    } else {
+        false
+    };
     let refreshed_live_preserved = match preserve_refreshed_launch_auth(codex_auth, alias) {
         Ok(true) => {
             user_println(&format!(
@@ -813,7 +825,7 @@ fn restore_launch_auth(
             });
         }
     };
-    if had_original && refreshed_live_preserved {
+    if had_original && refreshed_live_preserved && backup_matches_staged {
         let live = auth::read_auth(codex_auth).with_context(|| {
             format!(
                 "reading live auth.json {} before deciding whether to restore backup",
@@ -849,6 +861,19 @@ fn restore_launch_auth(
             .with_context(|| format!("removing staged launch auth {}", codex_auth.display()))?;
     }
     Ok(())
+}
+
+fn launch_credentials_match(staged: &[u8], backup: &[u8], alias: &str) -> bool {
+    let staged_value = serde_json::from_slice::<serde_json::Value>(staged).ok();
+    let backup_value = serde_json::from_slice::<serde_json::Value>(backup).ok();
+    let (Some(staged_value), Some(backup_value)) = (staged_value, backup_value) else {
+        return staged == backup;
+    };
+    let (_, staged_refresh) = auth::extract_tokens(&staged_value);
+    let (_, backup_refresh) = auth::extract_tokens(&backup_value);
+    staged_refresh.is_some()
+        && staged_refresh == backup_refresh
+        && ensure_same_account(alias, &staged_value, &backup_value).is_ok()
 }
 
 /// Fold credentials Codex refreshed in place back into the staged profile.
@@ -1611,6 +1636,24 @@ mod tests {
             new,
             "same-account restore must keep rotated credentials live"
         );
+    }
+
+    #[test]
+    fn restore_restores_a_distinct_same_account_backup_after_refresh() {
+        let home = TestAppHome::new();
+        let staged = auth_value("a", "refresh-staged", "2026-07-01T00:00:00Z");
+        let (profile_path, codex_auth, backup) = staged_launch(&home, &staged);
+
+        let original = auth_value("a", "refresh-backup", "2026-07-01T00:00:00Z");
+        crate::auth::write_auth(&backup, &original).unwrap();
+        let refreshed = auth_value("a", "refresh-new", "2026-07-20T10:00:00Z");
+        crate::auth::write_auth(&codex_auth, &refreshed).unwrap();
+
+        restore_launch_auth(&codex_auth, &backup, true, "work").unwrap();
+
+        assert_eq!(read_json(&profile_path), refreshed);
+        assert_eq!(read_json(&codex_auth), original);
+        assert!(!backup.exists());
     }
 
     #[test]

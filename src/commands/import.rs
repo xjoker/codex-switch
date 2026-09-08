@@ -102,6 +102,10 @@ pub(crate) async fn import_cmd(path: &str, alias: Option<&str>, json: bool) -> R
     }
 
     if files.len() == 1 && input.is_file() {
+        if let Some(alias) = alias {
+            profile::validate_alias(alias)?;
+            profile::reject_provider_alias(alias)?;
+        }
         let imported = match import_one_file(&files[0], alias).await {
             Ok(imported) => imported,
             Err(failure) => anyhow::bail!("{}: {}", failure.stage, failure.error),
