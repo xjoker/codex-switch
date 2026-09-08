@@ -7,14 +7,12 @@
 ```mermaid
 flowchart LR
     User[CLI or TUI user] --> Dispatch[Command dispatch]
-    Service[Platform service manager] --> Daemon[Background daemon]
+    Scheduler[User-managed OS task] --> Dispatch[Command dispatch]
     Dispatch --> Profiles[Profile and lock layer]
     Dispatch --> Providers[Custom API providers]
     Dispatch --> Usage[Usage, refresh, models, reset cards]
     Dispatch --> Login[OAuth login]
     Dispatch --> Update[Self-update]
-    Daemon --> Profiles
-    Daemon --> Usage
     Profiles <--> CSHome[CODEX_SWITCH_HOME]
     Providers --> CSHome
     Providers --> CodexLaunch[Codex CLI -c overlay]
@@ -65,9 +63,9 @@ The [`src/usage/`](https://github.com/xjoker/codex-switch/tree/dev/src/usage) mo
 | `scoring.rs` | Pure eligibility, pace, and candidate scoring functions |
 | `mod.rs` | Shared domain types and public module surface |
 
-[`src/cache.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/cache.rs) persists usage and workspace-name data. It also records two negative results, so a known answer is not requested again on every invocation: credentials the auth server has permanently refused, kept until the credential itself is replaced, and accounts confirmed to have no workspace name, kept for a day. `--force` bypasses both, and is the only thing that does: the daemon's periodic refresh takes current usage numbers but leaves a recorded refusal standing, since re-presenting a spent credential on a timer cannot produce a different answer. Cache file updates use an in-process mutex and a cross-process file lock, then replace the file atomically; a daemon all-account refresh batches its rows into one replacement.
+[`src/cache.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/cache.rs) persists usage and workspace-name data. It also records two negative results, so a known answer is not requested again on every invocation: credentials the auth server has permanently refused, kept until the credential itself is replaced, and accounts confirmed to have no workspace name, kept for a day. `--force` bypasses both, and is the only thing that does: a one-time refresh takes current usage numbers but leaves a recorded refusal standing, since re-presenting a spent credential cannot produce a different answer. Cache file updates use an in-process mutex and a cross-process file lock, then replace the file atomically.
 
-Selection has two phases. Eligibility excludes candidates with missing authoritative quota data, exhausted windows, critical weekly state with a distant reset, or an unsafe Free-plan balance. Scoring then combines tier preference, pace-aware headroom, weekly sustainability, expiring quota value, and recency. The shared scoring path is used by both interactive commands and the daemon.
+Selection has two phases. Eligibility excludes candidates with missing authoritative quota data, exhausted windows, critical weekly state with a distant reset, or an unsafe Free-plan balance. Scoring then combines tier preference, pace-aware headroom, weekly sustainability, expiring quota value, and recency. The shared scoring path is used by interactive commands and the TUI.
 
 ## TUI and output contracts
 
@@ -75,21 +73,11 @@ Selection has two phases. Eligibility excludes candidates with missing authorita
 
 [`src/output.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/output.rs) owns JSON response types and human formatting. In JSON mode stdout must contain only structured output; human diagnostics and progress are routed to stderr. This separation is part of the automation contract and is covered by integration tests.
 
-## Daemon lifecycle
+## One-shot operations and scheduling boundary
 
-[`src/daemon/`](https://github.com/xjoker/codex-switch/tree/dev/src/daemon) separates orchestration, polling, process detection, notifications, PID-file ownership, service-manager integration, and persisted state.
+`warmup`, `list --force`, `use`, and `launch` perform one operation and exit. The TUI `w` action warms the selected account once, `u` starts a selected-account switch and reports progress in the status line, and `t` enables session-only automatic usage refresh. The project does not contain a resident daemon, PID-file lifecycle, service-manager integration, automatic account switcher, or internal schedule.
 
-The loop uses independent timers for account polling, all-account cache refresh, and scheduled warmup. Usage requests rotate credentials that expire within 30 minutes, so token maintenance is not a separate timer. Usage 429 responses establish a per-account cooldown instead of sleeping inside a timer branch. Recoverable failures are exposed through state and bounded backoff. A pending switch is retained while an interactive Codex session is detected and retried later.
-
-Service managers start the binary in foreground mode:
-
-| Platform | Integration |
-|---|---|
-| macOS | `~/Library/LaunchAgents/com.codex-switch.daemon.plist` |
-| Linux | `~/.config/systemd/user/codex-switch-daemon.service` |
-| Windows | `codex-switch-daemon` Task Scheduler task |
-
-PID-file cleanup verifies lock ownership before removal. Removing a path while another daemon holds the underlying file lock would create two apparent owners and is forbidden.
+If periodic refresh or warmup is desired, a user-managed cron, systemd user timer, Task Scheduler task, or launchd agent may invoke the binary. That scheduler is outside the application and owns its environment, logs, lifecycle, and removal; see [Optional OS scheduling](Feature-Guide#optional-os-scheduling).
 
 ## State layout
 
@@ -104,7 +92,6 @@ PID-file cleanup verifies lock ownership before removal. Removing a path while a
 | `$CODEX_SWITCH_HOME/deleted-profiles/` | Recoverable profile archives |
 | `$CODEX_SWITCH_HOME/cache.json` | Usage, workspace metadata, and rejected-credential cache |
 | `$CODEX_SWITCH_HOME/config.toml` | Application configuration |
-| `$CODEX_SWITCH_HOME/daemon-state.json` | Daemon status and pending-switch snapshot |
 | `$CODEX_SWITCH_HOME/logs/` | Rotated diagnostic logs |
 | `$CODEX_SWITCH_HOME/*.lock` | Cross-process coordination files |
 

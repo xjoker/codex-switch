@@ -28,9 +28,9 @@ No. `provider add` reads it from a hidden prompt or `--api-key-stdin`. Launch in
 
 No. Inactive profiles are archived under `deleted-profiles/`. The active profile cannot be deleted.
 
-## Is the daemon required?
+## Does codex-switch run a background daemon?
 
-No. It is an optional Beta feature. `codex-switch use`, `list`, `launch`, and the TUI work without it.
+No. The binary performs one operation and exits. `list --force`, `warmup`, `use`, and `launch` are available as one-time CLI operations; the TUI `t` key only enables automatic refresh for the current session. If you want periodic work, install and own a user-level OS task yourself; see [Optional OS scheduling](Feature-Guide#optional-os-scheduling). Upgrading does not remove tasks or services created by an older release.
 
 ## What do the version numbers mean?
 

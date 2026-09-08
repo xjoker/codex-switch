@@ -26,6 +26,8 @@ The final development release before a stable release has an additional acceptan
 
 The Wiki sync workflow publishes the reviewed `docs/wiki/` sources from `dev`. This publication does not change the accepted source commit; the Wiki content must already match that commit.
 
+The release workflow has a prepublish `legacy-upgrade` gate. It runs on Linux, macOS, and Windows after the build matrix, downloads those internal build artifacts, generates temporary release metadata, and serves that metadata locally while the official `v0.0.19` binary performs its original self-update. The `release` job publishes only after this gate succeeds; the Homebrew job then consumes the same build artifacts and validates their SHA-256 files before generating the formula. The rolling `dev` release is updated in place with `overwrite_files` rather than deleted first.
+
 ## Version policy
 
 Base versions use the SemVer-compatible `YYYYMMDD.N.0` format:
@@ -98,14 +100,14 @@ GitHub Actions Release builds are the only distribution source of truth; do not 
 - `install.sh` / `install.ps1`
 - User update path: `codex-switch self-update --dev`
 
-After creating the GitHub Release, the `legacy-upgrade` job downloads the official `v0.0.19` binary on macOS, Linux, and Windows, runs its original self-update command against the new channel release, and verifies the resulting binary version. This is the compatibility floor for direct self-update; `v0.0.1` and `v0.0.2` remain installer-only.
+Before creating the GitHub Release, the `legacy-upgrade` job downloads the official `v0.0.19` binary on macOS, Linux, and Windows, runs its original self-update command against locally served metadata for the current build artifacts, and verifies the resulting binary version. This is the compatibility floor for direct self-update; `v0.0.1` and `v0.0.2` remain installer-only.
 
 The compatibility job runs for the rolling `dev` channel and stable releases. Permanent prerelease tags are not discoverable through either self-update channel, so they skip this channel-upgrade check.
 
 Post-release verification must confirm at least:
 
-- The GitHub Actions Release run succeeds, including all six builds and the release job.
-- The macOS, Linux, and Windows `legacy-upgrade` jobs prove `v0.0.19` can replace itself with the published version.
+- The GitHub Actions Release run succeeds, including all six builds, the prepublish `legacy-upgrade` gate, and the release job.
+- The macOS, Linux, and Windows `legacy-upgrade` jobs prove `v0.0.19` can replace itself with the exact build artifacts that the release job publishes.
 - A platform archive downloaded from GitHub Releases matches its `.sha256`.
 - A current GitHub CLI verifies that archive against `codex-switch-build-provenance.json` with the repository, `.github/workflows/release.yml`, exact tag ref, the full commit digest reached by that tag, and self-hosted runners denied.
 - The unpacked release binary reports the CI-injected version with `codex-switch --version`.

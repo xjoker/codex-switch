@@ -22,11 +22,6 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | `warmup [alias]` | Send a minimal request to activate the quota-window countdown for one or all profiles. |
 | `rename <old> <new>` | Rename a saved profile. |
 | `delete <alias> [-y]` | Move an inactive profile into recoverable deleted storage; `-y` / `--yes` skips the prompt. |
-| `daemon start [--foreground]` | Start the Beta daemon, detached by default; `--foreground` is for service managers. |
-| `daemon stop` | Stop a running Beta daemon. |
-| `daemon status` | Report daemon support, service, process, configuration, and pending-switch state. |
-| `daemon install` | Install the native user service: LaunchAgent on macOS, systemd on Linux, Task Scheduler on Windows (elevated PowerShell required). |
-| `daemon uninstall` | Remove the native user service. |
 | `self-update [--check] [--dev\|--stable] [--version <VERSION>]` | Check or update a direct installation. Without flags it stays on the current channel; `--version` installs a specific newer stable version and conflicts with the channel flags. |
 | `tui` | Open the interactive terminal dashboard. |
 | `open` | Open the codex-switch data directory in the platform file manager. |
@@ -35,7 +30,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 | Option | Environment variable | Behavior |
 |---|---|---|
-| `--json` | — | Compact structured output (supported by `list`, `use`, `launch`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `daemon status`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`, `provider fetch-models`, `provider probe`). `launch --json` prints one envelope after Codex exits; each captured Codex stream is limited to 1 MiB and has a `*_truncated` flag. |
+| `--json` | — | Compact structured output (supported by `list`, `use`, `launch`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`, `provider fetch-models`, `provider probe`). `launch --json` prints one envelope after Codex exits; each captured Codex stream is limited to 1 MiB and has a `*_truncated` flag. |
 | `--json-pretty` | — | Indented structured output. |
 | `--proxy <URL>` | `CS_PROXY` | Override proxy configuration for this process; supports `http(s)://`, `socks4://`, `socks5://`, and `socks5h://` (remote DNS). |
 | `--color <auto\|always\|never>` | `CS_COLOR` | Control CLI terminal color. `NO_COLOR` disables CLI color regardless of this option. The TUI still paints its designed palette. |
@@ -47,8 +42,9 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 - Structured data is written to stdout; progress and diagnostics are written to stderr.
 - JSON and other non-interactive execution never consumes a reset card or deletes a profile without an explicit opt-in flag.
 - `launch` treats a known Codex subcommand (`exec`, `resume`, …) or a non-launch flag as the start of Codex argv, even without `--`. Tokens on both sides of `--` are kept, so `launch work exec -- --json` still runs `exec`. A prompt that looks like an alias still needs `--`. When `alias` names a custom provider, Codex is started with `-c` overrides (including the saved model catalog, after `exec` / `resume` / … so Codex 0.149 applies them; user flags that preceded the subcommand move with them) and the key in the child environment. The child uses a per-launch Codex home (prompts/skills/`AGENTS.md` linked to the user home); `auth.json` is not swapped. `--json launch` captures Codex stdout/stderr into the JSON envelope instead of mixing them onto stdout.
-- A manual `use` affects the next Codex process and accepts ChatGPT profile aliases only. Restart an already-running Codex process to load the new `auth.json`.
+- A manual `use` affects the next Codex process and accepts ChatGPT profile aliases only. Restart an already-running Codex process to load the new `auth.json`; `use` without an alias selects the best eligible profile once.
 - Update checks are manual except for the one check performed when the TUI starts.
+- `list --force` and `warmup` are one-time operations. The project does not install or manage an OS scheduler; see the [Feature guide](Feature-Guide#optional-os-scheduling) for user-managed examples.
 
 Examples:
 
@@ -95,11 +91,10 @@ Mouse input is available alongside the keyboard: click a tab to switch pages, cl
 | `r` | Refresh visible accounts |
 | `a` | Add a new account |
 | `t` | Toggle auto-refresh |
-| `W` | Toggle auto-warmup for accounts whose 5h window has expired |
 | `i` | Toggle the compact quota panel on the main view |
 | `s` | Cycle sort order (name / quota / status) |
 | `Space` | Mark or unmark an account |
-| `u` (account menu) | Switch to the selected account |
+| `u` (Accounts page when no accounts are marked, or account menu) | Switch to the selected account; the status line shows `Switching to …` while it is in progress |
 | `o` | Launch Codex with the selected account (also `o` in the account menu) |
 | `c` (account menu) | Confirm and consume the earliest-expiring reset card |
 | `w` (account menu) | Warm up the selected account |
@@ -129,15 +124,13 @@ The Providers table never renders the stored key. `Enter` or `o` picks a saved m
 
 ### Settings tab
 
-Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and unknown keys are not kept). The TUI process applies changes immediately; a running daemon reloads within about a minute. Only `daemon.log_level` still needs a daemon restart.
+Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and unknown keys are not kept). The TUI process applies changes immediately. `t` on the Accounts page controls session-only automatic usage refresh; quota warmup remains a one-time account-menu action (`w`) or CLI `warmup`.
 
 | Key | Action |
 |---|---|
-| `j` / `k` or `↑` / `↓` | Move field (`j`/`k` inside `warmup_times` move among slots) |
+| `j` / `k` or `↑` / `↓` | Move among fields |
 | `Enter` / `Space` | Edit the focused value, or toggle a boolean |
-| `←` / `→` | Cycle `log_level` or booleans |
-| `+` / `a` | Add warmup slots (at most 10). One `HH:MM`, or paste `08:00, 13:10, 18:20`. After add, focus stays on `+ add time`. |
-| `d` / `-` | Remove the selected warmup slot |
+| `←` / `→` | Toggle the boolean field |
 | `s` | Save `config.toml` |
 | `Esc` | Cancel the current field edit (does not discard other unsaved fields) |
 | `Tab` | Next tab (Logs). Ignored while a field is being edited. Unsaved edits are kept. |
@@ -154,5 +147,5 @@ Session diagnostics stay inside the TUI instead of writing through the active te
 
 - See how these commands combine into workflows in the [Feature guide](Feature-Guide).
 - Custom API endpoints, OpenRouter, and key handling: [Custom API providers](Providers).
-- Adjust defaults, proxy, and daemon behavior in [Configuration](Configuration).
+- Adjust defaults, proxy, cache, selection, and launch behavior in [Configuration](Configuration).
 - Check update channels and flags in [Updating](Updating).

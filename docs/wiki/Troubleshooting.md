@@ -17,8 +17,7 @@ Start with the complete error message, its file path, and the command that produ
 | A removed provider cannot be recovered | Provider deletion removes the stored key immediately; unlike ChatGPT profiles, it is not archived under `deleted-profiles/`. Re-add it with `provider add`. |
 | Credential store is not file-backed | Set `cli_auth_credentials_store = "file"` in `$CODEX_HOME/config.toml`. |
 | Headless login cannot open a browser | Run `codex-switch login --device`. |
-| Windows daemon installation is denied | Open PowerShell as Administrator and retry. |
-| Windows daemon stop says credential work is still in flight | Wait briefly and run `codex-switch daemon stop` again. The process is intentionally left running instead of force-killed while a refresh token may be rotating. |
+| An old daemon task remains after upgrading | The new binary has no daemon command and does not remove OS tasks. Use the old binary to run `daemon stop`, verify with `daemon status`, then run `daemon uninstall`; if already upgraded, restore the old executable or remove the task/service with the operating system scheduler. See [Updating](Updating#migrate-from-the-removed-daemon). |
 | TUI layout is broken in Git Bash | Use Windows Terminal or PowerShell. |
 | Direct update does not replace a Homebrew binary | Run `brew upgrade xjoker/tap/codex-switch`. |
 | A Homebrew installation cannot switch to dev | Run `brew uninstall codex-switch`, then follow [Testing development releases](Development-Releases#install-the-rolling-dev-build). |
@@ -26,7 +25,6 @@ Start with the complete error message, its file path, and the command that produ
 | macOS/Linux self-update reports that the install directory is not writable | Rerun the current installer once to migrate a legacy `/usr/local/bin` direct install to `$HOME/.local/bin`; see [Updating](Updating#legacy-direct-installs). Use `sudo codex-switch self-update` only for an intentional `--system` install. |
 | A dev build should return to stable | Run `codex-switch self-update --stable`. |
 | Self-update reports that `gh attestation verify` is unavailable | Install or upgrade [GitHub CLI](https://cli.github.com/), then retry. Direct self-update fails closed until it can verify the release provenance bundle. |
-| An installed daemon ignores `CODEX_SWITCH_HOME` | `daemon install` captures `CODEX_SWITCH_HOME` from the shell that runs it; re-run `daemon install` with the variable set so its value lands in the service definition. See [Configuration](Configuration#platform-integration). |
 | HTTPS fails with `invalid peer certificate: UnknownIssuer` | An intercepting proxy is re-signing traffic. See [HTTPS fails with an unknown issuer](#https-fails-with-invalid-peer-certificate-unknownissuer). |
 | An account reports `re-login required (refresh_token_reused)` | The stored refresh token was already spent and cannot be recovered. Run `codex-switch login <alias>` for that profile. The verdict is remembered, so the account costs no further requests until you sign in again; `codex-switch list -f` asks the server anyway. |
 | Import reports a quarantined rotated credential | The server replaced the source file's one-time token before identity or managed-policy validation failed. Keep the named file under `~/.codex-switch/recovery/` private, sign in again, then remove it only after the account works. Recovery files are deliberately not selectable profiles. |
@@ -58,7 +56,7 @@ security find-certificate -c "Proxyman CA" -p > ~/.codex-switch/proxy-ca.pem
 export CODEX_CA_CERTIFICATE=~/.codex-switch/proxy-ca.pem
 ```
 
-Set the variable in the shell profile so the TUI and the daemon inherit it, not
+Set the variable in the shell profile so the TUI and CLI inherit it, not
 just the current shell. `SSL_CERT_FILE` works as a fallback in the same order
 Codex itself uses. Turning off interception is equally valid when a capture is
 not needed.
@@ -70,10 +68,9 @@ a rejected sign-in rather than a certificate problem.
 
 ## Recover a deleted profile
 
-Deletion moves an inactive profile into recoverable storage rather than erasing it. Stop the daemon, move the newest matching directory back into `profiles/`, and confirm that it appears:
+Deletion moves an inactive profile into recoverable storage rather than erasing it. Move the newest matching directory back into `profiles/`, and confirm that it appears:
 
 ```bash
-codex-switch daemon stop
 # Move deleted-profiles/<alias>.backup-<timestamp> to profiles/<alias>
 codex-switch list
 ```

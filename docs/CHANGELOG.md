@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v20260909.1.0 (candidate) — 2026-09-09
+
+This candidate is prepared from `dev`; publication and CI verification remain pending.
+
+- **Resident daemon removed** — `warmup`, `list --force`, `use`, and `launch` are one-shot operations. TUI `t` refreshes only the current session, while periodic work is owned by a user-managed OS task.
+- **TUI account actions stay visible** — Accounts `u` reports switching progress and the account-menu `w` performs a one-time warmup.
+- **Credentials remain consistent across rotations** — Saving or logging in to a known identity updates the active/current profile safely, launch restoration keeps a distinct rotated credential, and same-credential refreshes keep the new live token.
+- **Account and provider aliases share one namespace** — Explicit and automatic ChatGPT aliases fail before they can occupy a provider name, including login, import, and rename paths.
+- **Windows launch preserves Codex argv** — The preflight-resolved `codex.cmd` candidate is used for the real spawn, so spaces, Unicode, and shell metacharacters remain ordinary arguments.
+
 ## v20260902.1.0 — 2026-09-02
 
 - **Stable release candidate** — Brings the development channel since v20260804.1.0 together for stable promotion: custom Responses-compatible API providers and model catalogs, TUI Providers/Settings/Logs tabs with mouse navigation, scheduled warmup with IANA time zones, safer concurrent launches and credential refreshes, bounded operational logging, stronger installer provenance checks, and the accompanying CLI, daemon, documentation, and regression-test updates.

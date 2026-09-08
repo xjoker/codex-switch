@@ -90,6 +90,8 @@ Put `--` before any Codex argv that could be mistaken for a codex-switch alias o
 
 Provider-specific Codex settings (`--no-web-search`, `--reasoning`, `--set`) are stored on the provider and passed as `-c`. The run `config.toml` omits `model`, `model_provider`, `model_reasoning_effort`, `model_providers`, `model_catalog_json`, and `web_search` so a leftover thinking level cannot ride along; the user's file keeps those ChatGPT keys for the whole session. Several launches can overlap: each merge on exit keeps the other's MCP servers.
 
+Provider launches create a fresh Codex home for each invocation. A `resume` argument is passed through to Codex, but `launch <provider> resume --last` has no stable cross-run history contract; use resume within the same launch context only.
+
 `codex-switch use` does not accept a provider alias. A provider is applied only for the launched Codex process; a later bare `codex` invocation is unchanged.
 
 ## OpenRouter and DeepSeek

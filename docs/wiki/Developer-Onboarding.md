@@ -1,6 +1,6 @@
 # Developer onboarding
 
-This guide is for engineers and coding agents taking over `codex-switch`. Read the [Architecture overview](Architecture-Overview) before changing authentication, switching, the daemon, or release behavior.
+This guide is for engineers and coding agents taking over `codex-switch`. Read the [Architecture overview](Architecture-Overview) before changing authentication, switching, selection, or release behavior.
 
 ## Prepare the repository
 
@@ -8,6 +8,7 @@ Requirements:
 
 - Rust 1.88 or newer
 - Git
+- Python 3 (used by the launch passthrough and distribution-contract integration fixtures)
 - `cargo-audit` for the full local quality gate
 - Bash for Unix installer validation; PowerShell for Windows installer validation
 
@@ -30,7 +31,6 @@ Development and pull requests normally target `dev`. The `master` branch represe
 | Usage parsing/API | `src/usage/api.rs`, `src/usage/parse.rs` | Mock HTTP and parser tests |
 | Account selection | `src/usage/scoring.rs`, `src/commands/profile.rs` | Pure scoring tests and end-to-end scoring tests |
 | TUI behavior | `src/tui/` | State/render unit tests and terminal smoke test |
-| Daemon | `src/daemon/` | Unit tests, daemon integration tests, three-host CI |
 | Installer/update | `scripts/`, `src/update.rs`, release workflow | Distribution contract tests and release artifact checks |
 | Configuration | `src/config.rs`, the [Configuration](Configuration) page | Parsing/default/warning tests |
 
@@ -52,7 +52,7 @@ cargo test descriptive_test_name
 
 Pure documentation, configuration-only edits, and visual-only TUI changes do not require an artificial red test. Explain how they were verified instead.
 
-Tests live beside pure module logic and under `tests/` for process, network-mock, daemon, distribution, and scoring integration behavior. Tests that touch user state must override `HOME`, `CODEX_HOME`, or `CODEX_SWITCH_HOME` with isolated temporary directories.
+Tests live beside pure module logic and under `tests/` for process, network-mock, distribution, and scoring integration behavior. Tests that touch user state must override `HOME`, `CODEX_HOME`, or `CODEX_SWITCH_HOME` with isolated temporary directories.
 
 ## Run the quality gate
 
@@ -87,10 +87,9 @@ GitHub Actions repeats the core checks on Linux, macOS, and Windows. A local pas
 - Validate external JSON and CLI input at their boundaries; do not scatter duplicate internal checks.
 - Keep JSON stdout machine-readable. Route progress and diagnostics to stderr.
 - Serialize live-auth mutations with `auth.lock` and temporary launch staging with `launch.lock`.
-- Use atomic replacement for credentials, cache, and daemon state.
+- Use atomic replacement for credentials and cache.
 - Keep profile deletion recoverable and refuse deletion of the active profile.
-- Do not remove a daemon PID file without proving lock ownership.
-- Keep both update trust layers: release checksums detect corruption, while `gh attestation verify` validates the Sigstore build-provenance bundle against this repository, the release workflow, and the exact tag ref.
+- Keep the update trust layers distinct: installers always verify release checksums and may optionally verify repository/workflow provenance; `self-update` must additionally pin the exact tag ref and full source commit digest before replacement.
 
 ## Update documentation
 
@@ -108,7 +107,7 @@ Wiki pages are sourced from `docs/wiki/` and published by CI; never edit the pub
 
 Use a single failing test or command to reduce the feedback loop. If an assumed path, method, or upstream response shape fails, stop and inspect the source or official upstream contract before retrying.
 
-For HTTP behavior, use the existing mock server and response transformers rather than live personal credentials. For platform service behavior, keep platform-specific command construction testable separately from the real service manager.
+For HTTP behavior, use the existing mock server and response transformers rather than live personal credentials. User-managed OS scheduling examples belong in the reader-facing docs; the project does not add a service manager abstraction.
 
 ## Release handoff
 

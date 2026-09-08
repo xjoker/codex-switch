@@ -45,7 +45,7 @@ The usage model includes the main 5-hour and 7-day windows, additional model-spe
 
 Normal reads refresh only stale entries. Use `list -f` or the TUI refresh action when a fresh network read is required.
 
-The TUI has four tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (custom API endpoints), **Settings** (`config.toml`), and **Logs** (bounded `INFO` session diagnostics). `Tab` / `Shift+Tab` cycles them. Mouse users can click tabs and Accounts/Providers rows, double-click a row to open its account or provider launch menu, use the wheel in Logs, Help, and account menus, and click outside a dismissible popup to close it; modal forms and active edits do not click through. `q` and `h` apply on the main view; forms, text edits, menus, and confirmations keep their own `Esc` and confirmation rules. `o` launches Codex on Accounts and Providers. Account-only keys (`W`, mark, filter) stay on Accounts. Settings uses `j`/`k` for fields and `s` to save; `s` on Accounts still cycles sort. Unsaved Settings edits survive leaving the tab and require confirmation before quitting; while a field is being edited, `Tab` stays on Settings.
+The TUI has four tabs: **Accounts** (ChatGPT OAuth, quota, scoring), **Providers** (custom API endpoints), **Settings** (`config.toml`), and **Logs** (bounded `INFO` session diagnostics). `Tab` / `Shift+Tab` cycles them. Mouse users can click tabs and Accounts/Providers rows, double-click a row to open its account or provider launch menu, use the wheel in Logs, Help, and account menus, and click outside a dismissible popup to close it; modal forms and active edits do not click through. `q` and `h` apply on the main view; forms, text edits, menus, and confirmations keep their own `Esc` and confirmation rules. `o` launches Codex on Accounts and Providers. On Accounts, `u` (when no accounts are marked) switches the selected account and shows `Switching to …` progress, `t` toggles session-only auto-refresh, and the account menu's `w` performs a one-time warmup. Settings uses `j`/`k` for fields and `s` to save; `s` on Accounts still cycles sort. Unsaved Settings edits survive leaving the tab and require confirmation before quitting; while a field is being edited, `Tab` stays on Settings.
 
 The TUI account detail page is a single scrollable column with identity and organization labels, token expiry times in the local timezone, every quota pool with a pace marker, available reset cards, and the models the account may use. Model names and reasoning-effort capabilities are discovered from the authenticated service at runtime, not hardcoded. The full shortcut list is in the [command reference](Command-Reference#tui-shortcuts) and under `h` inside the TUI.
 
@@ -115,33 +115,82 @@ JSON or non-interactive execution never consumes a card without the explicit fla
 
 ## Warm quota windows
 
-Fresh accounts show no reset timer until their first real request. `warmup` sends minimal requests to activate inactive main and model-specific quota windows discovered from the official model response:
+Fresh accounts show no reset timer until their first real request. `warmup` sends a one-time minimal request to activate inactive main and model-specific quota windows discovered from the official model response:
 
 ```bash
 codex-switch warmup
 codex-switch warmup work
 ```
 
-Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Already-active or unavailable pools are skipped. Inside the TUI, `W` toggles automatic warmup for accounts whose 5-hour window has expired; that session toggle is separate from `daemon.auto_warmup`. When `auto_warmup` is on and `warmup_times` is empty, the daemon warms during cache refresh. When slots are set, warmup runs only at those `HH:MM` times in `daemon.timezone` (empty = system local; see [Configuration](Configuration#timed-warmup)).
+Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Already-active or unavailable pools are skipped. In the TUI, use the selected account menu's `w` for a one-time warmup; the batch menu's `w` warms marked accounts. The old `W` automatic-warmup shortcut and daemon schedule are removed. Press `t` on the Accounts page to toggle session-only automatic usage refresh.
 
-## Run the background daemon
+## Optional OS scheduling
 
-The Beta daemon monitors the current profile, refreshes cached usage, rotates credentials nearing expiry as part of that refresh, and prepares a better account when the configured threshold is reached.
+The binary no longer installs or owns a resident daemon, service, timer, or automatic account switcher. If periodic work is useful, install a user-level OS task yourself and invoke the one-time CLI operations. `list --force --json` refreshes usage, `warmup` activates quota windows, `use` without an alias selects and switches to the best eligible ChatGPT profile, and `launch` without an alias starts Codex with the best profile. Schedule `use` only when unattended credential changes are intended; a manual `use` affects the next Codex process, and an already-running Codex must be restarted.
 
-```bash
-codex-switch daemon install
-codex-switch daemon status
+The examples below schedule a one-time `warmup` every 30 minutes. These tasks run as your user; declare `CODEX_HOME` or `CODEX_SWITCH_HOME` in the task environment when you rely on non-default paths. Use `list --force --json` in the same task shape when you need a usage refresh instead.
+
+**Windows Task Scheduler (PowerShell):**
+
+```powershell
+$codex = Join-Path $env:LOCALAPPDATA 'Programs\codex-switch\codex-switch.exe'
+$task = '"{0}" warmup' -f $codex
+schtasks.exe /Create /TN 'codex-switch-warmup' /SC MINUTE /MO 30 /TR $task /F
 ```
 
-Service integration is platform-native: LaunchAgent on macOS, a systemd user service on Linux, and Task Scheduler on Windows. Windows installation requires elevated PowerShell.
+**Linux cron:** edit `crontab -e` and add:
 
-The daemon runs three timers: account polling (`poll_interval_secs`), full cache refresh (`cache_refresh_interval_secs`, with warmup only when `auto_warmup` is on and `warmup_times` is empty), and scheduled warmup (~60s, when `auto_warmup` is on and `warmup_times` is set). Full refresh handles credentials expiring within 30 minutes and writes all refreshed usage rows in one cache commit. Scheduled slots use `daemon.timezone` when set, otherwise the process local timezone. A switch happens only when at least two profiles exist and the current profile's 5-hour usage reaches `switch_threshold`.
+```cron
+*/30 * * * * /home/you/.local/bin/codex-switch warmup
+```
 
-By default, a switch is deferred while an interactive Codex process (`codex`, `codex resume`, `codex exec`) is running; the daemon records the pending switch and retries on the next poll. Long-lived MCP or app-server processes do not block a switch. Operational state lives in `daemon-state.json` and is shown by `daemon status`. Daemon switches cannot ask for confirmation: an untracked live `auth.json` is replaced after the normal backup rotation, so save or import an account first if you want to keep it selectable.
+**Linux systemd user timer:** create `~/.config/systemd/user/codex-switch-warmup.service`:
+
+```ini
+[Unit]
+Description=Warm quota windows with codex-switch
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/codex-switch warmup
+```
+
+Create `~/.config/systemd/user/codex-switch-warmup.timer`:
+
+```ini
+[Unit]
+Description=Run codex-switch warmup
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with `systemctl --user daemon-reload` and `systemctl --user enable --now codex-switch-warmup.timer`.
+
+**macOS launchd:** save this as `~/Library/LaunchAgents/com.example.codex-switch-warmup.plist`, replacing the executable path:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.codex-switch-warmup</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/you/.local/bin/codex-switch</string>
+    <string>warmup</string>
+  </array>
+  <key>StartInterval</key><integer>1800</integer>
+</dict></plist>
+```
+
+Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.codex-switch-warmup.plist`; remove it with `launchctl bootout gui/$(id -u)/com.example.codex-switch-warmup`. Syntax references: [Microsoft `schtasks`](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-create), [systemd timers](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html), [cron](https://man7.org/linux/man-pages/man5/crontab.5.html), and [Apple `launchd`](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html).
 
 ## Update the binary
 
-Direct installs support the stable and rolling development channels, verify release checksums before replacing the binary, and restart a running daemon around the update. See [Updating](Updating) for channels, Homebrew rules, and legacy-install migration, and [Testing development releases](Development-Releases) for the dev channel.
+Direct installs support the stable and rolling development channels and verify release checksums before replacing the binary. See [Updating](Updating) for channels, Homebrew rules, and legacy-install migration, and [Testing development releases](Development-Releases) for the dev channel.
 
 ```bash
 codex-switch self-update --check
@@ -158,5 +207,5 @@ Never publish profile files, `auth.json`, provider API keys, unredacted debug ou
 
 - Need an exact command, flag, or TUI shortcut? Open the [Command reference](Command-Reference).
 - Launching Codex against OpenRouter or another custom API? Open [Custom API providers](Providers).
-- Tune paths, proxy, daemon, and launch behavior in [Configuration](Configuration).
+- Tune paths, proxy, cache, selection, and launch behavior in [Configuration](Configuration).
 - Something failed? Start with [Troubleshooting](Troubleshooting).

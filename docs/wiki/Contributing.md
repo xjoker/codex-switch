@@ -16,4 +16,4 @@ Never attach credentials, auth files, provider API keys, personal account metada
 ## Next steps
 
 - New contributor: follow [Developer onboarding](Developer-Onboarding).
-- Auth, profile, daemon, or release change: read the [Architecture overview](Architecture-Overview).
+- Auth, profile, selection, or release change: read the [Architecture overview](Architecture-Overview).

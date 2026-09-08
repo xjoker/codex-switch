@@ -35,7 +35,7 @@ Homebrew 用户：`brew install xjoker/tap/codex-switch`。
 ```bash
 codex-switch login        # 无浏览器服务器加 --device
 codex-switch tui          # 交互式仪表盘
-codex-switch use          # 自动切换到最佳账号
+codex-switch use          # 自动选择并切换到最佳账号
 codex-switch launch       # 用最佳账号启动 Codex
 ```
 
@@ -56,12 +56,14 @@ codex-switch launch       # 用最佳账号启动 Codex
   ```
 - CLI 与 TUI 展示主额度池和每个模型的独立额度池。
 - 自适应配速感知评分自动选号，并可直接用它启动 Codex。
-- 支持重置卡、配额预热、JSON 输出、代理，以及 Beta 后台守护进程（macOS LaunchAgent / Linux systemd / Windows 任务计划程序 Task Scheduler；可调 `cache_refresh_interval_secs` 与 `auto_warmup`）。
+- 支持重置卡、一次性配额预热（`warmup`）、强制刷新额度（`list -f`）、JSON 输出和代理。TUI 的 Accounts 页在未勾选账号时用 `u` 切换选中账号并显示进度，`t` 开启当前会话自动刷新，账号菜单中的 `w` 执行一次性预热；不运行常驻服务。
 - 自动刷新即将过期的 Token；直装版本自更新：`self-update`、`self-update --stable`、`self-update --version <VERSION>`，或用 `self-update --dev` 切换滚动开发通道 — 新装开发版使用 dev release 的 [install.sh](https://github.com/xjoker/codex-switch/releases/download/dev/install.sh) / [install.ps1](https://github.com/xjoker/codex-switch/releases/download/dev/install.ps1)。
 - 直装版 `self-update` 同时校验 SHA-256 与 GitHub 构建来源，执行时会调用 `gh attestation verify`；使用前需安装当前版 [GitHub CLI](https://cli.github.com/)。
 - 支持 macOS、Linux、Windows。
 
 > **从 `0.0.x` 旧版本升级？** 本轮发布刻意做了两个破坏性变更：版本号改为日历格式（`YYYYMMDD.N.0`，一眼可读版本分配日期且仍按 SemVer 正常排序升级），macOS/Linux 安装位置从 `/usr/local/bin` 改为用户级 `$HOME/.local/bin`（`self-update` 不再需要 `sudo`）。正常 `self-update` 或重跑一次安装脚本即可迁移；账号与配置全部保留。全部破坏性变更及原因见 [Updating](https://github.com/xjoker/codex-switch/wiki/Updating)。
+
+> **从带旧 daemon 的版本升级？** 替换旧二进制前，先用旧版本依次运行 `daemon stop`、`daemon status`、`daemon uninstall`，再删除旧的 LaunchAgent、systemd 单元或 Windows Task Scheduler 任务。删除旧 `[daemon]` 配置中的 `cache_refresh_interval_secs`、`auto_warmup` 等字段。新版本没有兼容 daemon 命令，也不会自动清理系统任务；见 [Updating](https://github.com/xjoker/codex-switch/wiki/Updating#migrate-from-the-removed-daemon)。
 
 ## 文档
 

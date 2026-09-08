@@ -23,7 +23,7 @@ curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/insta
 
 This installs to the user-owned `$HOME/.local/bin` and configures PATH for zsh, bash, and fish; other shells receive a manual PATH instruction. An older direct install under `/usr/local/bin` is migrated once: the new user binary is installed first, then the installer removes the old copy with one elevated operation when required. Administrators can explicitly keep a system-wide install with `--system`; system installs may require `sudo` for later updates.
 
-The installer verifies the download's SHA-256 checksum and, when a [GitHub CLI](https://cli.github.com/) with attestation support is present, its Sigstore build provenance — the same attestation `self-update` enforces, proving the archive was built by this repository's release workflow on a GitHub-hosted runner rather than merely matching a checksum published beside it. Provenance uses offline bundle verification, so it needs no `gh auth login`. If the GitHub CLI is unavailable the checksum is still enforced and provenance is skipped with a warning; set `CS_REQUIRE_PROVENANCE=1` to make missing verification a hard failure.
+The installer always verifies the download's SHA-256 checksum. When a [GitHub CLI](https://cli.github.com/) with attestation support is present, it can also verify the optional Sigstore build-provenance bundle against this repository and the release workflow; provenance uses offline bundle verification, so it needs no `gh auth login`. If the GitHub CLI is unavailable, the checksum is still enforced and provenance is skipped with a warning; set `CS_REQUIRE_PROVENANCE=1` to make missing verification a hard failure. `self-update` has a stricter contract: it resolves the exact release tag, verifies the full source commit digest with that tag and workflow, then resolves the tag again before replacing the binary. These installer and updater checks should not be treated as the same guarantee.
 
 > If the installer says `Installing to /usr/local/bin (requires sudo)` without an explicit `--system`, stop it: that is the retired script from the repository's old `master` branch. Use the Release URL above.
 
@@ -75,6 +75,8 @@ codex-switch also notices logins performed outside of it: when the live `auth.js
 
 ```bash
 codex-switch list        # accounts, quota, availability
+codex-switch list --force # force a one-time usage refresh
+codex-switch warmup      # activate quota windows once for all profiles
 codex-switch tui         # interactive dashboard
 codex-switch use         # switch to the best eligible account
 codex-switch launch      # select, start Codex, restore auth afterwards
@@ -84,7 +86,7 @@ codex-switch launch      # select, start Codex, restore auth afterwards
 
 ## Where your data lives
 
-Saved profiles, cache, configuration, and daemon state default to `~/.codex-switch` (`%USERPROFILE%\.codex-switch` on Windows). The live Codex file stays at `$CODEX_HOME/auth.json`. See [Configuration](Configuration) for every path and setting.
+Saved profiles, cache, and configuration default to `~/.codex-switch` (`%USERPROFILE%\.codex-switch` on Windows). The live Codex file stays at `$CODEX_HOME/auth.json`. See [Configuration](Configuration) for every path and setting.
 
 Never share profile files, `auth.json`, tokens, provider API keys, proxy credentials, or unredacted `--debug` output.
 
@@ -103,7 +105,7 @@ codex-switch launch openrouter
 
 ## Next steps
 
-- Learn account, quota, launch, and daemon workflows in the [Feature guide](Feature-Guide).
+- Learn account, quota, launch, warmup, and optional OS scheduling workflows in the [Feature guide](Feature-Guide).
 - Launch Codex against OpenRouter or another custom API: [Custom API providers](Providers).
 - Look up exact commands and TUI shortcuts in the [Command reference](Command-Reference).
 - Keep the binary current with [Updating](Updating).

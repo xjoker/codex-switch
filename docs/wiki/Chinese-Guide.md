@@ -46,6 +46,7 @@ codex-switch import ~/auth-backups
 | 目的 | 命令 / 操作 |
 |---|---|
 | 查看额度与状态 | `codex-switch list`；强制刷新加 `-f` |
+| 一次性预热额度窗口 | `codex-switch warmup` 或 `codex-switch warmup <别名>` |
 | 自动选最佳账号 | `codex-switch use` |
 | 切换到指定账号 | `codex-switch use <别名>` |
 | 用某账号启动 Codex（结束后恢复现场 `auth.json`） | `codex-switch launch <别名> -- [codex 参数]` |
@@ -56,12 +57,14 @@ codex-switch import ~/auth-backups
 要点：
 
 - `use` 只切换 ChatGPT 的 `$CODEX_HOME/auth.json`；**不能**用于自定义提供方。
-- 已在跑的 Codex 进程不会自动换号，需重启 Codex，或用 `launch` 开新进程。
+- `use` 不会后台自动换号；已在跑的 Codex 进程不会读取新的 `auth.json`，需重启 Codex，或用 `launch` 开新进程。
 - Codex 参数写在 `--` 后面：`codex-switch launch work -- exec --json "…"`。`exec` / `resume` 等 Codex 子命令也可以直接跟在 `launch` 后面，不必再写 `--`。`--` 两侧的参数都会保留。prompt 看起来像别名时仍须 `--`。
 - 当前 Codex 没有 `--full-auto`；用 `-a never`、`--sandbox` 或 `--dangerously-bypass-approvals-and-sandbox`。
 - 池子耗尽时，交互式 `use` / `launch` 可提示消耗重置卡；脚本须显式加 `--consume-card`。
 
 数据默认在 `~/.codex-switch`（可用 `CODEX_SWITCH_HOME` 迁移）；活号在 `~/.codex/auth.json`（可用 `CODEX_HOME` 迁移）。
+
+如果旧版本安装过 daemon，升级前必须用旧版本依次运行 `codex-switch daemon stop`、`codex-switch daemon status`、`codex-switch daemon uninstall`，并在系统计划任务中确认旧任务已删除。新版本没有兼容 daemon 命令，也不会自动清理系统任务；完整迁移说明见 [Updating](Updating#migrate-from-the-removed-daemon)。
 
 ## 自定义 API 提供方
 
@@ -132,10 +135,10 @@ codex-switch launch openrouter -- -s workspace-write -a never
 | `/` | 过滤账号 |
 | `r` | 刷新当前可见账号 |
 | `a` | 添加账号 |
+| `u` | 在主 Accounts 页未勾选账号时切换选中账号；状态栏显示 `Switching to …` 表示进行中 |
 | `o` | 用选中账号启动 Codex |
 | `Space` | 勾选 / 取消勾选（批量操作） |
 | `t` | 开关自动刷新 |
-| `W` | 开关自动预热（5h 窗口过期时） |
 | `i` | 显示 / 隐藏紧凑额度面板 |
 | `s` | 循环排序（名称 / 额度 / 状态） |
 | `Esc` | 清除过滤、勾选或关闭弹层 |
@@ -160,7 +163,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 ### Settings 页
 
-编辑 `$CODEX_SWITCH_HOME/config.toml`（含 `daemon.auto_warmup`、`warmup_times`、`timezone`）。`j` / `k` 移动字段，`Enter` 编辑或开关，`s` 保存。Accounts 页的 `s` 仍是排序。TUI 的 `W` 只是本次会话开关，不写 `auto_warmup`。`timezone` 留空则用系统时区，也可填 IANA 名称（如 `Asia/Shanghai`）。`warmup_times` 最多 10 个，可一次粘贴多个 `HH:MM`（逗号或空格分隔）；间隔不限制。加完仍停在新增行。保存会重写整个配置文件，不保留注释。未保存的修改切走 Tab 仍会保留；正在编辑字段时 `Tab` 不会切页，`Esc` 取消当前编辑。TUI 进程内立即生效；已运行的守护进程约一分钟内重载（含轮询/缓存间隔）。仅 `daemon.log_level` 仍需重启守护进程。详情以英文 [Configuration](Configuration) 为准。
+编辑 `$CODEX_SWITCH_HOME/config.toml`（代理、缓存、并发、TUI 自动刷新、选号和 launch 恢复延迟）。`j` / `k` 移动字段，`Enter` 编辑或开关，`s` 保存；TUI 进程内立即生效。Accounts 页的 `s` 仍是排序，`t` 只控制当前会话的自动刷新；预热用账号菜单 `w` 或一次性 CLI `warmup`。保存会重写整个配置文件，不保留注释。未保存的修改切走 Tab 仍会保留；正在编辑字段时 `Tab` 不会切页，`Esc` 取消当前编辑。详情以英文 [Configuration](Configuration) 为准。
 
 ### 提供方表单（新增 / 编辑）
 
@@ -192,7 +195,7 @@ Codex 在前台运行；退出后回到 TUI。
 - [功能指南](Feature-Guide) — 主要工作流与安全边界
 - [自定义 API 提供方](Providers) — CLI、存储、`provider.toml`、OpenRouter / DeepSeek 经网关
 - [命令参考](Command-Reference) — 全部命令、全局选项与完整 TUI 表
-- [配置](Configuration) — 路径、代理、daemon 与 launch 设置
+- [配置](Configuration) — 路径、代理、缓存、选号与 launch 设置
 - [更新](Updating) — 更新方式、通道切换和旧版本迁移
 - [故障排查](Troubleshooting) — 常见错误与恢复方式
 - [常见问题](FAQ) — 简短问答
@@ -208,5 +211,5 @@ Codex 在前台运行；退出后回到 TUI。
 ## Next steps
 
 - 第一次使用：继续阅读[开始使用](Getting-Started)。
-- 日常操作与 daemon：查看[功能指南](Feature-Guide)。
+- 日常操作与可选系统计划任务：查看[功能指南](Feature-Guide)。
 - 提供方与模型报错：先看英文 [Providers](Providers) 与 [故障排查](Troubleshooting)。

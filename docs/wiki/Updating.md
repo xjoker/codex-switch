@@ -10,7 +10,9 @@ codex-switch self-update            # update within the current channel
 codex-switch self-update --version <VERSION>   # install a specific newer stable version
 ```
 
-Downloaded archives are checked against the `.sha256` file in the same GitHub Release and the release's `codex-switch-build-provenance.json` Sigstore bundle before the binary is replaced. The updater resolves the release tag through the GitHub Git API, then runs `gh attestation verify` with the repository, release workflow, exact tag ref, and that tag's full commit digest pinned; attestations produced by self-hosted runners are rejected. It resolves the tag again after verification and aborts if it moved during the update. SHA-256 detects corruption; the artifact attestation proves the archive came from the exact source revision of this repository's GitHub Actions release workflow. Direct self-update therefore requires a current [GitHub CLI](https://cli.github.com/) with attestation support and fails closed when `gh`, the provenance bundle, or the exact tag commit cannot be verified. If the daemon is running, `self-update` asks it to stop before replacing the binary and restarts it in the same mode afterwards. On Windows, a daemon still finishing credential work after ten seconds is left running and the update aborts rather than force-killing a token rotation.
+Downloaded archives are checked against the `.sha256` file in the same GitHub Release and the release's `codex-switch-build-provenance.json` Sigstore bundle before the binary is replaced. The updater resolves the release tag through the GitHub Git API, then runs `gh attestation verify` with the repository, release workflow, exact tag ref, and that tag's full commit digest pinned; attestations produced by self-hosted runners are rejected. It resolves the tag again after verification and aborts if it moved during the update. SHA-256 detects corruption; the artifact attestation proves the archive came from the exact source revision of this repository's GitHub Actions release workflow. Direct self-update therefore requires a current [GitHub CLI](https://cli.github.com/) with attestation support and fails closed when `gh`, the provenance bundle, or the exact tag commit cannot be verified. The current binary does not run or restart a background service during update.
+
+The standalone installers have a separate contract: they always check the archive checksum and optionally verify repository/workflow provenance when a capable GitHub CLI is available (`CS_REQUIRE_PROVENANCE=1` makes that optional check mandatory). They do not replace the self-updater's exact-tag and full-digest recheck.
 
 ## Channels and version scheme
 
@@ -35,6 +37,18 @@ The current release line intentionally breaks with several `0.0.x` conventions. 
 - **Codex file credential store is now required.** Explicit `keyring`, `auto`, and `ephemeral` stores are rejected instead of tolerated, because reliable switching depends on the live `auth.json` file. Set `cli_auth_credentials_store = "file"` in `$CODEX_HOME/config.toml`.
 - **Invalid configuration fails fast.** An existing but unreadable, malformed, or dangling-symlink `config.toml` now stops with the real error instead of silently running on defaults. Only a genuinely missing file uses defaults.
 - **Stricter non-interactive behavior.** `delete` defaults to `y/N` and requires `--yes` in JSON or non-TTY runs; `--json use` fails with an actionable error instead of hiding a prompt when the live auth file is untracked; reset cards are never consumed without an explicit flag. Automation that relied on silent prompts needs the explicit flags.
+
+## Migrate from the removed daemon
+
+The daemon commands were removed. Before replacing an older binary, use that older binary to stop and uninstall its service:
+
+```bash
+codex-switch daemon stop
+codex-switch daemon status
+codex-switch daemon uninstall
+```
+
+Run these commands before installing the new release; the new binary intentionally has no daemon compatibility command. Confirm in the operating system's scheduler that the old LaunchAgent, systemd user unit, or Task Scheduler task is gone. An upgrade does not automatically stop or remove machine tasks and services. If you already upgraded, use the old executable or restore it temporarily to perform the stop/uninstall, then remove any remaining task yourself. Do not leave an old scheduled task invoking the old daemon after the upgrade.
 
 ## Homebrew installations
 
@@ -78,7 +92,25 @@ curl -fsSL https://github.com/xjoker/codex-switch/releases/latest/download/insta
 **Windows PowerShell:**
 
 ```powershell
-$env:CS_UNINSTALL="1"; irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+$previous = @{
+  CS_DEV = $env:CS_DEV
+  CS_VERSION = $env:CS_VERSION
+  CS_UNINSTALL = $env:CS_UNINSTALL
+}
+try {
+  $env:CS_UNINSTALL = "1"
+  Remove-Item Env:CS_DEV, Env:CS_VERSION -ErrorAction SilentlyContinue
+  irm https://github.com/xjoker/codex-switch/releases/latest/download/install.ps1 | iex
+}
+finally {
+  foreach ($name in $previous.Keys) {
+    if ($null -eq $previous[$name]) {
+      Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+    } else {
+      Set-Item "Env:$name" $previous[$name]
+    }
+  }
+}
 ```
 
 The uninstaller asks whether to remove the data directory; answer `N` to keep profiles and configuration.
