@@ -13,11 +13,11 @@ $BinaryName = "codex-switch.exe"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\codex-switch"
 $DataDir = Join-Path $env:USERPROFILE ".codex-switch"
 
-# Verify the downloaded archive's Sigstore build provenance, the same guarantee
-# `self-update` enforces. The SHA-256 check only proves the archive matches the
-# checksum published in the *same* release, so an attacker who can replace both
-# files is trusted; attestation instead proves the artifact was built by this
-# repository's release workflow on a GitHub-hosted runner and cannot be forged.
+# Optionally verify the downloaded archive's build provenance. When GitHub CLI
+# attestation support is available, this checks the repository and release
+# workflow recorded for an artifact built on a GitHub-hosted runner. It does
+# not prevent replay of an older valid artifact; the checksum still validates
+# the downloaded bytes against the checksum file from the selected release.
 # Offline `--bundle` mode needs neither `gh auth login` nor any GitHub API call.
 # Without a GitHub CLI that supports attestation the archive is still checksum
 # verified; set CS_REQUIRE_PROVENANCE=1 to make a missing verifier a hard error.
@@ -38,8 +38,7 @@ function Test-BuildProvenance {
     if (-not $hasAttestation) {
         if ($require) {
             Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
-            Write-Error "CS_REQUIRE_PROVENANCE=1 but a GitHub CLI with attestation support was not found. Install https://cli.github.com/ and retry."
-            exit 1
+            throw "CS_REQUIRE_PROVENANCE=1 but a GitHub CLI with attestation support was not found. Install https://cli.github.com/ and retry."
         }
         Write-Warning "GitHub CLI with attestation support not found; skipping build-provenance verification (the SHA-256 checksum was still verified). Install https://cli.github.com/ and re-run, or set CS_REQUIRE_PROVENANCE=1 to require it."
         return
@@ -52,8 +51,7 @@ function Test-BuildProvenance {
     } catch {
         if ($require) {
             Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
-            Write-Error "CS_REQUIRE_PROVENANCE=1 but the build-provenance bundle could not be downloaded from $BundleUrl."
-            exit 1
+            throw "CS_REQUIRE_PROVENANCE=1 but the build-provenance bundle could not be downloaded from $BundleUrl."
         }
         Write-Warning "Could not download the build-provenance bundle ($BundleUrl); skipping provenance verification (the SHA-256 checksum was still verified)."
         return
@@ -64,8 +62,7 @@ function Test-BuildProvenance {
         Write-Host "[info]  Build provenance verified: $AssetName" -ForegroundColor Blue
     } else {
         Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
-        Write-Error "Build-provenance verification failed for $AssetName; refusing to install. The artifact is not attested as built by $ReleaseWorkflow."
-        exit 1
+        throw "Build-provenance verification failed for $AssetName; refusing to install. The artifact is not attested as built by $ReleaseWorkflow."
     }
 }
 
@@ -75,18 +72,22 @@ if ($env:CS_UNINSTALL -eq "1") {
 
     $BinPath = Join-Path $InstallDir $BinaryName
     $ServiceUninstallFailed = $false
-    if (Test-Path $BinPath) {
-        & $BinPath daemon uninstall
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "[info]  Removed daemon scheduled task." -ForegroundColor Blue
-        } else {
-            Write-Warning "Failed to remove daemon scheduled task with '$BinPath daemon uninstall'."
+    # SCHED_E_TASK_NOT_RUNNING (0x8004130B) is reported as a signed Int32.
+    $TaskNotRunningHResult = [int64]-2147216629
+    $TaskQueryOutput = & schtasks.exe /Query /FO CSV /NH /HRESULT 2>&1
+    $QueryHResult = [int64]$LASTEXITCODE
+    if ($QueryHResult -ne 0) {
+        Write-Warning "Failed to inspect Windows scheduled tasks (HRESULT $QueryHResult)."
+        $ServiceUninstallFailed = $true
+    } elseif ($null -ne ($TaskQueryOutput |
+            ConvertFrom-Csv -Header TaskName, NextRunTime, Status |
+            Where-Object { $_.TaskName -eq '\codex-switch-daemon' })) {
+        & schtasks.exe /End /TN "\codex-switch-daemon" /HRESULT 2>$null | Out-Null
+        $EndHResult = [int64]$LASTEXITCODE
+        if ($EndHResult -ne 0 -and $EndHResult -ne $TaskNotRunningHResult) {
+            Write-Warning "Failed to stop Windows scheduled task \codex-switch-daemon."
             $ServiceUninstallFailed = $true
-        }
-    } else {
-        & schtasks.exe /Query /TN "\codex-switch-daemon" 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            & schtasks.exe /End /TN "\codex-switch-daemon" 2>$null | Out-Null
+        } else {
             & schtasks.exe /Delete /TN "\codex-switch-daemon" /F
             if ($LASTEXITCODE -ne 0) {
                 Write-Warning "Failed to delete Windows scheduled task \codex-switch-daemon."
@@ -98,8 +99,7 @@ if ($env:CS_UNINSTALL -eq "1") {
     }
 
     if ($ServiceUninstallFailed) {
-        Write-Error "Daemon service cleanup failed; binary and data were kept. Resolve the service error and retry uninstall."
-        exit 1
+        throw "Daemon service cleanup failed; binary and data were kept. Resolve the service error and retry uninstall."
     }
 
     # Remove binary
@@ -138,7 +138,7 @@ if ($env:CS_UNINSTALL -eq "1") {
     }
 
     Write-Host "[info]  codex-switch has been uninstalled." -ForegroundColor Blue
-    exit 0
+    return
 }
 
 # ── Install ──────────────────────────────────────────────
@@ -177,7 +177,7 @@ try {
 } catch {
     Write-Host "[error] Archive or checksum download failed: $_" -ForegroundColor Red
     Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
-    exit 1
+    throw "Archive or checksum download failed: $_"
 }
 
 # Verify checksum before extracting any downloaded content
@@ -185,16 +185,14 @@ $ChecksumText = (Get-Content -LiteralPath $ChecksumPath -Raw).Trim()
 $ChecksumPattern = '^(?<hash>[0-9A-Fa-f]{64})\s+\*?(?<file>\S+)$'
 if ($ChecksumText -notmatch $ChecksumPattern -or (Split-Path -Leaf $Matches.file) -ne $AssetName) {
     Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
-    Write-Error "Invalid or empty checksum file for $AssetName."
-    exit 1
+    throw "Invalid or empty checksum file for $AssetName."
 }
 
 $ExpectedSha256 = $Matches.hash.ToUpperInvariant()
 $ActualSha256 = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToUpperInvariant()
 if ($ActualSha256 -ne $ExpectedSha256) {
     Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
-    Write-Error "Checksum mismatch for $AssetName; refusing to extract it."
-    exit 1
+    throw "Checksum mismatch for $AssetName; refusing to extract it."
 }
 Write-Host "[info]  Checksum verified: $AssetName" -ForegroundColor Blue
 

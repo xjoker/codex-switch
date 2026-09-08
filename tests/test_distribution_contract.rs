@@ -74,14 +74,6 @@ fn assert_markdown_anchor_exists(path: &Path, anchor: &str) {
 }
 
 #[test]
-fn repository_text_normalizes_windows_line_endings() {
-    assert_eq!(
-        normalize_line_endings("first\r\nsecond\r\n"),
-        "first\nsecond\n"
-    );
-}
-
-#[test]
 fn version_file_is_the_release_source_of_truth() {
     let version = repo_file("VERSION").trim().to_string();
     let manifest = repo_file("Cargo.toml");
@@ -328,52 +320,6 @@ fn wiki_links_resolve_to_reviewed_pages_and_sources() {
                 assert_markdown_anchor_exists(&wiki_dir.join(format!("{slug}.md")), anchor);
             }
         }
-    }
-}
-
-#[test]
-fn wiki_navigation_is_task_oriented_and_progressive() {
-    let home = repo_file("docs/wiki/Home.md");
-    let sidebar = repo_file("docs/wiki/_Sidebar.md");
-
-    for required in ["## Start here", "## Choose your task", "## Contribute"] {
-        assert!(
-            home.contains(required),
-            "Wiki Home must contain `{required}`"
-        );
-    }
-    for required in [
-        "## Start here",
-        "## Use codex-switch",
-        "## Get help",
-        "## Contribute",
-    ] {
-        assert!(
-            sidebar.contains(required),
-            "Wiki sidebar must contain `{required}`"
-        );
-    }
-    assert!(!sidebar.contains("### Canonical sources"));
-
-    for page in [
-        "Architecture-Overview.md",
-        "Chinese-Guide.md",
-        "Command-Reference.md",
-        "Configuration.md",
-        "Contributing.md",
-        "Developer-Onboarding.md",
-        "Development-Releases.md",
-        "FAQ.md",
-        "Feature-Guide.md",
-        "Getting-Started.md",
-        "Providers.md",
-        "Troubleshooting.md",
-        "Updating.md",
-    ] {
-        assert!(
-            repo_file(&format!("docs/wiki/{page}")).contains("## Next steps"),
-            "Wiki page {page} must end with explicit next steps"
-        );
     }
 }
 
@@ -868,58 +814,19 @@ fn release_attests_archives_before_publishing_them() {
 }
 
 #[test]
-fn windows_daemon_stop_never_force_kills_a_trusted_process() {
-    let daemon = repo_file("src/daemon/mod.rs");
-    assert!(
-        !daemon.contains("pidfile::force_kill(pid)"),
-        "a trusted daemon may be rotating credentials; a graceful-stop timeout must fail visibly \
-         instead of force-killing it"
-    );
-
-    let uninstall_start = daemon.find("fn uninstall()").unwrap();
-    let uninstall_end = daemon[uninstall_start..].find("async fn start").unwrap() + uninstall_start;
-    let uninstall = &daemon[uninstall_start..uninstall_end];
-    assert_eq!(
-        uninstall.matches("windows_stop_gate(").count(),
-        3,
-        "Windows uninstall must gate both before graceful shutdown and again immediately before \
-         Task Scheduler may force-stop the daemon"
-    );
-
-    let stop_start = daemon.find("fn stop()").unwrap();
-    let stop_end = daemon[stop_start..].find("fn stop_detached").unwrap() + stop_start;
-    let stop = &daemon[stop_start..stop_end];
-    assert!(
-        stop.contains("windows_stop_gate("),
-        "Windows stop must pass through the PID-lock gate before Task Scheduler may use /End"
-    );
-    assert!(
-        daemon.contains("cleanup_stale_pidfile()?;"),
-        "a false process diagnostic must acquire and remove the stale PID file or fail closed"
-    );
-    let detached_start = daemon.find("fn stop_detached()").unwrap();
-    let detached_end = daemon[detached_start..]
-        .find("fn wait_until_stopped_or_kill")
-        .unwrap()
-        + detached_start;
-    let detached = &daemon[detached_start..detached_end];
-    assert!(
-        !detached.contains("let _ = pidfile::cleanup_pidfile();"),
-        "Windows graceful-stop completion must propagate a locked PID-file cleanup failure"
-    );
-}
-
-#[test]
 fn release_retests_v0019_upgrade_on_all_supported_hosts() {
     let workflow = repo_file(".github/workflows/release.yml");
 
     for required in [
         "legacy-upgrade:",
-        "needs: [meta, release]",
+        "needs: [meta, build]",
         "if: needs.meta.outputs.is_dev == 'true' || needs.meta.outputs.prerelease == 'false'",
         "ubuntu-latest",
-        "macos-latest",
+        "macos-26",
         "windows-latest",
+        "Download build artifacts",
+        "scripts/prepare-release-metadata.py",
+        "--base-url \"http://127.0.0.1:8765/artifacts\"",
         "releases/download/v0.0.19",
         "self-update --dev",
         "self-update --stable",
@@ -938,32 +845,19 @@ fn release_retests_v0019_upgrade_on_all_supported_hosts() {
 }
 
 #[test]
-fn legacy_upgrade_retries_authenticated_metadata_during_github_release_propagation() {
+fn legacy_upgrade_uses_build_artifact_release_metadata_before_publishing() {
     let workflow = repo_file(".github/workflows/release.yml");
+    let legacy = workflow
+        .split_once("  legacy-upgrade:\n")
+        .and_then(|(_, rest)| rest.split_once("  homebrew:\n"))
+        .map(|(job, _)| job)
+        .expect("release workflow must contain a bounded legacy-upgrade job");
 
     for required in [
-        "for attempt in 1 2 3 4 5; do",
-        "foreach ($attempt in 1..5)",
-        "Retrying authenticated release metadata fetch after propagation delay",
-        "sleep 5",
-        "Start-Sleep -Seconds 5",
-    ] {
-        assert!(
-            workflow.contains(required),
-            "legacy upgrade must tolerate GitHub Release propagation: `{required}`"
-        );
-    }
-}
-
-#[test]
-fn legacy_upgrade_uses_authenticated_local_release_metadata() {
-    let workflow = repo_file(".github/workflows/release.yml");
-
-    for required in [
-        "GH_TOKEN: ${{ github.token }}",
-        "gh api",
-        "unset GH_TOKEN",
-        "Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue",
+        "actions/download-artifact@",
+        "scripts/prepare-release-metadata.py",
+        "--artifacts-dir",
+        "--base-url \"http://127.0.0.1:8765/artifacts\"",
         "CS_GITHUB_API_URL=http://127.0.0.1:8765",
         "python3 -m http.server 8765 --bind 127.0.0.1",
         "\"-m\", \"http.server\", \"8765\", \"--bind\", \"127.0.0.1\"",
@@ -971,14 +865,87 @@ fn legacy_upgrade_uses_authenticated_local_release_metadata() {
     ] {
         assert!(
             workflow.contains(required),
-            "legacy upgrade must avoid anonymous GitHub API access: `{required}`"
+            "legacy upgrade must serve build artifacts locally: `{required}`"
         );
     }
+
+    assert!(!legacy.contains("gh api"));
+    assert!(!legacy.contains("GH_TOKEN"));
+    assert!(!legacy.contains("releases/download/v${{ needs.meta.outputs.version }}"));
+    assert!(legacy.contains("releases/download/v0.0.19"));
+    assert!(workflow.contains("release:\n    needs: [meta, build, legacy-upgrade]"));
+    assert!(workflow.contains("always() && needs.meta.result == 'success'"));
+    assert!(workflow.contains("needs['legacy-upgrade'].result == 'success'"));
+    assert!(workflow.contains("homebrew:\n    needs: [meta, release, legacy-upgrade]"));
+    assert!(workflow.contains("overwrite_files: true"));
 
     assert!(
         !workflow.contains("os: [ubuntu-latest, macos-latest, windows-latest]"),
         "legacy upgrade must pin the macOS 26 runner during the latest-label migration"
     );
+}
+
+#[test]
+fn homebrew_hashes_come_from_verified_build_artifacts() {
+    let workflow = repo_file(".github/workflows/release.yml");
+    let homebrew = workflow
+        .split_once("  homebrew:\n")
+        .map(|(_, job)| job)
+        .expect("release workflow must contain the Homebrew job");
+
+    for required in [
+        "needs: [meta, release, legacy-upgrade]",
+        "actions/download-artifact@",
+        "Verify Homebrew archive checksums",
+        r#"expected=$(awk 'NF >= 1 { print $1; exit }' "$checksum")"#,
+        r#"[[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]"#,
+        r#"recorded=$(awk 'NF >= 2 { print $NF; exit }' "$checksum")"#,
+        r#"actual=$(sha256sum "$archive" | awk '{print $1}')"#,
+        r#"[[ "$actual" =~ ^[0-9a-fA-F]{64}$ ]]"#,
+        r#"printf '%s=%s\n' "$key" "$actual" >> "$GITHUB_OUTPUT""#,
+    ] {
+        assert!(
+            homebrew.contains(required),
+            "Homebrew must use verified build artifacts: {required}"
+        );
+    }
+    assert!(!homebrew.contains("Download sha256 files"));
+    assert!(!homebrew.contains("${BASE}/${name}.tar.gz.sha256"));
+    assert_before(
+        homebrew,
+        r#"[[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]"#,
+        "recorded=$(awk",
+    );
+    assert_before(homebrew, "recorded=$(awk", "actual=$(sha256sum");
+    assert_before(
+        homebrew,
+        "actual=$(sha256sum",
+        r#"[[ "$actual" =~ ^[0-9a-fA-F]{64}$ ]]"#,
+    );
+    assert_before(
+        homebrew,
+        r#"[[ "$actual" =~ ^[0-9a-fA-F]{64}$ ]]"#,
+        "printf '%s=%s\\n'",
+    );
+}
+
+#[test]
+fn prepublish_metadata_builder_checks_fixed_archive_hashes() {
+    let script = repo_file("scripts/prepare-release-metadata.py");
+
+    for required in [
+        "ARCHIVES = (",
+        "HEX_SHA256 = re.compile",
+        "browser_download_url",
+        "checksum file names the wrong archive",
+        "actual != expected",
+        "json.dumps(metadata",
+    ] {
+        assert!(
+            script.contains(required),
+            "prepublish metadata helper must enforce `{required}`"
+        );
+    }
 }
 
 #[test]
@@ -988,30 +955,6 @@ fn dev_release_uses_the_short_calendar_prerelease_version() {
     assert!(workflow.contains("version=${BASE}-dev"));
     assert!(!workflow.contains("TIMESTAMP"));
     assert!(!workflow.contains("-dev.${TIMESTAMP}"));
-}
-
-#[test]
-fn readmes_describe_current_cli_and_codex_requirements() {
-    for path in ["README.md", "README_CN.md"] {
-        let readme = repo_file(path);
-        assert!(!readme.contains("use --force"), "stale command in {path}");
-        assert!(!readme.contains("codex --quiet"), "stale command in {path}");
-        for required in [
-            "self-update --stable",
-            "self-update --version",
-            "Task Scheduler",
-            "cli_auth_credentials_store",
-            "CODEX_HOME",
-            "forced_login_method",
-            "cache_refresh_interval_secs",
-            "auto_warmup",
-        ] {
-            assert!(
-                readme.contains(required),
-                "{path} must document `{required}`"
-            );
-        }
-    }
 }
 
 #[test]

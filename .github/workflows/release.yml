@@ -156,7 +156,10 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    needs: [meta, build]
+    needs: [meta, build, legacy-upgrade]
+    if: >-
+      always() && needs.meta.result == 'success' && needs.build.result == 'success' &&
+      (needs['legacy-upgrade'].result == 'success' || needs['legacy-upgrade'].result == 'skipped')
     runs-on: ubuntu-latest
     env:
       RELEASE_VERSION: ${{ needs.meta.outputs.version }}
@@ -254,12 +257,6 @@ jobs:
           cp scripts/install.sh artifacts/install.sh
           cp scripts/install.ps1 artifacts/install.ps1
 
-      - name: Delete existing dev release
-        if: needs.meta.outputs.is_dev == 'true'
-        run: gh release delete dev --yes || true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Generate dev release body
         if: needs.meta.outputs.is_dev == 'true'
         id: dev_body
@@ -284,6 +281,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: "dev (${{ needs.meta.outputs.version }})"
           prerelease: true
+          overwrite_files: true
           body_path: dev_body.md
           files: |
             artifacts/*
@@ -298,6 +296,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: v${{ needs.meta.outputs.version }}
           prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
+          overwrite_files: true
           generate_release_notes: true
           body: |
             **Older macOS/Linux direct install in `/usr/local/bin`:** migrate once with the matching user-level installer. It verifies the download, requests `sudo` once, installs to `~/.local/bin`, removes the old binary, and preserves profiles and configuration.
@@ -309,7 +308,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   legacy-upgrade:
-    needs: [meta, release]
+    needs: [meta, build]
     if: needs.meta.outputs.is_dev == 'true' || needs.meta.outputs.prerelease == 'false'
     strategy:
       fail-fast: false
@@ -319,8 +318,17 @@ jobs:
     env:
       EXPECTED_VERSION: ${{ needs.meta.outputs.version }}
       IS_DEV: ${{ needs.meta.outputs.is_dev }}
-      GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
       - name: Upgrade v0.0.19 on Unix
         if: runner.os != 'Windows'
         shell: bash
@@ -347,34 +355,26 @@ jobs:
           work="${RUNNER_TEMP}/codex-switch-legacy-upgrade"
           mkdir -p "$work/home"
           api_root="${work}/api"
+          mkdir -p "$api_root/artifacts"
+          cp artifacts/* "$api_root/artifacts/"
           if [[ "$IS_DEV" == "true" ]]; then
             api_path="repos/xjoker/codex-switch/releases/tags/dev"
+            release_tag="dev"
+            release_name="dev (${EXPECTED_VERSION})"
           else
             api_path="repos/xjoker/codex-switch/releases/latest"
+            release_tag="v${EXPECTED_VERSION}"
+            release_name="$release_tag"
           fi
           api_file="${api_root}/${api_path}"
           mkdir -p "$(dirname "$api_file")"
-          metadata_ready=false
-          for attempt in 1 2 3 4 5; do
-            if gh api "/${api_path}" > "${api_file}.tmp"; then
-              mv "${api_file}.tmp" "$api_file"
-              metadata_ready=true
-              break
-            fi
-            if [[ "$attempt" -lt 5 ]]; then
-              echo "Retrying authenticated release metadata fetch after propagation delay"
-              sleep 5
-            fi
-          done
-          test "$metadata_ready" = true
-          if [[ "$IS_DEV" == "true" ]]; then
-            jq -e --arg version "$EXPECTED_VERSION" \
-              '.tag_name == "dev" and .name == ("dev (" + $version + ")")' "$api_file" >/dev/null
-          else
-            jq -e --arg version "$EXPECTED_VERSION" \
-              '.tag_name == ("v" + $version)' "$api_file" >/dev/null
-          fi
-          unset GH_TOKEN
+          python3 scripts/prepare-release-metadata.py \
+            --artifacts-dir "$api_root/artifacts" \
+            --output "$api_file" \
+            --base-url "http://127.0.0.1:8765/artifacts" \
+            --tag "$release_tag" \
+            --name "$release_name"
+          test -s "$api_file"
           python3 -m http.server 8765 --bind 127.0.0.1 --directory "$api_root" >/dev/null 2>&1 &
           metadata_server_pid=$!
           trap 'kill "$metadata_server_pid"' EXIT
@@ -406,107 +406,113 @@ jobs:
         shell: pwsh
         run: |
           $work = Join-Path $env:RUNNER_TEMP "codex-switch-legacy-upgrade"
-          New-Item -ItemType Directory -Path $work -Force | Out-Null
           $apiRoot = Join-Path $work "api"
+          $artifactRoot = Join-Path $apiRoot "artifacts"
+          New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+          Copy-Item -Path "artifacts\*" -Destination $artifactRoot -Force
           if ($env:IS_DEV -eq "true") {
             $apiPath = "repos/xjoker/codex-switch/releases/tags/dev"
+            $releaseTag = "dev"
+            $releaseName = "dev ($env:EXPECTED_VERSION)"
           } else {
             $apiPath = "repos/xjoker/codex-switch/releases/latest"
+            $releaseTag = "v$env:EXPECTED_VERSION"
+            $releaseName = $releaseTag
           }
           $apiFile = Join-Path $apiRoot $apiPath
           New-Item -ItemType Directory -Path (Split-Path $apiFile) -Force | Out-Null
-          $metadataReady = $false
-          foreach ($attempt in 1..5) {
-            $metadata = & gh api "/$apiPath"
-            if ($LASTEXITCODE -eq 0) {
-              [IO.File]::WriteAllText(
-                $apiFile,
-                ($metadata -join [Environment]::NewLine),
-                [Text.UTF8Encoding]::new($false)
-              )
-              $metadataReady = $true
-              break
-            }
-            if ($attempt -lt 5) {
-              Write-Host "Retrying authenticated release metadata fetch after propagation delay"
-              Start-Sleep -Seconds 5
-            }
-          }
-          if (-not $metadataReady) { throw "authenticated release metadata fetch failed" }
-          $release = Get-Content -LiteralPath $apiFile -Raw | ConvertFrom-Json
-          if ($env:IS_DEV -eq "true") {
-            if ($release.tag_name -ne "dev" -or $release.name -ne "dev ($env:EXPECTED_VERSION)") {
-              throw "dev release metadata does not match the expected version"
-            }
-          } elseif ($release.tag_name -ne "v$env:EXPECTED_VERSION") {
-            throw "stable release metadata does not match the expected version"
-          }
-          Remove-Item Env:GH_TOKEN -ErrorAction SilentlyContinue
+          & python scripts/prepare-release-metadata.py `
+            --artifacts-dir $artifactRoot `
+            --output $apiFile `
+            --base-url "http://127.0.0.1:8765/artifacts" `
+            --tag $releaseTag `
+            --name $releaseName
+          if ($LASTEXITCODE -ne 0) { throw "local release metadata generation failed" }
+          if (-not (Test-Path -LiteralPath $apiFile)) { throw "local release metadata missing" }
           $metadataServer = Start-Process -FilePath python -ArgumentList @(
             "-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", $apiRoot
           ) -WindowStyle Hidden -PassThru
           try {
+            $metadataReady = $false
             foreach ($attempt in 1..5) {
               try {
                 Invoke-WebRequest -Uri "http://127.0.0.1:8765/$apiPath" -UseBasicParsing | Out-Null
+                $metadataReady = $true
                 break
               } catch {
                 if ($attempt -eq 5) { throw }
                 Start-Sleep -Seconds 1
               }
             }
-          $asset = "cs-windows-amd64.zip"
-          $base = "https://github.com/xjoker/codex-switch/releases/download/v0.0.19"
-          $archive = Join-Path $work $asset
-          $checksum = "${archive}.sha256"
-          Invoke-WebRequest -Uri "$base/$asset" -OutFile $archive
-          Invoke-WebRequest -Uri "$base/$asset.sha256" -OutFile $checksum
-          $expectedHash = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
-          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
-          if ($actualHash -ne $expectedHash) { throw "v0.0.19 checksum mismatch" }
-          $pinnedHash = "9ff8a3f8794517771ef6959632417fdf1dfbc85b7fdf4c344998223985582e63"
-          if ($actualHash -ne $pinnedHash) { throw "v0.0.19 archive changed from the reviewed fixture" }
-          Expand-Archive -Path $archive -DestinationPath $work -Force
-          $bin = Join-Path $work "codex-switch.exe"
-          if (@(& $bin --version)[0] -ne "codex-switch 0.0.19") {
-            throw "unexpected legacy version"
-          }
-          $env:CS_GITHUB_API_URL = "http://127.0.0.1:8765"
-          if ($env:IS_DEV -eq "true") {
-            & $bin self-update --dev
-          } else {
-            & $bin self-update --stable
-          }
-          if ($LASTEXITCODE -ne 0) { throw "v0.0.19 self-update failed" }
-          if (@(& $bin --version)[0] -ne "codex-switch $env:EXPECTED_VERSION") {
-            throw "legacy upgrade installed an unexpected version"
-          }
+            if (-not $metadataReady) { throw "local release metadata server did not start" }
+            $asset = "cs-windows-amd64.zip"
+            $base = "https://github.com/xjoker/codex-switch/releases/download/v0.0.19"
+            $archive = Join-Path $work $asset
+            $checksum = "${archive}.sha256"
+            Invoke-WebRequest -Uri "$base/$asset" -OutFile $archive
+            Invoke-WebRequest -Uri "$base/$asset.sha256" -OutFile $checksum
+            $expectedHash = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+            $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+            if ($actualHash -ne $expectedHash) { throw "v0.0.19 checksum mismatch" }
+            $pinnedHash = "9ff8a3f8794517771ef6959632417fdf1dfbc85b7fdf4c344998223985582e63"
+            if ($actualHash -ne $pinnedHash) { throw "v0.0.19 archive changed from the reviewed fixture" }
+            Expand-Archive -Path $archive -DestinationPath $work -Force
+            $bin = Join-Path $work "codex-switch.exe"
+            if (@(& $bin --version)[0] -ne "codex-switch 0.0.19") {
+              throw "unexpected legacy version"
+            }
+            $env:CS_GITHUB_API_URL = "http://127.0.0.1:8765"
+            if ($env:IS_DEV -eq "true") {
+              & $bin self-update --dev
+            } else {
+              & $bin self-update --stable
+            }
+            if ($LASTEXITCODE -ne 0) { throw "v0.0.19 self-update failed" }
+            if (@(& $bin --version)[0] -ne "codex-switch $env:EXPECTED_VERSION") {
+              throw "legacy upgrade installed an unexpected version"
+            }
           } finally {
             Stop-Process -Id $metadataServer.Id -Force -ErrorAction SilentlyContinue
           }
 
   homebrew:
-    needs: [meta, release]
+    needs: [meta, release, legacy-upgrade]
     if: needs.meta.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     env:
       RELEASE_VERSION: ${{ needs.meta.outputs.version }}
     steps:
-      - name: Download sha256 files
-        run: |
-          VERSION="$RELEASE_VERSION"
-          BASE="https://github.com/xjoker/codex-switch/releases/download/v${VERSION}"
-          for name in cs-darwin-arm64 cs-darwin-amd64 cs-linux-arm64 cs-linux-amd64; do
-            curl -fsSL "${BASE}/${name}.tar.gz.sha256" -o "${name}.sha256"
-          done
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          merge-multiple: true
 
-      - name: Extract sha256 values
+      - name: Verify Homebrew archive checksums
         id: sha
         run: |
-          echo "darwin_arm64=$(awk '{print $1}' cs-darwin-arm64.sha256)" >> "$GITHUB_OUTPUT"
-          echo "darwin_amd64=$(awk '{print $1}' cs-darwin-amd64.sha256)" >> "$GITHUB_OUTPUT"
-          echo "linux_arm64=$(awk '{print $1}' cs-linux-arm64.sha256)" >> "$GITHUB_OUTPUT"
-          echo "linux_amd64=$(awk '{print $1}' cs-linux-amd64.sha256)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          declare -A assets=(
+            [darwin_arm64]=cs-darwin-arm64.tar.gz
+            [darwin_amd64]=cs-darwin-amd64.tar.gz
+            [linux_arm64]=cs-linux-arm64.tar.gz
+            [linux_amd64]=cs-linux-amd64.tar.gz
+          )
+          for key in "${!assets[@]}"; do
+            name="${assets[$key]}"
+            archive="artifacts/${name}"
+            checksum="${archive}.sha256"
+            test -s "$archive"
+            test -s "$checksum"
+            expected=$(awk 'NF >= 1 { print $1; exit }' "$checksum")
+            [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]
+            recorded=$(awk 'NF >= 2 { print $NF; exit }' "$checksum")
+            [[ "$recorded" == "$name" ]]
+            actual=$(sha256sum "$archive" | awk '{print $1}')
+            [[ "$actual" =~ ^[0-9a-fA-F]{64}$ ]]
+            [[ "$actual" == "${expected,,}" ]]
+            printf '%s=%s\n' "$key" "$actual" >> "$GITHUB_OUTPUT"
+          done
 
       - name: Generate formula
         run: |
