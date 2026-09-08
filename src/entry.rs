@@ -1,6 +1,6 @@
 use crate::cli::{Cli, Commands, extract_launch_passthrough, merge_launch_args};
 use crate::output::{MessageMode, print_error, should_report_error, user_println};
-use crate::{auth, color, commands, config, daemon, logging, output, profile, tui};
+use crate::{auth, color, commands, config, logging, output, profile, tui};
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -11,12 +11,7 @@ struct LogFilters {
     tui: EnvFilter,
 }
 
-fn log_filters(
-    debug: bool,
-    rust_log: Option<&str>,
-    is_daemon: bool,
-    daemon_level: &str,
-) -> LogFilters {
+fn log_filters(debug: bool, rust_log: Option<&str>) -> LogFilters {
     let all_sinks = if debug {
         Some("codex_switch=debug")
     } else {
@@ -32,11 +27,7 @@ fn log_filters(
 
     LogFilters {
         stderr: EnvFilter::new("codex_switch=error"),
-        file: EnvFilter::new(if is_daemon {
-            format!("codex_switch={daemon_level}")
-        } else {
-            "codex_switch=info".to_string()
-        }),
+        file: EnvFilter::new("codex_switch=info"),
         tui: EnvFilter::new("codex_switch=info"),
     }
 }
@@ -73,15 +64,9 @@ pub async fn run_cli() {
         std::process::exit(1);
     }
 
-    // Priority: --debug flag > RUST_LOG env > config.toml daemon.log_level > defaults.
+    // Priority: --debug flag > RUST_LOG env > defaults.
     let rust_log = std::env::var("RUST_LOG").ok();
-    let filters = log_filters(
-        cli.debug,
-        rust_log.as_deref(),
-        matches!(&cli.command, Commands::Daemon(_)),
-        &config::daemon_log_level(),
-    );
-    // Keep diagnostic logs even when the daemon detaches and discards stdio.
+    let filters = log_filters(cli.debug, rust_log.as_deref());
     // File logging failure must not prevent normal account switching.
     let file_writer = match logging::file_log_writer() {
         Ok(writer) => Some(writer),
@@ -214,7 +199,6 @@ async fn dispatch(
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => commands::open_cmd()?,
         Commands::Provider(sub) => commands::provider_cmd(sub, json).await?,
-        Commands::Daemon(sub) => daemon::dispatch(sub, json).await?,
     }
 
     // If startup check actually synced the profile, re-sync after command execution
@@ -341,7 +325,7 @@ mod tests {
 
     #[test]
     fn log_filters_keep_cli_quiet_but_preserve_operation_history() {
-        let filters = log_filters(false, None, false, "warn");
+        let filters = log_filters(false, None);
 
         assert_eq!(filters.stderr.to_string(), "codex_switch=error");
         assert_eq!(filters.file.to_string(), "codex_switch=info");
@@ -349,19 +333,19 @@ mod tests {
     }
 
     #[test]
-    fn log_filter_precedence_is_debug_then_rust_log_then_daemon_level() {
-        let debug = log_filters(true, Some("codex_switch=trace"), true, "warn");
+    fn log_filter_precedence_is_debug_then_rust_log_then_defaults() {
+        let debug = log_filters(true, Some("codex_switch=trace"));
         assert_eq!(debug.stderr.to_string(), "codex_switch=debug");
         assert_eq!(debug.file.to_string(), "codex_switch=debug");
         assert_eq!(debug.tui.to_string(), "codex_switch=debug");
 
-        let rust_log = log_filters(false, Some("codex_switch=warn"), true, "debug");
+        let rust_log = log_filters(false, Some("codex_switch=warn"));
         assert_eq!(rust_log.stderr.to_string(), "codex_switch=warn");
         assert_eq!(rust_log.file.to_string(), "codex_switch=warn");
         assert_eq!(rust_log.tui.to_string(), "codex_switch=warn");
 
-        let daemon = log_filters(false, None, true, "warn");
-        assert_eq!(daemon.stderr.to_string(), "codex_switch=error");
-        assert_eq!(daemon.file.to_string(), "codex_switch=warn");
+        let defaults = log_filters(false, None);
+        assert_eq!(defaults.stderr.to_string(), "codex_switch=error");
+        assert_eq!(defaults.file.to_string(), "codex_switch=info");
     }
 }

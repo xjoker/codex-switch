@@ -103,6 +103,16 @@ pub enum ModelStatus {
     Error(String),
 }
 
+#[derive(Debug)]
+enum SwitchCompletion {
+    Succeeded {
+        alias: String,
+        current: String,
+        last_used_error: Option<String>,
+    },
+    Failed { alias: String, error: String },
+}
+
 fn wrap_account_detail_line(line: String) -> Vec<String> {
     const MAX_WIDTH: usize = 68;
     if line.chars().count() <= MAX_WIDTH {
@@ -256,7 +266,6 @@ pub struct App {
     pub auto_refresh_enabled: bool,
     pub auto_refresh_interval: Duration,
     pub next_auto_refresh: Option<Instant>,
-    pub auto_warmup_enabled: bool,
     pub detail_visible: bool,
     pub help_popup: Option<super::popup::PopupState>,
     pub menu: Option<super::menu::MenuState>,
@@ -269,6 +278,9 @@ pub struct App {
     pub model_cache: HashMap<String, ModelStatus>,
     pub pending_models: tokio::sync::mpsc::Receiver<(String, Result<Vec<ModelEntry>, String>)>,
     pub model_sender: tokio::sync::mpsc::Sender<(String, Result<Vec<ModelEntry>, String>)>,
+    pending_switches: tokio::sync::mpsc::Receiver<SwitchCompletion>,
+    switch_sender: tokio::sync::mpsc::Sender<SwitchCompletion>,
+    switching_alias: Option<String>,
 }
 
 impl App {
@@ -279,6 +291,7 @@ impl App {
         let (reset_card_tx, reset_card_rx) = tokio::sync::mpsc::channel(16);
         let (reset_card_refresh_tx, reset_card_refresh_rx) = tokio::sync::mpsc::channel(64);
         let (model_tx, model_rx) = tokio::sync::mpsc::channel(32);
+        let (switch_tx, switch_rx) = tokio::sync::mpsc::channel(4);
         let cfg = crate::config::get();
         App {
             log_writer: crate::logging::tui_log_writer(),
@@ -329,7 +342,6 @@ impl App {
             auto_refresh_enabled: false,
             auto_refresh_interval: Duration::from_secs(cfg.tui.auto_refresh_interval_secs),
             next_auto_refresh: None,
-            auto_warmup_enabled: false,
             detail_visible: true,
             help_popup: None,
             menu: None,
@@ -338,16 +350,21 @@ impl App {
             model_cache: HashMap::new(),
             pending_models: model_rx,
             model_sender: model_tx,
+            pending_switches: switch_rx,
+            switch_sender: switch_tx,
+            switching_alias: None,
         }
     }
 
     /// Kick off a model-list fetch for `alias` if the detail panel needs it
-    /// and it isn't already loaded or in flight. Idempotent — safe to call
-    /// every frame.
+    /// and it has not already loaded, failed, or started a request. Idempotent
+    /// — safe to call every frame; explicit refresh clears a failed entry.
     pub fn ensure_models_loaded(&mut self, alias: &str) {
         if matches!(
             self.model_cache.get(alias),
-            Some(ModelStatus::Loaded(_)) | Some(ModelStatus::Loading)
+            Some(ModelStatus::Loaded(_))
+                | Some(ModelStatus::Loading)
+                | Some(ModelStatus::Error(_))
         ) {
             return;
         }
@@ -626,10 +643,16 @@ impl App {
         if count == 0 {
             return;
         }
+        if self.defer_while_switching("re-logging in") {
+            return;
+        }
         self.menu = Some(super::menu::MenuState::batch_relogin_flow(count));
     }
 
     pub fn open_add_menu(&mut self) {
+        if self.defer_while_switching("adding an account") {
+            return;
+        }
         self.menu = Some(super::menu::MenuState::add());
     }
 
@@ -795,6 +818,70 @@ impl App {
             },
             _ => {}
         }
+    }
+
+    /// Handle synchronous Accounts-list keys. Returns a selected alias when
+    /// the caller must perform the terminal-backed launch action.
+    pub fn handle_accounts_key(&mut self, code: KeyCode) -> Option<String> {
+        match code {
+            KeyCode::Esc => {
+                if self.search.is_some() {
+                    self.search = None;
+                    self.update_view();
+                } else if !self.marked.is_empty() {
+                    self.clear_marks();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.selected + 1 < self.view_indices.len() =>
+            {
+                self.selected += 1;
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.selected > 0 => {
+                self.selected -= 1;
+            }
+            KeyCode::Enter => {
+                if self.marked.is_empty() {
+                    self.open_account_menu();
+                } else {
+                    self.open_batch_menu();
+                }
+            }
+            KeyCode::Char('a') => self.open_add_menu(),
+            KeyCode::Char('o') if self.marked.is_empty() => {
+                if self.defer_while_switching("launching Codex") {
+                    return None;
+                }
+                return self
+                    .selected_account_idx()
+                    .and_then(|idx| self.accounts.get(idx))
+                    .map(|entry| entry.alias.clone())
+                    .or_else(|| {
+                        self.set_status_error("No account selected".to_string(), 3);
+                        None
+                    });
+            }
+            KeyCode::Char('u') if self.marked.is_empty() => self.switch_selected(),
+            KeyCode::Char('r') => self.refresh(Refresh::Forced),
+            KeyCode::Char('t') => self.toggle_auto_refresh(),
+            KeyCode::Char('i') => self.toggle_detail_panel(),
+            KeyCode::Char('s') => self.cycle_sort(),
+            KeyCode::Char(' ') => self.toggle_mark(),
+            KeyCode::Char('/') => {
+                if let Some(search) = &mut self.search {
+                    search.cursor = search.query.chars().count();
+                } else {
+                    self.search = Some(SearchState {
+                        query: String::new(),
+                        cursor: 0,
+                    });
+                    self.update_view();
+                }
+                self.search_active = true;
+            }
+            _ => {}
+        }
+        None
     }
 
     pub fn handle_settings_key(&mut self, code: KeyCode) {
@@ -967,6 +1054,9 @@ impl App {
     }
 
     pub fn open_relogin_flow_menu(&mut self, alias: String, email: Option<String>) {
+        if self.defer_while_switching("re-logging in") {
+            return;
+        }
         self.menu = Some(super::menu::MenuState::relogin_flow(alias, email));
     }
 
@@ -1040,6 +1130,9 @@ impl App {
 
     /// Request delete confirmation for a specific alias (called from menu).
     pub fn request_delete_alias(&mut self, alias: &str) {
+        if self.defer_while_switching("deleting an account") {
+            return;
+        }
         let Some(entry) = self.accounts.iter().find(|a| a.alias == alias) else {
             return;
         };
@@ -1052,6 +1145,9 @@ impl App {
 
     /// Begin rename for a specific alias (called from menu).
     pub fn start_rename_alias(&mut self, alias: &str) {
+        if self.defer_while_switching("renaming an account") {
+            return;
+        }
         let Some(entry) = self.accounts.iter().find(|a| a.alias == alias) else {
             return;
         };
@@ -1286,12 +1382,6 @@ impl App {
         }
 
         (count, candidate_count, skipped)
-    }
-
-    pub fn warmup_all(&mut self) -> usize {
-        let target_indices: Vec<usize> = (0..self.accounts.len()).collect();
-        let (count, _, _) = self.warmup_indices(target_indices);
-        count
     }
 
     pub fn refresh_one(&mut self, alias: &str) {
@@ -1695,6 +1785,10 @@ impl App {
     fn refresh_indices(&mut self, target_indices: &[usize], refresh: Refresh) {
         let mut card_refreshes = Vec::new();
         for &i in target_indices {
+            let alias = self.accounts[i].alias.clone();
+            if matches!(refresh, Refresh::Forced) {
+                self.model_cache.remove(&alias);
+            }
             let entry = &mut self.accounts[i];
             if let UsageStatus::Error(_) = &entry.usage {
                 entry.usage = UsageStatus::Idle;
@@ -1799,30 +1893,159 @@ impl App {
     }
 
     pub fn switch_selected(&mut self) {
-        if let Some(entry) = self
+        let Some(alias) = self
             .selected_account_idx()
             .and_then(|idx| self.accounts.get(idx))
-        {
-            let alias = entry.alias.clone();
-            match switch_profile(&alias) {
-                Ok(()) => {
-                    let _ = cache::set_last_used(&alias);
-                    let current = read_current();
-                    for a in &mut self.accounts {
-                        a.is_current = a.alias == current;
+            .map(|entry| entry.alias.clone())
+        else {
+            self.set_status_error("No account selected".to_string(), 3);
+            return;
+        };
+        self.start_switch(alias);
+    }
+
+    fn start_switch(&mut self, alias: String) {
+        if let Some(active) = self.switching_alias.as_deref() {
+            self.set_status(format!("Account switch already in progress ({active})"), 4);
+            return;
+        }
+
+        self.switching_alias = Some(alias.clone());
+        self.set_status(format!("Switching to {alias}..."), 60);
+        let sender = self.switch_sender.clone();
+        let panic_alias = alias.clone();
+        tokio::task::spawn_blocking(move || {
+            // Always report a completion so shutdown cannot wait forever if a
+            // lower-level credential operation panics while holding a lock.
+            let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match switch_profile(&alias) {
+                    Ok(()) => {
+                        let last_used_error = cache::set_last_used(&alias)
+                            .err()
+                            .map(|error| error.to_string());
+                        SwitchCompletion::Succeeded {
+                            current: read_current(),
+                            alias,
+                            last_used_error,
+                        }
                     }
-                    self.set_status(format!("Switched to {alias}"), 3);
-                    tracing::info!(action = "switch", alias = %alias, outcome = "completed", "account switched");
+                    Err(error) => SwitchCompletion::Failed {
+                        alias,
+                        error: error.to_string(),
+                    },
                 }
-                Err(e) => {
-                    tracing::error!(action = "switch", alias = %alias, outcome = "failed", error = %e, "account switch failed");
-                    self.set_status_error(format!("Switch failed: {e}"), 5)
+            }))
+            .unwrap_or_else(|_| SwitchCompletion::Failed {
+                alias: panic_alias,
+                error: "account switch task panicked".to_string(),
+            });
+            let _ = sender.blocking_send(completion);
+        });
+    }
+
+    fn finish_switch(&mut self, completion: SwitchCompletion) {
+        let alias = match &completion {
+            SwitchCompletion::Succeeded { alias, .. } | SwitchCompletion::Failed { alias, .. } => {
+                alias
+            }
+        };
+        if self.switching_alias.as_deref() != Some(alias.as_str()) {
+            return;
+        }
+        self.switching_alias = None;
+
+        match completion {
+            SwitchCompletion::Succeeded {
+                alias,
+                current,
+                last_used_error,
+            } => {
+                let current = if current.is_empty() { alias.clone() } else { current };
+                for account in &mut self.accounts {
+                    account.is_current = account.alias == current;
+                }
+                self.update_view();
+                if let Some(error) = last_used_error {
+                    tracing::warn!(
+                        action = "switch",
+                        alias = %alias,
+                        outcome = "completed",
+                        error = %error,
+                        "account switched but last-used cache update failed"
+                    );
+                    self.set_status(
+                        format!("Switched to {alias}; last-used cache update failed: {error}"),
+                        8,
+                    );
+                } else {
+                    tracing::info!(
+                        action = "switch",
+                        alias = %alias,
+                        outcome = "completed",
+                        "account switched"
+                    );
+                    self.set_status(format!("Switched to {alias}"), 3);
+                }
+            }
+            SwitchCompletion::Failed { alias, error } => {
+                tracing::error!(
+                    action = "switch",
+                    alias = %alias,
+                    outcome = "failed",
+                    error = %error,
+                    "account switch failed"
+                );
+                self.set_status_error(format!("Switch failed: {error}"), 5);
+            }
+        }
+    }
+
+    pub fn poll_switch_results(&mut self) {
+        while let Ok(completion) = self.pending_switches.try_recv() {
+            self.finish_switch(completion);
+        }
+    }
+
+    pub fn switch_in_flight(&self) -> bool {
+        self.switching_alias.is_some()
+    }
+
+    fn defer_while_switching(&mut self, action: &str) -> bool {
+        if !self.switch_in_flight() {
+            return false;
+        }
+        self.set_status(
+            format!("Waiting for account switch to finish before {action}"),
+            60,
+        );
+        true
+    }
+
+    pub async fn wait_for_switch_completion(&mut self) {
+        while self.switch_in_flight() {
+            match self.pending_switches.recv().await {
+                Some(completion) => self.finish_switch(completion),
+                None => {
+                    self.switching_alias = None;
+                    self.set_status_error(
+                        "Account switch task ended before reporting completion".to_string(),
+                        8,
+                    );
                 }
             }
         }
     }
 
     pub fn confirm_action(&mut self) -> bool {
+        if self.switch_in_flight()
+            && matches!(
+                self.confirm.as_ref(),
+                Some(ConfirmAction::Delete(_) | ConfirmAction::BatchDelete(_))
+            )
+        {
+            self.defer_while_switching("deleting accounts");
+            return false;
+        }
         let action = match self.confirm.take() {
             Some(a) => a,
             None => return false,
@@ -1920,6 +2143,9 @@ impl App {
         if self.marked.is_empty() {
             return;
         }
+        if self.defer_while_switching("deleting accounts") {
+            return;
+        }
         let aliases: Vec<String> = self.marked.iter().cloned().collect();
         self.confirm = Some(ConfirmAction::BatchDelete(aliases));
     }
@@ -1998,6 +2224,12 @@ impl App {
     }
 
     pub fn handle_rename_key(&mut self, code: KeyCode) -> bool {
+        if self.active_tab == Tab::Accounts
+            && matches!(code, KeyCode::Enter)
+            && self.defer_while_switching("renaming an account")
+        {
+            return false;
+        }
         let state = match &mut self.rename {
             Some(s) => s,
             None => return false,
@@ -2219,29 +2451,6 @@ impl App {
         }
     }
 
-    /// Toggle auto-warmup. Auto-warmup piggybacks on the auto-refresh tick: every
-    /// refresh cycle it calls `warmup_all`, which spawns warmup for any account
-    /// whose 5h window has expired (paid) or 7d window has expired (free).
-    /// Enabling auto-warmup turns on auto-refresh if it is off — without refresh,
-    /// the warmup pass has no fresh usage data to decide eligibility.
-    pub fn toggle_auto_warmup(&mut self) {
-        self.auto_warmup_enabled = !self.auto_warmup_enabled;
-        if self.auto_warmup_enabled {
-            let mut msg = "Auto warmup on".to_string();
-            if !self.auto_refresh_enabled {
-                self.auto_refresh_enabled = true;
-                self.next_auto_refresh = Some(Instant::now());
-                msg.push_str(&format!(
-                    " (also enabled auto-refresh every {}s)",
-                    self.auto_refresh_interval_secs()
-                ));
-            }
-            self.set_status(msg, 4);
-        } else {
-            self.set_status("Auto warmup off".to_string(), 3);
-        }
-    }
-
     pub fn run_due_auto_refresh(&mut self) {
         if !self.auto_refresh_enabled {
             return;
@@ -2252,26 +2461,20 @@ impl App {
             return;
         }
 
-        if self.loading_count() > 0 || !self.warmup_tasks.is_empty() {
+        if self.loading_count() > 0 {
             self.next_auto_refresh = Some(now + Duration::from_secs(5));
             return;
         }
 
         self.load_profiles_preserving_selection();
         let account_count = self.accounts.len();
-        let warmup_count = if self.auto_warmup_enabled {
-            self.warmup_all()
-        } else {
-            0
-        };
         self.refresh_all(Refresh::Unattended);
         self.next_auto_refresh = Some(now + self.auto_refresh_interval);
 
-        let mut msg = format!("Auto refresh: refreshing {account_count} account(s)");
-        if warmup_count > 0 {
-            msg.push_str(&format!(", warming {warmup_count}"));
-        }
-        self.set_status(msg, 4);
+        self.set_status(
+            format!("Auto refresh: refreshing {account_count} account(s)"),
+            4,
+        );
     }
 
     pub fn tick(&mut self) {
@@ -2332,8 +2535,13 @@ async fn run_app(
         app.refresh(Refresh::Cached);
     }
     app.start_update_check();
+    let mut quit_after_switch = false;
 
     loop {
+        app.poll_switch_results();
+        if quit_after_switch && !app.switch_in_flight() {
+            break;
+        }
         app.poll_results();
         app.poll_warmup_results();
         app.poll_reset_card_results();
@@ -2350,7 +2558,10 @@ async fn run_app(
             .context("drawing TUI")?;
 
         let event = tokio::select! {
-            signal = shutdown.recv_signal() => return Ok(Some(signal)),
+            signal = shutdown.recv_signal() => {
+                wait_for_switch_before_exit(&mut app).await;
+                return Ok(Some(signal));
+            },
             event = tokio::task::spawn_blocking(|| -> Result<Option<Event>> {
                 if event::poll(Duration::from_millis(100)).context("polling terminal events")? {
                     Ok(Some(event::read().context("reading terminal event")?))
@@ -2390,7 +2601,11 @@ async fn run_app(
                     if app.provider_launch.is_some() {
                         if let Some((alias, model, reasoning, extra_args)) =
                             app.handle_provider_launch_key(key.code)
-                            && let Some(signal) = perform_launch(
+                        {
+                            if app.defer_while_switching("launching Codex") {
+                                continue;
+                            }
+                            if let Some(signal) = perform_launch(
                                 terminal,
                                 &mut app,
                                 alias,
@@ -2400,23 +2615,11 @@ async fn run_app(
                                 shutdown,
                             )
                             .await
-                        {
-                            return Ok(Some(signal));
+                            {
+                                wait_for_switch_before_exit(&mut app).await;
+                                return Ok(Some(signal));
+                            }
                         }
-                        continue;
-                    }
-
-                    // Capital 'W' is a distinct global binding (toggle auto-warmup),
-                    // separate from menu 'w' (per-account warmup). Detect it before
-                    // case normalization so it survives the lowercase dispatch below.
-                    // Only meaningful in the main view (no popup/menu/confirm overlay).
-                    if matches!(key.code, KeyCode::Char('W'))
-                        && app.active_tab == Tab::Accounts
-                        && app.help_popup.is_none()
-                        && app.menu.is_none()
-                        && app.confirm.is_none()
-                    {
-                        app.toggle_auto_warmup();
                         continue;
                     }
 
@@ -2440,6 +2643,7 @@ async fn run_app(
                         if let Some(signal) =
                             handle_menu_key(&mut app, terminal, code, shutdown).await
                         {
+                            wait_for_switch_before_exit(&mut app).await;
                             return Ok(Some(signal));
                         }
                         continue;
@@ -2447,7 +2651,18 @@ async fn run_app(
 
                     if app.confirm.is_some() {
                         match code {
-                            KeyCode::Char('y') if app.confirm_action() => break,
+                            KeyCode::Char('y') if app.confirm_action() => {
+                                if app.switch_in_flight() {
+                                    quit_after_switch = true;
+                                    app.set_status(
+                                        "Waiting for account switch to finish before exit"
+                                            .to_string(),
+                                        60,
+                                    );
+                                } else {
+                                    break;
+                                }
+                            }
                             KeyCode::Char('y') => {}
                             _ => app.cancel_confirm(),
                         }
@@ -2455,79 +2670,42 @@ async fn run_app(
                     }
 
                     match code {
-                        KeyCode::Char('q') if app.request_quit() => break,
-                        KeyCode::Char('q') => {}
+                        KeyCode::Char('q') => {
+                            if app.request_quit() {
+                                if app.switch_in_flight() {
+                                    quit_after_switch = true;
+                                    app.set_status(
+                                        "Waiting for account switch to finish before exit"
+                                            .to_string(),
+                                        60,
+                                    );
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
                         KeyCode::Char('h') => app.open_help(),
                         KeyCode::Tab => app.cycle_tab(true),
                         KeyCode::BackTab => app.cycle_tab(false),
                         _ => match app.active_tab {
-                            Tab::Accounts => match code {
-                                KeyCode::Esc => {
-                                    if app.search.is_some() {
-                                        app.search = None;
-                                        app.update_view();
-                                    } else if !app.marked.is_empty() {
-                                        app.clear_marks();
-                                    }
-                                }
-                                KeyCode::Down | KeyCode::Char('j')
-                                    if app.selected + 1 < app.view_indices.len() =>
-                                {
-                                    app.selected += 1;
-                                }
-                                KeyCode::Up | KeyCode::Char('k') if app.selected > 0 => {
-                                    app.selected -= 1;
-                                }
-                                KeyCode::Enter => {
-                                    if app.marked.is_empty() {
-                                        app.open_account_menu();
-                                    } else {
-                                        app.open_batch_menu();
-                                    }
-                                }
-                                KeyCode::Char('a') => app.open_add_menu(),
-                                KeyCode::Char('o') if app.marked.is_empty() => {
-                                    if let Some(alias) = app
-                                        .selected_account_idx()
-                                        .and_then(|idx| app.accounts.get(idx))
-                                        .map(|entry| entry.alias.clone())
+                            Tab::Accounts => {
+                                if let Some(alias) = app.handle_accounts_key(code) {
+                                    if let Some(signal) = perform_launch(
+                                        terminal,
+                                        &mut app,
+                                        alias,
+                                        None,
+                                        crate::provider::ReasoningLaunch::Saved,
+                                        Vec::new(),
+                                        shutdown,
+                                    )
+                                    .await
                                     {
-                                        if let Some(signal) = perform_launch(
-                                            terminal,
-                                            &mut app,
-                                            alias,
-                                            None,
-                                            crate::provider::ReasoningLaunch::Saved,
-                                            Vec::new(),
-                                            shutdown,
-                                        )
-                                        .await
-                                        {
-                                            return Ok(Some(signal));
-                                        }
-                                    } else {
-                                        app.set_status_error("No account selected".to_string(), 3);
+                                        wait_for_switch_before_exit(&mut app).await;
+                                        return Ok(Some(signal));
                                     }
                                 }
-                                KeyCode::Char('r') => app.refresh(Refresh::Forced),
-                                KeyCode::Char('t') => app.toggle_auto_refresh(),
-                                KeyCode::Char('i') => app.toggle_detail_panel(),
-                                KeyCode::Char('s') => app.cycle_sort(),
-                                KeyCode::Char(' ') => app.toggle_mark(),
-                                KeyCode::Char('/') => {
-                                    if let Some(search) = &mut app.search {
-                                        search.cursor = search.query.chars().count();
-                                    } else {
-                                        app.search = Some(SearchState {
-                                            query: String::new(),
-                                            cursor: 0,
-                                        });
-                                        app.update_view();
-                                    }
-                                    app.search_active = true;
-                                }
-                                _ => {}
-                            },
+                            }
                             Tab::Providers => app.handle_provider_list_key(code),
                             Tab::Settings => app.handle_settings_key(code),
                             Tab::Logs => match code {
@@ -2558,6 +2736,16 @@ async fn run_app(
     Ok(None)
 }
 
+async fn wait_for_switch_before_exit(app: &mut App) {
+    if app.switch_in_flight() {
+        app.set_status(
+            "Waiting for account switch to finish before exit".to_string(),
+            60,
+        );
+        app.wait_for_switch_completion().await;
+    }
+}
+
 async fn handle_menu_key(
     app: &mut App,
     terminal: &mut DefaultTerminal,
@@ -2581,6 +2769,9 @@ async fn handle_menu_key(
             app.switch_selected();
         }
         MenuAction::Launch(alias) => {
+            if app.defer_while_switching("launching Codex") {
+                return None;
+            }
             app.close_menu();
             if let Some(signal) = perform_launch(
                 terminal,
@@ -2600,10 +2791,16 @@ async fn handle_menu_key(
             app.open_relogin_flow_menu(alias, email);
         }
         MenuAction::Relogin { alias, device } => {
+            if app.defer_while_switching("re-logging in") {
+                return None;
+            }
             app.close_menu();
             perform_oauth(terminal, app, OAuthMode::Relogin(alias), device).await;
         }
         MenuAction::Add { device } => {
+            if app.defer_while_switching("adding an account") {
+                return None;
+            }
             app.close_menu();
             perform_oauth(terminal, app, OAuthMode::Add, device).await;
         }
@@ -2612,6 +2809,9 @@ async fn handle_menu_key(
             app.refresh_one(&alias);
         }
         MenuAction::Rename(alias) => {
+            if app.defer_while_switching("renaming an account") {
+                return None;
+            }
             app.close_menu();
             app.start_rename_alias(&alias);
         }
@@ -2624,6 +2824,9 @@ async fn handle_menu_key(
             app.request_consume_reset_card(&alias);
         }
         MenuAction::DeleteRequest(alias) => {
+            if app.defer_while_switching("deleting an account") {
+                return None;
+            }
             app.close_menu();
             app.request_delete_alias(&alias);
         }
@@ -2639,10 +2842,16 @@ async fn handle_menu_key(
             app.open_batch_relogin_flow();
         }
         MenuAction::BatchRelogin { device } => {
+            if app.defer_while_switching("re-logging in") {
+                return None;
+            }
             app.close_menu();
             perform_batch_relogin(terminal, app, device).await;
         }
         MenuAction::BatchDeleteRequest => {
+            if app.defer_while_switching("deleting accounts") {
+                return None;
+            }
             app.close_menu();
             app.request_batch_delete();
         }
@@ -3622,6 +3831,100 @@ mod tests {
         }));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn accounts_main_dispatch_wires_u_to_switch_selected() {
+        let _home = EnvHome::new();
+        let path = crate::profile::profile_auth_path("account").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices.push(0);
+
+        assert!(app.handle_accounts_key(KeyCode::Char('u')).is_none());
+        assert!(app.menu.is_none());
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|message| message.contains("Switching to account"))
+        );
+        app.wait_for_switch_completion().await;
+    }
+
+    #[test]
+    fn launch_is_deferred_while_account_switch_is_in_flight() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices.push(0);
+        app.switching_alias = Some("account".into());
+
+        assert!(app.handle_accounts_key(KeyCode::Char('o')).is_none());
+        assert!(app.status_msg.as_deref().is_some_and(|message| {
+            message.to_ascii_lowercase().contains("switch")
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn use_switch_returns_before_a_profile_lock_finishes() {
+        let _home = EnvHome::new();
+        let path = crate::profile::profile_auth_path("account").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices.push(0);
+
+        let lease = crate::profile::lock_launch_session().unwrap();
+        let started = std::time::Instant::now();
+        app.switch_selected();
+        let returned_before_the_lease = started.elapsed() < std::time::Duration::from_millis(100);
+        drop(lease);
+        app.wait_for_switch_completion().await;
+
+        assert!(
+            returned_before_the_lease,
+            "a Use event must return control to the TUI while profile switching waits"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_detail_error_is_not_retried_on_the_next_frame() {
+        let _home = EnvHome::new();
+        let path = crate::profile::profile_auth_path("account").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+
+        let mut app = App::new();
+        app.model_cache.insert(
+            "account".into(),
+            ModelStatus::Error("previous model request failed".into()),
+        );
+
+        app.ensure_models_loaded("account");
+
+        assert!(matches!(
+            app.model_cache.get("account"),
+            Some(ModelStatus::Error(error)) if error == "previous model request failed"
+        ));
+    }
+
     #[test]
     fn reset_card_confirmation_is_blocked_while_consume_is_in_flight() {
         let mut app = App::new();
@@ -4021,14 +4324,7 @@ mod tests {
     fn settings_s_saves_and_accounts_s_still_sorts() {
         let _home = EnvHome::new();
         let mut app = App::new();
-        app.settings.draft.daemon.auto_warmup = true;
-        app.settings.draft.daemon.warmup_times = vec!["18:20".into()];
-        app.settings.draft.daemon.timezone = "UTC".into();
         app.handle_settings_key(KeyCode::Char('s'));
-        let loaded = crate::config::load_current().expect("saved config");
-        assert!(loaded.daemon.auto_warmup);
-        assert_eq!(loaded.daemon.warmup_times, vec!["18:20".to_string()]);
-        assert_eq!(loaded.daemon.timezone, "UTC");
         assert!(
             app.status_msg
                 .as_deref()
@@ -4042,35 +4338,12 @@ mod tests {
     }
 
     #[test]
-    fn unsaved_settings_survive_leaving_and_returning_to_the_tab() {
-        let _home = EnvHome::new();
-        let mut app = App::new();
-        app.active_tab = Tab::Settings;
-        for _ in 0..10 {
-            app.handle_settings_key(KeyCode::Down);
-        }
-        app.handle_settings_key(KeyCode::Enter);
-        assert!(app.settings.draft.daemon.auto_warmup);
-        assert!(app.settings.is_dirty());
-
-        app.cycle_tab(true);
-        assert_eq!(app.active_tab, Tab::Logs);
-        app.cycle_tab(false);
-        assert_eq!(app.active_tab, Tab::Settings);
-        assert!(app.settings.draft.daemon.auto_warmup);
-        assert!(app.settings.is_dirty());
-        let loaded = crate::config::load_current().expect("disk still default");
-        assert!(!loaded.daemon.auto_warmup);
-    }
-
-    #[test]
     fn dirty_settings_require_confirmation_before_quit() {
         let _home = EnvHome::new();
         let mut app = App::new();
         app.active_tab = Tab::Settings;
-        for _ in 0..10 {
-            app.handle_settings_key(KeyCode::Down);
-        }
+        app.handle_settings_key(KeyCode::Enter);
+        app.handle_settings_key(KeyCode::Char('x'));
         app.handle_settings_key(KeyCode::Enter);
         assert!(app.settings.is_dirty());
 
@@ -4087,10 +4360,6 @@ mod tests {
                 KeyModifiers::CONTROL,
             )));
         }
-        assert!(super::accepts_key_event(&KeyEvent::new(
-            KeyCode::Char('W'),
-            KeyModifiers::SHIFT,
-        )));
         assert!(super::accepts_key_event(&KeyEvent::new(
             KeyCode::BackTab,
             KeyModifiers::SHIFT,

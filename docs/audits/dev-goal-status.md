@@ -9,9 +9,9 @@
 - 修复审计核心问题，测试消融、Windows补全、全项目review、文档/wiki更新、分支收敛。
 
 ## 预算计数
-- Agent调用：14/50（本goal从0计，启动前审计不计）。
-- Review：0/10。
-- 本地提交：无。
+- Agent调用：20/50（本goal从0计，启动前审计不计）。
+- Review：1/10。
+- 本地提交：5dbf118（账号/启动/预热修复检查点，待最终独立审查）。
 
 ## 阶段与验收
 1. 核心修复和功能裁剪：先红灯契约再实现；凭据一致性、Use响应、Windows命令启动、daemon移除可编译；定向测试通过；本地提交。
@@ -71,4 +71,24 @@
 
 - 统一Windows库测试编译成功；TUI定向114通过，A14补切换期间冲突动作门禁。预热两项红灯已转绿。
 - 三项隔离缺陷注入均被测试检出（各exit101），恢复后各exit0：CAS、同账号launch恢复、unattended cache。
+
+
+
+- A12 Windows启动透传补全完成，实际集成测试运行中；A16修复卸载脚本调用已移除daemon命令的连带问题（先红灯）。
+
+
+- A15 TUI门禁实现完成，A17 Windows启动HTTP测试fixture修复进行中。新锁文件cargo-audit：384依赖、1242公告，exit0。
+- 22个远端引用完整历史bundle已验证；详见分支收敛记录，未删除远端。
+
+
+- A16先实施后提交测试，缺少严格先红顺序证据；A18修正卸载测试隔离（Unix legacy路径、Windows用户PATH），未运行有风险fixture。
+- A15门禁定向测试由红转绿。Linux首次编译进行中。
+
+
+- R1凭据/启动/provider全模块独立Sol high审查进行中；A20删除3个纯文本/实现镜像测试并清理失效注释。Linux库测试编译已成功。
+- A13文档/wiki更新完成，仍待最终交叉核对及changelog/发布资格记录。
+
+
+- Windows真实伪终端冒烟：临时假账号demo，本地拒绝端口隔离网络；主列表u显示Switching后active，q退出exit0，current与live account均demo。未使用真实账号。
+- 修复fixture后Windows启动集成8/8通过。
 

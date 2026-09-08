@@ -11,24 +11,6 @@ pub enum ColorMode {
 }
 
 #[derive(Debug, Clone, Subcommand)]
-pub enum DaemonCommand {
-    /// Start the daemon (Beta; foreground if --foreground, otherwise detached)
-    Start {
-        /// Run in foreground (for service managers)
-        #[arg(long)]
-        foreground: bool,
-    },
-    /// Stop a running Beta daemon
-    Stop,
-    /// Show Beta daemon status
-    Status,
-    /// Install the Beta daemon as a system service (LaunchAgent on macOS, systemd on Linux, Task Scheduler on Windows)
-    Install,
-    /// Uninstall the Beta daemon system service
-    Uninstall,
-}
-
-#[derive(Debug, Clone, Subcommand)]
 pub enum ProviderCommand {
     /// Add a custom API provider (e.g. OpenRouter) for launching Codex with a third-party model
     #[command(
@@ -128,7 +110,7 @@ pub enum ProviderCommand {
     after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, launch, reset-card, rename, delete, login, import, self-update, daemon status, provider add/list/show/rename/remove/fetch-models/probe)
+    /// Output as compact JSON (supported by list, use, launch, reset-card, rename, delete, login, import, self-update, provider add/list/show/rename/remove/fetch-models/probe)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -272,9 +254,6 @@ pub enum Commands {
     /// Manage custom API providers (OpenRouter, etc.) for launching Codex with a third-party model
     #[command(subcommand)]
     Provider(ProviderCommand),
-    /// Background daemon (Beta) for automatic account switching
-    #[command(subcommand)]
-    Daemon(DaemonCommand),
 }
 
 /// Split `codex-switch launch …` so Codex argv is never parsed as a

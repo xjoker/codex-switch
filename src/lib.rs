@@ -19,8 +19,6 @@ mod color;
 mod commands;
 pub mod config;
 #[allow(dead_code)]
-mod daemon;
-#[allow(dead_code)]
 mod error;
 #[allow(dead_code)]
 mod http_retry;
@@ -44,6 +42,4 @@ mod update;
 pub mod usage;
 #[allow(dead_code)]
 mod warmup;
-#[allow(dead_code)]
-mod warmup_schedule;
 pub mod workspace;

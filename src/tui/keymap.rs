@@ -86,7 +86,7 @@ pub const KEYMAP: &[Binding] = &[
         label: "clear marks / search / popup",
         in_status_bar: false,
     },
-    // Account actions (via Enter menu)
+    // Account actions (Accounts list and the selected-account menu)
     Binding {
         keys: "enter",
         section: Section::Account,
@@ -109,7 +109,7 @@ pub const KEYMAP: &[Binding] = &[
         keys: "u",
         section: Section::Account,
         label: "use (switch to)",
-        in_status_bar: false,
+        in_status_bar: true,
     },
     Binding {
         keys: "l",
@@ -219,19 +219,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "← / →",
         section: Section::Settings,
-        label: "cycle log level / booleans",
-        in_status_bar: false,
-    },
-    Binding {
-        keys: "+ / a",
-        section: Section::Settings,
-        label: "add warmup HH:MM (max 10; comma-separated list ok)",
-        in_status_bar: false,
-    },
-    Binding {
-        keys: "d / -",
-        section: Section::Settings,
-        label: "remove the selected warmup slot",
+        label: "toggle boolean options",
         in_status_bar: false,
     },
     Binding {
@@ -276,12 +264,6 @@ pub const KEYMAP: &[Binding] = &[
         keys: "t",
         section: Section::Account,
         label: "toggle auto-refresh",
-        in_status_bar: false,
-    },
-    Binding {
-        keys: "W",
-        section: Section::Account,
-        label: "toggle auto-warmup (auto-refresh + warm whenever 5h expires)",
         in_status_bar: false,
     },
     Binding {
@@ -416,5 +398,16 @@ mod tests {
                 binding.label
             );
         }
+    }
+
+    #[test]
+    fn use_action_is_visible_in_the_accounts_status_bar() {
+        let items = super::status_bar_items();
+        assert!(
+            items.iter().any(|(keys, label)| {
+                *keys == "u" && label.to_ascii_lowercase().contains("use")
+            }),
+            "Accounts status bar must expose the real use shortcut: {items:?}"
+        );
     }
 }

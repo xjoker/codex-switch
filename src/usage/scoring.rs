@@ -318,8 +318,8 @@ pub fn score_unified(c: &Candidate, safety_margin_7d: f64) -> f64 {
 
 // ── Shared candidate building and selection ───────────────
 //
-// CLI `use` and the daemon score the same way through these helpers; only
-// the final ranking/selection policy differs per caller.
+// CLI `use` and automatic best selection score the same way through these
+// helpers.
 
 /// Build and score candidates uniformly: the API `plan_type` is
 /// authoritative over the JWT (handles plan downgrades), and
@@ -369,33 +369,6 @@ pub fn score_candidates(
             }
         })
         .collect()
-}
-
-/// Daemon switch policy over already-scored candidates: prefer an eligible
-/// candidate that beats `current_score`; fall back to the best ineligible
-/// one only when no candidate is eligible at all.
-pub fn pick_switch_target<'a>(
-    current_score: f64,
-    others: &'a [ScoredCandidate],
-    safety_7d: f64,
-) -> Option<(&'a str, f64)> {
-    let mut best_eligible: Option<(&'a str, f64)> = None;
-    let mut best_ineligible: Option<(&'a str, f64)> = None;
-    let mut any_eligible = false;
-
-    for s in others {
-        let eligible = is_candidate_eligible(&s.candidate, safety_7d);
-        if eligible {
-            any_eligible = true;
-            if s.score > current_score && best_eligible.is_none_or(|(_, bs)| s.score > bs) {
-                best_eligible = Some((s.candidate.alias.as_str(), s.score));
-            }
-        } else if s.score > current_score && best_ineligible.is_none_or(|(_, bs)| s.score > bs) {
-            best_ineligible = Some((s.candidate.alias.as_str(), s.score));
-        }
-    }
-
-    best_eligible.or(if !any_eligible { best_ineligible } else { None })
 }
 
 #[cfg(test)]
@@ -555,69 +528,6 @@ mod tests {
         assert_eq!(scored[0].candidate.pool_exhausted, 1);
         assert_eq!(scored[1].candidate.pool_exhausted, 1);
         assert_eq!(scored[1].candidate.pool_size, 2);
-    }
-
-    fn scored(candidate: Candidate, safety_7d: f64) -> ScoredCandidate {
-        let score = score_unified(&candidate, safety_7d);
-        ScoredCandidate {
-            candidate,
-            usage: UsageInfo::default(),
-            score,
-        }
-    }
-
-    #[test]
-    fn test_pick_switch_target_prefers_eligible_above_current() {
-        let now = 1_000_000i64;
-        let current = make_candidate("current", 90.0, Some(now + 3600), 50.0, Some(now + 86400));
-        let good = make_candidate("good", 10.0, Some(now + 3600), 10.0, Some(now + 5 * 86400));
-        let current_score = score_unified(&current, 20.0);
-
-        let others = vec![scored(good, 20.0)];
-        let pick = pick_switch_target(current_score, &others, 20.0);
-        assert_eq!(pick.map(|(a, _)| a), Some("good"));
-    }
-
-    #[test]
-    fn test_pick_switch_target_ignores_ineligible_when_an_eligible_exists() {
-        let now = 1_000_000i64;
-        let current = make_candidate("current", 90.0, Some(now + 3600), 50.0, Some(now + 86400));
-        let current_score = score_unified(&current, 20.0);
-
-        // Eligible but worse than current; ineligible (7d over safety margin) better.
-        let weak_eligible =
-            make_candidate("weak", 95.0, Some(now + 3600), 40.0, Some(now + 5 * 86400));
-        let strong_ineligible = make_candidate(
-            "strong",
-            0.0,
-            Some(now + 18000),
-            95.0,
-            Some(now + 5 * 86400),
-        );
-
-        let others = vec![scored(weak_eligible, 20.0), scored(strong_ineligible, 20.0)];
-        // An eligible candidate exists, so the ineligible one must not be picked,
-        // and the eligible one does not beat current — no switch.
-        assert!(pick_switch_target(current_score, &others, 20.0).is_none());
-    }
-
-    #[test]
-    fn test_pick_switch_target_falls_back_when_nothing_is_eligible() {
-        let now = 1_000_000i64;
-        let current = make_candidate("current", 100.0, Some(now + 3600), 96.0, Some(now + 86400));
-        let current_score = score_unified(&current, 20.0);
-
-        let ineligible = make_candidate(
-            "fallback",
-            0.0,
-            Some(now + 18000),
-            95.0,
-            Some(now + 5 * 86400),
-        );
-        let others = vec![scored(ineligible, 20.0)];
-
-        let pick = pick_switch_target(current_score, &others, 20.0);
-        assert_eq!(pick.map(|(a, _)| a), Some("fallback"));
     }
 
     #[test]

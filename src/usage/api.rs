@@ -250,41 +250,17 @@ pub async fn fetch_usage_retried(
     profile_path: &Path,
     current_alias: &str,
 ) -> std::result::Result<UsageInfo, UsageError> {
-    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Cached, true).await
+    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Cached).await
 }
 
 /// Bypass the usage TTL for current numbers, but leave a recorded auth verdict
-/// standing. For callers running on a timer with nobody watching.
+/// standing. Used by background refreshes and one-time warmup operations.
 pub async fn fetch_usage_retried_unattended(
     alias: &str,
     profile_path: &Path,
     current_alias: &str,
 ) -> std::result::Result<UsageInfo, UsageError> {
-    fetch_usage_retried_inner(
-        alias,
-        profile_path,
-        current_alias,
-        Refresh::Unattended,
-        true,
-    )
-    .await
-}
-
-/// Daemon batch-refresh variant. Credential rotations are still persisted
-/// immediately; only the usage-cache write is deferred to one batch commit.
-pub(crate) async fn fetch_usage_retried_unattended_deferred_cache(
-    alias: &str,
-    profile_path: &Path,
-    current_alias: &str,
-) -> std::result::Result<UsageInfo, UsageError> {
-    fetch_usage_retried_inner(
-        alias,
-        profile_path,
-        current_alias,
-        Refresh::Unattended,
-        false,
-    )
-    .await
+    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Unattended).await
 }
 
 /// Bypass every cache, including a recorded auth verdict. Only for a person
@@ -294,7 +270,7 @@ pub async fn fetch_usage_retried_force(
     profile_path: &Path,
     current_alias: &str,
 ) -> std::result::Result<UsageInfo, UsageError> {
-    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Forced, true).await
+    fetch_usage_retried_inner(alias, profile_path, current_alias, Refresh::Forced).await
 }
 
 /// Write credentials the auth server just rotated back to the profile.
@@ -382,11 +358,11 @@ struct ReloadedCredentials {
 
 /// Re-read `profile_path` after the auth server rejected a refresh outright.
 ///
-/// The daemon timer and the CLI (`list`, `best`) refresh the same profile from
-/// separate processes, so both can read the same `refresh_token` and present
-/// it. The server rotates it for exactly one of them and answers the other
-/// `refresh_token_reused` — a verdict about that *token*, not about the
-/// account, whose live credentials the winner has meanwhile written to disk.
+/// Separate CLI operations such as `list` and `best` can refresh the same
+/// profile from different processes, so both can read the same `refresh_token`
+/// and present it. The server rotates it for exactly one of them and answers
+/// the other `refresh_token_reused` — a verdict about that *token*, not about
+/// the account, whose live credentials the winner has meanwhile written to disk.
 ///
 /// Returns the stored credentials only when their `refresh_token` differs from
 /// `presented`. An unchanged profile means nobody rotated anything, so the
@@ -413,7 +389,6 @@ async fn fetch_usage_retried_inner(
     profile_path: &Path,
     _current_alias: &str,
     refresh: Refresh,
-    write_usage_cache: bool,
 ) -> std::result::Result<UsageInfo, UsageError> {
     if !refresh.skips_usage_cache() {
         if let Some(cached) = crate::cache::get_async(alias).await {
@@ -557,11 +532,9 @@ async fn fetch_usage_retried_inner(
 
         match outcome.result {
             Ok(mut usage) => {
-                if write_usage_cache {
-                    let cached = crate::cache::get_async(alias).await;
-                    merge_cached_reset_credits(&mut usage, cached.as_ref(), chrono::Utc::now());
-                    crate::cache::put_async(alias, &usage).await;
-                }
+                let cached = crate::cache::get_async(alias).await;
+                merge_cached_reset_credits(&mut usage, cached.as_ref(), chrono::Utc::now());
+                crate::cache::put_async(alias, &usage).await;
                 return Ok(usage);
             }
             Err(e) => {

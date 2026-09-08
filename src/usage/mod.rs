@@ -7,9 +7,7 @@ mod parse;
 mod reset_credits;
 mod scoring;
 
-pub(crate) use api::{
-    apply_account_routing_headers, do_refresh_token, fetch_usage_retried_unattended_deferred_cache,
-};
+pub(crate) use api::{apply_account_routing_headers, do_refresh_token};
 pub use api::{
     fetch_usage_retried, fetch_usage_retried_force, fetch_usage_retried_unattended,
     refresh_expiring_tokens, validate_import_auth,
@@ -29,7 +27,7 @@ pub use reset_credits::{
     refresh_reset_credits_for_profile,
 };
 pub use scoring::{
-    is_available, is_candidate_eligible, pace_percent, pick_switch_target, score_candidates,
+    is_available, is_candidate_eligible, pace_percent, score_candidates,
     usage_has_active_warmup_window, visible_pace_percent,
 };
 #[allow(unused_imports)]
@@ -352,9 +350,9 @@ impl UsageError {
 /// One profile whose rotated credentials could not be written to disk during an
 /// opportunistic refresh.
 ///
-/// Opportunistic refresh is a batch, and the daemon runs it on a timer, so a
-/// single failure must neither abort the remaining profiles nor disappear into
-/// a log line: it is collected and handed back for the caller to surface.
+/// Opportunistic refresh is a batch, so a single failure must neither abort
+/// the remaining profiles nor disappear into a log line: it is collected and
+/// handed back for the caller to surface.
 #[derive(Debug, Clone)]
 pub struct TokenPersistFailure {
     pub alias: String,

@@ -5,7 +5,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::app_home;
-use crate::warmup_schedule::{normalize_timezone, normalize_warmup_times};
 
 static CONFIG: OnceLock<RwLock<AppConfig>> = OnceLock::new();
 static STARTUP_WARNINGS: OnceLock<Vec<String>> = OnceLock::new();
@@ -21,8 +20,6 @@ pub struct AppConfig {
     pub tui: TuiConfig,
     #[serde(rename = "use")]
     pub use_cfg: UseConfig,
-    #[serde(default)]
-    pub daemon: DaemonConfig,
     #[serde(default)]
     pub launch: LaunchConfig,
 }
@@ -40,29 +37,12 @@ impl AppConfig {
             ));
             self.tui.auto_refresh_interval_secs = 30;
         }
-        if self.daemon.cache_refresh_interval_secs == 0 {
-            warnings.push(
-                "config.daemon.cache_refresh_interval_secs=0 is invalid; using 300 instead".into(),
-            );
-            self.daemon.cache_refresh_interval_secs = 300;
-        }
-        if self.daemon.poll_interval_secs == 0 {
-            warnings.push("config.daemon.poll_interval_secs=0 is invalid; using 60 instead".into());
-            self.daemon.poll_interval_secs = 60;
-        }
         // Not merely a tidy default: at zero, `launch` restores the original
         // auth.json before Codex has read the staged one, so the session runs
         // on the wrong account with nothing reporting it.
         if self.launch.restore_delay_secs == 0 {
             warnings.push("config.launch.restore_delay_secs=0 is invalid; using 3 instead".into());
             self.launch.restore_delay_secs = 3;
-        }
-        self.daemon.warmup_times =
-            normalize_warmup_times(std::mem::take(&mut self.daemon.warmup_times), warnings);
-        self.daemon.timezone =
-            normalize_timezone(std::mem::take(&mut self.daemon.timezone), warnings);
-        if self.daemon.log_level.trim().is_empty() {
-            self.daemon.log_level = "error".to_string();
         }
         self
     }
@@ -138,49 +118,6 @@ impl Default for UseConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct DaemonConfig {
-    /// Usage poll interval in seconds (default: 60)
-    pub poll_interval_secs: u64,
-    /// 5h usage % threshold that triggers a switch (default: 80.0)
-    pub switch_threshold: f64,
-    /// Background cache refresh interval in seconds (default: 300)
-    pub cache_refresh_interval_secs: u64,
-    /// Warm inactive quota windows. With empty `warmup_times`, this happens
-    /// during cache refresh. With times set, cache refresh only updates
-    /// usage and warmup runs at those `HH:MM` slots in `timezone`.
-    pub auto_warmup: bool,
-    /// `HH:MM` slots (max 10). Empty = cache-refresh warmup when `auto_warmup`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warmup_times: Vec<String>,
-    /// IANA timezone for `warmup_times` (e.g. `Asia/Shanghai`). Empty = system local.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub timezone: String,
-    /// Send desktop notification on switch (default: false)
-    pub notify: bool,
-    /// Log level for daemon (default: "error")
-    pub log_level: String,
-    /// Hold a pending switch while a Codex session is running (default: true)
-    pub defer_switch_while_codex_running: bool,
-}
-
-impl Default for DaemonConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval_secs: 60,
-            switch_threshold: 80.0,
-            cache_refresh_interval_secs: 300,
-            auto_warmup: false,
-            warmup_times: Vec::new(),
-            timezone: String::new(),
-            notify: false,
-            log_level: "error".to_string(),
-            defer_switch_while_codex_running: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
 pub struct LaunchConfig {
     /// Seconds to wait after starting codex before restoring auth.json (default: 3).
     /// Codex CLI reads auth.json only at startup; this delay ensures it finishes reading
@@ -206,7 +143,6 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 struct DeprecatedConfigProbe {
     #[serde(rename = "use")]
     use_cfg: Option<DeprecatedUseProbe>,
-    daemon: Option<DeprecatedDaemonProbe>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -214,12 +150,6 @@ struct DeprecatedConfigProbe {
 struct DeprecatedUseProbe {
     mode: Option<toml::Value>,
     min_remaining: Option<toml::Value>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct DeprecatedDaemonProbe {
-    token_check_interval_secs: Option<toml::Value>,
 }
 
 fn deprecated_key_warnings(raw: &str) -> Vec<String> {
@@ -242,15 +172,6 @@ fn deprecated_key_warnings(raw: &str) -> Vec<String> {
                     .into(),
             );
         }
-    }
-    if probe
-        .daemon
-        .is_some_and(|daemon| daemon.token_check_interval_secs.is_some())
-    {
-        warnings.push(
-            "config: [daemon] 'token_check_interval_secs' is ignored; token refresh now runs as part of usage refresh"
-                .into(),
-        );
     }
     warnings
 }
@@ -374,15 +295,6 @@ pub fn resolve_no_proxy() -> Option<String> {
     None
 }
 
-pub fn daemon_log_level() -> String {
-    let trimmed = get().daemon.log_level.trim().to_string();
-    if trimmed.is_empty() {
-        "error".to_string()
-    } else {
-        trimmed
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::load_from_str;
@@ -392,32 +304,6 @@ mod tests {
         let config = load_from_str("").unwrap();
 
         assert_eq!(config.tui.auto_refresh_interval_secs, 300);
-    }
-
-    #[test]
-    fn daemon_normalizes_remaining_intervals_and_ignores_legacy_token_timer() {
-        let (config, warnings) = super::load_from_str_with_warnings(
-            r#"
-[daemon]
-poll_interval_secs = 0
-cache_refresh_interval_secs = 0
-token_check_interval_secs = 17
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(config.daemon.poll_interval_secs, 60);
-        assert_eq!(config.daemon.cache_refresh_interval_secs, 300);
-        let saved = toml::to_string(&config).unwrap();
-        assert!(
-            !saved.contains("token_check_interval_secs"),
-            "token rotation is a usage-fetch side effect, not a fourth daemon timer: {saved}"
-        );
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.contains("token_check_interval_secs"))
-        );
     }
 
     /// A zero restore delay makes `launch` put the original auth.json back
@@ -435,47 +321,5 @@ token_check_interval_secs = 17
                 .any(|warning| warning.contains("restore_delay_secs")),
             "a silently-corrected launch delay is what hands Codex the wrong account: {warnings:?}"
         );
-    }
-
-    #[test]
-    fn warmup_times_are_normalized_on_load() {
-        let (config, warnings) = super::load_from_str_with_warnings(
-            r#"
-[daemon]
-auto_warmup = true
-warmup_times = [" 13:10 ", "08:00", "08:00", "bad"]
-"#,
-        )
-        .unwrap();
-
-        assert!(config.daemon.auto_warmup);
-        assert_eq!(
-            config.daemon.warmup_times,
-            vec!["08:00".to_string(), "13:10".to_string()]
-        );
-        assert!(warnings.iter().any(|w| w.contains("bad")));
-    }
-
-    #[test]
-    fn timezone_trims_and_warns_when_invalid() {
-        let (config, warnings) = super::load_from_str_with_warnings(
-            r#"
-[daemon]
-timezone = "  Asia/Shanghai  "
-"#,
-        )
-        .unwrap();
-        assert_eq!(config.daemon.timezone, "Asia/Shanghai");
-        assert!(warnings.is_empty());
-
-        let (config, warnings) = super::load_from_str_with_warnings(
-            r#"
-[daemon]
-timezone = "Not/A_Zone"
-"#,
-        )
-        .unwrap();
-        assert_eq!(config.daemon.timezone, "Not/A_Zone");
-        assert!(warnings.iter().any(|w| w.contains("Not/A_Zone")));
     }
 }
