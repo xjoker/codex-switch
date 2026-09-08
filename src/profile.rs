@@ -903,6 +903,17 @@ pub fn auto_track_current() -> bool {
 
 // ── Command implementations ───────────────────────────────
 
+fn alias_is_taken(alias: &str) -> Result<bool> {
+    Ok(profile_auth_path(alias)?.exists() || crate::provider::exists(alias))
+}
+
+fn reject_provider_alias(alias: &str) -> Result<()> {
+    if crate::provider::exists(alias) {
+        anyhow::bail!("alias '{alias}' already belongs to a provider")
+    }
+    Ok(())
+}
+
 pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
     let src = codex_auth_path()?;
     if !src.exists() {
@@ -911,6 +922,10 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
 
     let _transaction = lock_auth_transaction()?;
     let val = read_auth(&src)?;
+    if let Some(alias) = alias {
+        validate_alias(alias)?;
+        reject_provider_alias(alias)?;
+    }
     // Best-effort: normalize live file to canonical formatting for SHA256 consistency
     if let Err(e) = write_auth(&src, &val) {
         tracing::debug!("Could not normalize live auth.json: {e}");
@@ -946,8 +961,7 @@ pub fn cmd_save(alias: Option<&str>) -> Result<SaveAction> {
             .unwrap_or_else(|| "account".to_string()),
     };
     validate_alias(&resolved_alias)?;
-    let dst = profile_auth_path(&resolved_alias)?;
-    if dst.exists() {
+    if alias_is_taken(&resolved_alias)? {
         let unique = make_unique_alias(&resolved_alias)?;
         validate_alias(&unique)?;
         write_profile_credentials(&unique, &val)?;
@@ -972,7 +986,7 @@ fn make_unique_alias(base: &str) -> Result<String> {
         let prefix_len = MAX_ALIAS_LEN.saturating_sub(suffix.len());
         let prefix = base.chars().take(prefix_len).collect::<String>();
         let candidate = format!("{prefix}{suffix}");
-        if !profile_auth_path(&candidate)?.exists() {
+        if !alias_is_taken(&candidate)? {
             return Ok(candidate);
         }
         n += 1;
@@ -1225,7 +1239,10 @@ fn create_import_profile(
         .or_else(|| suggested_alias.map(str::to_string))
         .unwrap_or_else(|| "account".to_string());
     validate_alias(&alias)?;
-    let alias = if profile_auth_path(&alias)?.exists() {
+    if hint_alias.is_some() {
+        reject_provider_alias(&alias)?;
+    }
+    let alias = if alias_is_taken(&alias)? {
         make_unique_alias(&alias)?
     } else {
         alias
@@ -1239,6 +1256,7 @@ fn create_import_profile(
 pub fn rename_profile(old_alias: &str, new_alias: &str) -> Result<()> {
     validate_alias(old_alias)?;
     validate_alias(new_alias)?;
+    reject_provider_alias(new_alias)?;
     let old_dir = profiles_dir()?.join(old_alias);
     if !old_dir.exists() {
         return Err(CsError::NotFound(old_alias.to_string()).into());
@@ -1270,6 +1288,11 @@ pub fn save_auth_value(val: serde_json::Value, hint_alias: Option<&str>) -> Resu
     crate::auth::validate_managed_auth_value(&val)?;
     let identity = extract_identity(&val);
 
+    if let Some(alias) = hint_alias {
+        validate_alias(alias)?;
+        reject_provider_alias(alias)?;
+    }
+
     let existing = match hint_alias {
         Some(alias) => resolve_named_target(alias, &identity)?,
         None => resolve_identity_target(&identity)?,
@@ -1285,8 +1308,13 @@ pub fn save_auth_value(val: serde_json::Value, hint_alias: Option<&str>) -> Resu
         if dst.exists() {
             ensure_same_account_identity(&existing, &read_auth(&dst)?, &val)?;
         }
+        let live = codex_auth_path()?;
+        // Keep the currently active account recoverable while this login
+        // activates the refreshed credentials for the existing profile.
+        backup_auth(&live)?;
         ensure_profile_parent(&dst)?;
         write_auth(&dst, &val)?;
+        write_auth(&live, &val)?;
         write_current(&existing)?;
         return Ok(SaveAction::Updated(existing));
     }
@@ -1297,7 +1325,7 @@ pub fn save_auth_value(val: serde_json::Value, hint_alias: Option<&str>) -> Resu
         .unwrap_or_else(|| "account".to_string());
     validate_alias(&alias)?;
 
-    let alias = if profile_auth_path(&alias)?.exists() {
+    let alias = if alias_is_taken(&alias)? {
         make_unique_alias(&alias)?
     } else {
         alias
@@ -2142,6 +2170,37 @@ mod tests {
 
     fn write_live(val: &serde_json::Value) {
         crate::auth::write_auth(&crate::auth::codex_auth_path().unwrap(), val).unwrap();
+    }
+
+    fn seed_provider_alias(alias: &str) {
+        let path = crate::provider::provider_path(alias).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"provider alias fixture").unwrap();
+        assert!(crate::provider::exists(alias));
+    }
+
+    fn assert_provider_alias_rejected<F>(alias: &str, save: F)
+    where
+        F: FnOnce(&serde_json::Value, &str) -> Result<super::SaveAction>,
+    {
+        let _env = TestEnv::new();
+        let live_before = realistic_auth_json(
+            "provider-collision@example.com",
+            "acct-provider-collision",
+            "acc-live",
+            "ref-live",
+        );
+        write_live(&live_before);
+        seed_provider_alias(alias);
+
+        assert!(save(&live_before, alias).is_err());
+        assert_eq!(
+            crate::auth::read_auth(&crate::auth::codex_auth_path().unwrap()).unwrap(),
+            live_before
+        );
+        assert!(!super::profile_auth_path(alias).unwrap().exists());
+        assert!(crate::provider::exists(alias));
+        assert!(super::read_current().is_empty());
     }
 
     fn profile_refresh_token(alias: &str) -> String {
@@ -2998,5 +3057,108 @@ mod tests {
             other => panic!("re-login must be able to replace a legacy profile, got {other:?}"),
         }
         assert_eq!(profile_refresh_token("legacy"), "ref_fresh");
+    }
+
+    #[test]
+    fn login_existing_account_keeps_current_and_live_credentials_in_sync() {
+        let _env = TestEnv::new();
+        let live_before_login =
+            realistic_auth_json("other@example.com", "acct-other", "acc-other", "ref-other");
+        write_live(&live_before_login);
+
+        let saved_before_login =
+            realistic_auth_json("account@example.com", "acct-account", "acc-old", "ref-old");
+        seed_profile("account", &saved_before_login);
+
+        let minted =
+            realistic_auth_json("account@example.com", "acct-account", "acc-new", "ref-new");
+        match super::save_auth_value(minted.clone(), None) {
+            Ok(super::SaveAction::Updated(alias)) => assert_eq!(alias, "account"),
+            other => panic!("existing-account login must update the saved profile, got {other:?}"),
+        }
+
+        assert_eq!(super::read_current(), "account");
+        assert_eq!(
+            crate::auth::read_auth(&crate::auth::codex_auth_path().unwrap()).unwrap(),
+            minted,
+            "existing-account login must make live auth match current"
+        );
+    }
+
+    #[test]
+    fn explicit_chatgpt_aliases_cannot_take_provider_names() {
+        assert_provider_alias_rejected("cmd-save", |_, alias| super::cmd_save(Some(alias)));
+        assert_provider_alias_rejected("save-auth", |val, alias| {
+            super::save_auth_value(val.clone(), Some(alias))
+        });
+        assert_provider_alias_rejected("import-auth", |val, alias| {
+            super::save_imported_auth_value(val, Some(alias), "acct-provider-collision", None)
+        });
+    }
+
+    #[test]
+    fn automatic_chatgpt_aliases_skip_provider_names() {
+        {
+            let _env = TestEnv::new();
+            let alias = "auto-login";
+            seed_provider_alias(alias);
+            let val = realistic_auth_json(
+                "auto-login@example.com",
+                "acct-auto-login",
+                "acc-login",
+                "ref-login",
+            );
+
+            let action = super::save_auth_value(val.clone(), None).unwrap();
+            assert_eq!(action.alias(), "auto-login_2");
+            assert_eq!(super::read_current(), "auto-login_2");
+            assert_eq!(
+                crate::auth::read_auth(&crate::auth::codex_auth_path().unwrap()).unwrap(),
+                val
+            );
+            assert!(!super::profile_auth_path(alias).unwrap().exists());
+        }
+
+        {
+            let _env = TestEnv::new();
+            let alias = "auto-import";
+            seed_provider_alias(alias);
+            let val = realistic_auth_json(
+                "auto-import@example.com",
+                "acct-auto-import",
+                "acc-import",
+                "ref-import",
+            );
+
+            let action =
+                super::save_imported_auth_value(&val, None, "acct-auto-import", None).unwrap();
+            assert_eq!(action.alias(), "auto-import_2");
+            assert!(!super::profile_auth_path(alias).unwrap().exists());
+        }
+    }
+
+    #[test]
+    fn rename_profile_rejects_provider_alias_without_mutation() {
+        let _env = TestEnv::new();
+        let value = realistic_auth_json(
+            "rename@example.com",
+            "acct-rename",
+            "acc-rename",
+            "ref-rename",
+        );
+        seed_profile("chatgpt", &value);
+        write_live(&value);
+        super::write_current("chatgpt").unwrap();
+        seed_provider_alias("shared");
+
+        assert!(super::rename_profile("chatgpt", "shared").is_err());
+        assert!(super::profile_auth_path("chatgpt").unwrap().exists());
+        assert!(!super::profile_auth_path("shared").unwrap().exists());
+        assert_eq!(
+            crate::auth::read_auth(&crate::auth::codex_auth_path().unwrap()).unwrap(),
+            value
+        );
+        assert_eq!(super::read_current(), "chatgpt");
+        assert!(crate::provider::exists("shared"));
     }
 }

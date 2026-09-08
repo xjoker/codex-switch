@@ -136,6 +136,7 @@ pub(crate) fn open_cmd() -> Result<()> {
 pub(crate) async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
     let aliases: Vec<String> = match alias {
         Some(a) => {
+            profile::validate_alias(a)?;
             let path = profile::profile_auth_path(a)?;
             if !path.exists() {
                 anyhow::bail!("profile '{}' not found", a);

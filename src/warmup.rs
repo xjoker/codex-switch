@@ -402,7 +402,8 @@ fn select_warmup_models(
         })
         .map(|m| m.slug.clone());
 
-    let mut selected: Vec<String> = main.into_iter().collect();
+    let main = main.ok_or_else(|| anyhow::anyhow!("no main-pool model available"))?;
+    let mut selected = vec![main];
     for model in additional_models {
         if !selected.contains(&model.slug) {
             selected.push(model.slug.clone());
@@ -1244,6 +1245,28 @@ mod tests {
         assert_eq!(
             select_warmup_models(&models, &limits).unwrap(),
             vec!["gpt-5.6-codex", "gpt-5.3-codex-spark"]
+        );
+    }
+
+    #[test]
+    fn test_warmup_models_reject_additional_pool_without_a_main_pool() {
+        let models = vec![ModelEntry {
+            slug: "gpt-5.3-codex-spark".to_string(),
+            visibility: Some("List".to_string()),
+            supported_in_api: Some(true),
+            ..Default::default()
+        }];
+        let limits = vec![crate::usage::AdditionalRateLimit {
+            limit_name: Some("GPT-5.3-Codex-Spark".to_string()),
+            metered_feature: Some("codex_bengalfox".to_string()),
+            allowed: Some(true),
+            limit_reached: Some(false),
+            ..Default::default()
+        }];
+
+        assert!(
+            select_warmup_models(&models, &limits).is_err(),
+            "an additional-pool model must not be promoted to the main-pool request"
         );
     }
 

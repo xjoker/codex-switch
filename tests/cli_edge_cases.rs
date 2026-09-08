@@ -769,6 +769,39 @@ fn list_progress_counts_only_stale_accounts() {
     let _ = fs::remove_dir_all(home);
 }
 
+#[test]
+fn warmup_rejects_path_traversal_alias_before_profile_use() {
+    let home = temp_home("warmup-invalid-alias-preflight");
+    let alias = "../escape";
+    write_json(
+        home.join(".codex-switch/escape/auth.json"),
+        &auth_json("escape@example.com", "acct_escape"),
+    );
+
+    // The active cache keeps the command away from usage/network discovery;
+    // the existing target path makes a missing alias preflight observable as
+    // a false success.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    write_cache_entry(&home, alias, now, Some(10.0), Some(now as i64 + 3600));
+
+    let output = run(&home, &["--json", "warmup", alias]);
+
+    assert!(!output.status.success());
+    let report = parse_stdout_json(&output);
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("alias may only contain"),
+        "path traversal must be rejected before the existing fixture can be used: {report}"
+    );
+
+    let _ = fs::remove_dir_all(home);
+}
+
 // ── import: rotated-credential rescue ─────────────────────
 //
 // OpenAI rotates `refresh_token` on every use and answers a replay with

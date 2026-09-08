@@ -175,7 +175,7 @@ async fn launch_interactive(
         user_println(&crate::commands::profile::revival_hint_message(hint));
     }
 
-    ensure_codex_available()?;
+    let codex_command = ensure_codex_available()?;
 
     let codex_auth = auth::codex_auth_path()?;
     // Unique per-invocation backup name (PID + timestamp): prevents two
@@ -251,7 +251,7 @@ async fn launch_interactive(
         user_println(&format!("Launching codex with profile '{target_alias}'..."));
     }
 
-    let child_result = spawn_codex(&forwarded, None, json, None);
+    let child_result = spawn_codex(&codex_command, &forwarded, None, json, None);
 
     let mut child = match child_result {
         Ok(child) => child,
@@ -466,12 +466,13 @@ fn strip_c_pair(argv: &mut Vec<String>, value_matches: impl Fn(&str) -> bool) {
 }
 
 fn spawn_codex(
+    command: &std::path::Path,
     args: &[String],
     extra_env: Option<(String, String)>,
     json: bool,
     isolated_codex_home: Option<&std::path::Path>,
 ) -> std::io::Result<std::process::Child> {
-    let mut cmd = std::process::Command::new("codex");
+    let mut cmd = std::process::Command::new(command);
     cmd.args(args);
     if json {
         // `--json launch` is non-interactive: inherited stdin is often a pipe
@@ -581,18 +582,18 @@ fn join_codex_pipes(pipes: CodexPipes) -> CapturedCodexIo {
     }
 }
 
-/// Verify the `codex` binary is on PATH. Do not run it: `codex --version`
-/// writes PATH-alias helpers into `$CODEX_HOME/tmp`.
-fn ensure_codex_available() -> Result<()> {
-    if command_is_on_path("codex") {
-        return Ok(());
-    }
-    anyhow::bail!("codex not found in PATH. Install: npm install -g @openai/codex")
+/// Resolve the Codex command on PATH without running it: `codex --version`
+/// writes PATH-alias helpers into `$CODEX_HOME/tmp`. The concrete path is
+/// passed to the later spawn so preflight and execution use the same candidate.
+fn ensure_codex_available() -> Result<std::path::PathBuf> {
+    command_on_path("codex").ok_or_else(|| {
+        anyhow::anyhow!("codex not found in PATH. Install: npm install -g @openai/codex")
+    })
 }
 
-fn command_is_on_path(name: &str) -> bool {
+fn command_on_path(name: &str) -> Option<std::path::PathBuf> {
     let Some(paths) = std::env::var_os("PATH") else {
-        return false;
+        return None;
     };
     let candidates = if cfg!(windows) {
         vec![
@@ -606,12 +607,13 @@ fn command_is_on_path(name: &str) -> bool {
     };
     for dir in std::env::split_paths(&paths) {
         for file in &candidates {
-            if dir.join(file).is_file() {
-                return true;
+            let candidate = dir.join(file);
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
-    false
+    None
 }
 
 /// Codex's exit code, mapping a Unix signal death to `128 + signal`.
@@ -648,7 +650,7 @@ async fn launch_provider(
     json: bool,
     shutdown: Option<&mut ShutdownListener>,
 ) -> Result<TuiLaunchOutcome> {
-    ensure_codex_available()?;
+    let codex_command = ensure_codex_available()?;
 
     let mut owned_shutdown;
     let shutdown = match shutdown {
@@ -690,6 +692,7 @@ async fn launch_provider(
     }
 
     let mut child = match spawn_codex(
+        &codex_command,
         &codex_args,
         Some((env_name, env_value)),
         json,
@@ -770,11 +773,14 @@ fn restore_launch_auth(
     alias: &str,
 ) -> Result<()> {
     let _lock = profile::lock_live_auth().context("acquiring auth lock for restore")?;
-    match preserve_refreshed_launch_auth(codex_auth, alias) {
-        Ok(true) => user_println(&format!(
-            "Codex refreshed the credentials of profile '{alias}'; saved them before restoring."
-        )),
-        Ok(false) => {}
+    let refreshed_live_preserved = match preserve_refreshed_launch_auth(codex_auth, alias) {
+        Ok(true) => {
+            user_println(&format!(
+                "Codex refreshed the credentials of profile '{alias}'; saved them before restoring."
+            ));
+            true
+        }
+        Ok(false) => false,
         // An error here means the live file holds credentials newer than the
         // profile's that could not be stored: either they belong to another
         // account, or the write failed. Rolling back would overwrite — or with
@@ -805,6 +811,25 @@ fn restore_launch_auth(
                     codex_auth.display()
                 )
             });
+        }
+    };
+    if had_original && refreshed_live_preserved {
+        let live = auth::read_auth(codex_auth).with_context(|| {
+            format!(
+                "reading live auth.json {} before deciding whether to restore backup",
+                codex_auth.display()
+            )
+        })?;
+        let original = auth::read_auth(backup).with_context(|| {
+            format!(
+                "reading launch auth backup {} before deciding whether to restore it",
+                backup.display()
+            )
+        })?;
+        if ensure_same_account(alias, &live, &original).is_ok() {
+            std::fs::remove_file(backup)
+                .with_context(|| format!("removing launch auth backup {}", backup.display()))?;
+            return Ok(());
         }
     }
     if had_original {
@@ -923,6 +948,8 @@ mod tests {
     };
     // Only the permission assertions call this, and those are unix-only, so an
     // unconditional import is dead on Windows and fails `-D warnings` there.
+    #[cfg(windows)]
+    use super::spawn_codex;
     #[cfg(unix)]
     use super::{CodexPipes, backup_launch_auth, terminate_child};
 
@@ -1039,6 +1066,38 @@ mod tests {
             err.contains("codex not found in PATH"),
             "unexpected error: {err}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_cmd_found_by_preflight_is_used_for_spawn() {
+        let _lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("codex.cmd"), "@echo off\r\nexit /b 0\r\n").unwrap();
+
+        let previous = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", dir.path());
+        }
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("PATH", value),
+                        None => std::env::remove_var("PATH"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(previous);
+
+        let command = ensure_codex_available().expect("codex.cmd must satisfy the PATH preflight");
+        let mut child = spawn_codex(&command, &[], None, true, None)
+            .expect("the command accepted by preflight must also be spawnable");
+        assert!(child.wait().unwrap().success());
     }
 
     #[test]
@@ -1532,6 +1591,26 @@ mod tests {
             "the original live credentials must still be restored"
         );
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn audit_same_account_restore_keeps_rotated_live_credentials() {
+        let home = TestAppHome::new();
+        let old = auth_value("a", "refresh-old", "2026-07-01T00:00:00Z");
+        let (profile_path, codex_auth, backup) = staged_launch(&home, &old);
+        crate::auth::write_auth(&backup, &old).unwrap();
+
+        let new = auth_value("a", "refresh-new", "2026-07-20T10:00:00Z");
+        crate::auth::write_auth(&codex_auth, &new).unwrap();
+
+        restore_launch_auth(&codex_auth, &backup, true, "work").unwrap();
+
+        assert_eq!(read_json(&profile_path), new);
+        assert_eq!(
+            read_json(&codex_auth),
+            new,
+            "same-account restore must keep rotated credentials live"
+        );
     }
 
     #[test]
