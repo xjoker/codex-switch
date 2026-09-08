@@ -592,9 +592,7 @@ fn ensure_codex_available() -> Result<std::path::PathBuf> {
 }
 
 fn command_on_path(name: &str) -> Option<std::path::PathBuf> {
-    let Some(paths) = std::env::var_os("PATH") else {
-        return None;
-    };
+    let paths = std::env::var_os("PATH")?;
     let candidates = if cfg!(windows) {
         vec![
             format!("{name}.exe"),

@@ -502,8 +502,8 @@ async fn rotated_refresh_token_is_persisted_even_when_usage_fails_afterwards() {
     server.shutdown();
 }
 
-/// The usage path owns proactive rotation for the daemon, and a later 429
-/// must not delay persisting the only valid replacement refresh token.
+/// The usage path owns proactive rotation for the background refresh pass, and
+/// a later 429 must not delay persisting the only valid replacement token.
 #[tokio::test]
 async fn thirty_minute_rotation_is_persisted_before_usage_rate_limit_return() {
     let _lock = ENV_LOCK.lock().await;
@@ -928,9 +928,9 @@ fn opportunistic_server_replies() -> Vec<(String, Reply)> {
 }
 
 /// D7: opportunistic refresh spends the same single-use rotation as any other
-/// refresh, and the daemon runs it on a timer. A write that fails there is a
-/// silently bricked account with no trace the user can act on, so the failure
-/// has to reach the caller instead of dying in a log line.
+/// refresh. A write that fails in this background pass is a silently bricked
+/// account with no trace the user can act on, so the failure has to reach the
+/// caller instead of dying in a log line.
 #[tokio::test]
 async fn opportunistic_refresh_reports_the_profile_whose_token_could_not_be_saved() {
     let _lock = ENV_LOCK.lock().await;
@@ -1245,9 +1245,9 @@ async fn import_validation_hands_back_rotated_tokens_when_usage_fails() {
     server.shutdown();
 }
 
-/// D9: the same profile is refreshed concurrently — the daemon timer and a CLI
-/// `list` both read RT1 and both present it. The auth server hands the rotation
-/// to one of them and answers the other `refresh_token_reused`. That loser is
+/// D9: the same profile is refreshed concurrently — a background refresh pass
+/// and a CLI `list` both read RT1 and both present it. The auth server hands the
+/// rotation to one of them and answers the other `refresh_token_reused`. That loser is
 /// looking at a perfectly healthy account whose live credentials are already on
 /// disk, so concluding "re-login required" costs the user a browser round trip
 /// for nothing. A rejection must be re-checked against the profile before it is
@@ -1363,8 +1363,8 @@ async fn refresh_rejected_with_an_unchanged_profile_still_requires_a_new_login()
 /// reported and the round trips never stop. A bounded false alarm is visible
 /// and recoverable; a livelock is neither. Reaching this state also needs three
 /// rotations to land inside one call — two peers racing the same profile while
-/// a third rotation slips in between — which the CLI and daemon timings make
-/// vanishingly rare.
+/// a third rotation slips in between — which the CLI and background refresh
+/// timings make vanishingly rare.
 ///
 /// So: do not "fix" this by widening the retry budget, and do not read the
 /// assertion below as "reporting a healthy account as dead is correct". If the
@@ -1564,7 +1564,7 @@ async fn an_unnamed_client_error_is_still_re_presented_on_the_next_invocation() 
 /// The recorded verdict belongs to a *credential*, not to an alias. Signing in
 /// again replaces the refresh token, and that alone has to clear the record —
 /// binding it to the alias would need every write path (login, import, live
-/// re-sync, daemon) to remember to clear it, and the one that forgets leaves
+/// re-sync) to remember to clear it, and the one that forgets leaves
 /// the user staring at "re-login required" after having just logged in.
 #[tokio::test]
 async fn signing_in_again_clears_the_recorded_verdict() {
@@ -1744,19 +1744,18 @@ async fn profile_with_a_recorded_verdict(alias: &'static str) -> (MockServer, Fi
     (server, fx, calls)
 }
 
-/// The daemon polls on a timer and wants numbers that are not stale. It cannot
-/// want a spent credential re-presented: the answer is known, nobody is
-/// watching, and at a few seconds per rejection this runs every polling
-/// interval for as long as the daemon is up.
+/// An unattended refresh pass wants numbers that are not stale. It cannot
+/// re-present a spent credential: the answer is known, nobody is watching, and
+/// repeated rejections would waste every later pass.
 #[tokio::test]
 async fn an_unattended_refresh_does_not_re_present_a_rejected_credential() {
     let _lock = ENV_LOCK.lock().await;
-    let (server, fx, after_first) = profile_with_a_recorded_verdict("daemon_dead").await;
+    let (server, fx, after_first) = profile_with_a_recorded_verdict("recorded_verdict").await;
 
     let err = codex_switch::usage::fetch_usage_retried_unattended(
-        "daemon_dead",
+        "recorded_verdict",
         &fx.profile_path,
-        "daemon_dead",
+        "recorded_verdict",
     )
     .await
     .expect_err("the account is still unusable");
@@ -1797,9 +1796,9 @@ async fn an_explicit_force_still_re_presents_a_rejected_credential() {
 }
 
 /// The other half of the same split, and the half with no user watching it:
-/// an unattended refresh still has to ignore the usage TTL. The daemon decides
-/// whether to switch accounts on these numbers, so serving it a cached figure
-/// would have it act on quota that may be hours old.
+/// an unattended refresh still has to ignore the usage TTL. The background
+/// refresh pass needs current numbers, so serving it a cached figure could leave
+/// the next CLI action using quota that may be hours old.
 #[tokio::test]
 async fn an_unattended_refresh_still_ignores_a_fresh_usage_cache() {
     let _lock = ENV_LOCK.lock().await;
@@ -1870,7 +1869,7 @@ async fn usage_429_returns_immediately_and_cools_down_the_account() {
         ),
     )
     .await
-    .expect("HTTP 429 must be returned to the scheduler instead of sleeping")
+    .expect("HTTP 429 must be returned to the refresh caller instead of sleeping")
     .expect_err("the first response is rate limited");
     assert!(first.summary.contains("429"), "{}", first.summary);
     let calls_after_first = server.usage_calls().len();
@@ -1885,7 +1884,7 @@ async fn usage_429_returns_immediately_and_cools_down_the_account() {
     assert_eq!(
         server.usage_calls().len(),
         calls_after_first,
-        "a later daemon pass must not contact an account still cooling down"
+        "a later background refresh pass must not contact an account still cooling down"
     );
 
     codex_switch::usage::fetch_usage_retried_force(

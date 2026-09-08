@@ -110,7 +110,10 @@ enum SwitchCompletion {
         current: String,
         last_used_error: Option<String>,
     },
-    Failed { alias: String, error: String },
+    Failed {
+        alias: String,
+        error: String,
+    },
 }
 
 fn wrap_account_detail_line(line: String) -> Vec<String> {
@@ -280,16 +283,8 @@ pub struct App {
     /// invalidated by an explicit refresh must not replace newer data.
     model_requests: HashMap<String, u64>,
     model_next_id: u64,
-    pub pending_models: tokio::sync::mpsc::Receiver<(
-        String,
-        u64,
-        Result<Vec<ModelEntry>, String>,
-    )>,
-    pub model_sender: tokio::sync::mpsc::Sender<(
-        String,
-        u64,
-        Result<Vec<ModelEntry>, String>,
-    )>,
+    pub pending_models: tokio::sync::mpsc::Receiver<(String, u64, Result<Vec<ModelEntry>, String>)>,
+    pub model_sender: tokio::sync::mpsc::Sender<(String, u64, Result<Vec<ModelEntry>, String>)>,
     pending_switches: tokio::sync::mpsc::Receiver<SwitchCompletion>,
     switch_sender: tokio::sync::mpsc::Sender<SwitchCompletion>,
     switching_alias: Option<String>,
@@ -376,9 +371,7 @@ impl App {
     pub fn ensure_models_loaded(&mut self, alias: &str) {
         if matches!(
             self.model_cache.get(alias),
-            Some(ModelStatus::Loaded(_))
-                | Some(ModelStatus::Loading)
-                | Some(ModelStatus::Error(_))
+            Some(ModelStatus::Loaded(_)) | Some(ModelStatus::Loading) | Some(ModelStatus::Error(_))
         ) {
             return;
         }
@@ -858,9 +851,7 @@ impl App {
                     self.clear_marks();
                 }
             }
-            KeyCode::Down | KeyCode::Char('j')
-                if self.selected + 1 < self.view_indices.len() =>
-            {
+            KeyCode::Down | KeyCode::Char('j') if self.selected + 1 < self.view_indices.len() => {
                 self.selected += 1;
             }
             KeyCode::Up | KeyCode::Char('k') if self.selected > 0 => {
@@ -1986,7 +1977,11 @@ impl App {
                 current,
                 last_used_error,
             } => {
-                let current = if current.is_empty() { alias.clone() } else { current };
+                let current = if current.is_empty() {
+                    alias.clone()
+                } else {
+                    current
+                };
                 for account in &mut self.accounts {
                     account.is_current = account.alias == current;
                 }
@@ -2715,8 +2710,8 @@ async fn run_app(
                         KeyCode::BackTab => app.cycle_tab(false),
                         _ => match app.active_tab {
                             Tab::Accounts => {
-                                if let Some(alias) = app.handle_accounts_key(code) {
-                                    if let Some(signal) = perform_launch(
+                                if let Some(alias) = app.handle_accounts_key(code)
+                                    && let Some(signal) = perform_launch(
                                         terminal,
                                         &mut app,
                                         alias,
@@ -2726,10 +2721,9 @@ async fn run_app(
                                         shutdown,
                                     )
                                     .await
-                                    {
-                                        wait_for_switch_before_exit(&mut app).await;
-                                        return Ok(Some(signal));
-                                    }
+                                {
+                                    wait_for_switch_before_exit(&mut app).await;
+                                    return Ok(Some(signal));
                                 }
                             }
                             Tab::Providers => app.handle_provider_list_key(code),
@@ -3900,9 +3894,11 @@ mod tests {
         app.switching_alias = Some("account".into());
 
         assert!(app.handle_accounts_key(KeyCode::Char('o')).is_none());
-        assert!(app.status_msg.as_deref().is_some_and(|message| {
-            message.to_ascii_lowercase().contains("switch")
-        }));
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|message| { message.to_ascii_lowercase().contains("switch") })
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3971,8 +3967,7 @@ mod tests {
         });
         app.view_indices.push(0);
         app.auto_refresh_enabled = true;
-        app.next_auto_refresh =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        app.next_auto_refresh = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
         // Keep the refresh task from making a network request if the old
         // implementation reaches refresh_all after waiting on the lock.
         app.usage_limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
@@ -4002,7 +3997,10 @@ mod tests {
             std::panic::resume_unwind(payload);
         }
 
-        assert!(switch_was_started, "the switch must be in flight during refresh");
+        assert!(
+            switch_was_started,
+            "the switch must be in flight during refresh"
+        );
         assert!(
             returned_before_lock_release,
             "auto-refresh must return while the account switch still owns the profile lock"

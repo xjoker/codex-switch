@@ -1,24 +1,30 @@
-#![cfg(unix)]
-
 //! End-to-end argv contract for `codex-switch launch -- …`.
 //!
 //! A fake `codex` on PATH records the exact argument vector it received, so
 //! these tests prove the composed command rather than only the clap parse.
 
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
-use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+};
 use serde_json::Value;
+use tokio::runtime::{Builder, Runtime};
+use tokio::sync::oneshot;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -67,16 +73,7 @@ fn write_auth(path: &Path, email: &str, account_id: &str) {
     fs::write(path, serde_json::to_string_pretty(&auth).unwrap()).unwrap();
 }
 
-fn install_fake_codex(home: &Path) -> (PathBuf, PathBuf) {
-    let bin_dir = home.join("fake-bin");
-    fs::create_dir_all(&bin_dir).unwrap();
-    let log = home.join("fake-codex-log.json");
-    fs::write(&log, "[]").unwrap();
-    let script = bin_dir.join("codex");
-    fs::write(
-        &script,
-        r#"#!/usr/bin/env python3
-import json, os, sys
+const FAKE_CODEX_PY: &str = r#"import json, os, sys
 path = os.environ["CS_FAKE_CODEX_LOG"]
 try:
     data = json.loads(open(path, encoding="utf-8").read())
@@ -94,12 +91,49 @@ else:
     size = int(os.environ.get("CS_FAKE_CODEX_STDOUT_BYTES", "0"))
     sys.stdout.write("x" * size if size else "codex-ok\n")
 sys.exit(0)
-"#,
-    )
-    .unwrap();
-    let mut perms = fs::metadata(&script).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&script, perms).unwrap();
+"#;
+
+const ARGV_EDGE_CASE: &str = "review with spaces 世界 & echo should-not-run";
+
+#[cfg(windows)]
+fn locate_python() -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        for name in ["python.exe", "python3.exe", "py.exe"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    panic!("Windows launch tests require an existing Python executable on PATH");
+}
+
+fn install_fake_codex(home: &Path) -> (PathBuf, PathBuf) {
+    let bin_dir = home.join("fake-bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let log = home.join("fake-codex-log.json");
+    fs::write(&log, "[]").unwrap();
+    #[cfg(unix)]
+    {
+        let script = bin_dir.join("codex");
+        fs::write(&script, format!("#!/usr/bin/env python3\n{FAKE_CODEX_PY}")).unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let script = bin_dir.join("fake_codex.py");
+        fs::write(&script, FAKE_CODEX_PY).unwrap();
+        let python = locate_python();
+        let python = python.to_string_lossy().replace('"', "\"\"");
+        fs::write(
+            bin_dir.join("codex.cmd"),
+            format!("@echo off\r\n\"{python}\" \"%~dp0fake_codex.py\" %*\r\n"),
+        )
+        .unwrap();
+    }
     (bin_dir, log)
 }
 
@@ -126,6 +160,7 @@ fn last_non_version_argv(log: &Path) -> Vec<String> {
         .expect("fake codex must have been launched with real args")
 }
 
+#[cfg(unix)]
 fn last_non_version_pid(log: &Path) -> Option<u32> {
     let raw = fs::read_to_string(log).ok()?;
     let data: Vec<Value> = serde_json::from_str(&raw).ok()?;
@@ -149,7 +184,18 @@ fn command(home: &Path, fake_bin: &Path, log: &Path, args: &[&str]) -> Command {
     cmd.env("CODEX_HOME", home.join(".codex"));
     cmd.env("CODEX_SWITCH_HOME", home.join(".codex-switch"));
     cmd.env("CS_FAKE_CODEX_LOG", log);
+    #[cfg(unix)]
     cmd.env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()));
+    #[cfg(windows)]
+    {
+        let mut paths = vec![fake_bin.to_path_buf()];
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            let system_root = PathBuf::from(system_root);
+            paths.push(system_root.join("System32"));
+            paths.push(system_root);
+        }
+        cmd.env("PATH", std::env::join_paths(paths).unwrap());
+    }
     cmd.env_remove("HTTP_PROXY");
     cmd.env_remove("HTTPS_PROXY");
     cmd.env_remove("ALL_PROXY");
@@ -195,84 +241,74 @@ fn setup_provider(home: &Path) {
     setup_provider_at(home, "http://127.0.0.1:9/v1");
 }
 
+async fn provider_models_handler(State(count): State<Arc<AtomicUsize>>) -> Json<Value> {
+    count.fetch_add(1, Ordering::Relaxed);
+    Json(serde_json::json!({
+        "data": [{"id": "openai/gpt-5.3-codex", "context_length": 123456}],
+    }))
+}
+
+async fn provider_responses_handler(
+    State(count): State<Arc<AtomicUsize>>,
+    Json(_body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    count.fetch_add(1, Ordering::Relaxed);
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": {"type": "invalid_request_error", "message": "input required"},
+        })),
+    )
+}
+
+async fn provider_unexpected_handler(
+    State(count): State<Arc<AtomicUsize>>,
+) -> (StatusCode, Json<Value>) {
+    count.fetch_add(1, Ordering::Relaxed);
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "unexpected provider request"})),
+    )
+}
+
 struct RequestCounter {
     base_url: String,
     count: Arc<AtomicUsize>,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    _shutdown: oneshot::Sender<()>,
+    _rt: Runtime,
 }
 
 impl RequestCounter {
     fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let addr = listener.local_addr().unwrap();
         let count = Arc::new(AtomicUsize::new(0));
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_count = count.clone();
-        let thread_stop = stop.clone();
-        let thread = std::thread::spawn(move || {
-            while !thread_stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                        let mut request = Vec::with_capacity(4096);
-                        let mut chunk = [0_u8; 1024];
-                        while request.len() < 16 * 1024 {
-                            let n = stream.read(&mut chunk).unwrap_or(0);
-                            if n == 0 {
-                                break;
-                            }
-                            request.extend_from_slice(&chunk[..n]);
-                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                                break;
-                            }
-                        }
-                        thread_count.fetch_add(1, Ordering::Relaxed);
-                        let request = String::from_utf8_lossy(&request);
-                        let (status, body) = if request.starts_with("POST /v1/responses ") {
-                            (
-                                "400 Bad Request",
-                                r#"{"error":{"type":"invalid_request_error","message":"input required"}}"#,
-                            )
-                        } else {
-                            (
-                                "200 OK",
-                                r#"{"data":[{"id":"openai/gpt-5.3-codex","context_length":123456}]}"#,
-                            )
-                        };
-                        let response = format!(
-                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
+        let rt = Builder::new_multi_thread().enable_all().build().unwrap();
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/models", get(provider_models_handler))
+            .route("/v1/responses", post(provider_responses_handler))
+            .fallback(provider_unexpected_handler)
+            .with_state(count.clone());
+        let (shutdown, shutdown_rx) = oneshot::channel::<()>();
+        rt.spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
         });
         Self {
             base_url: format!("http://{addr}/v1"),
             count,
-            stop,
-            thread: Some(thread),
+            _shutdown: shutdown,
+            _rt: rt,
         }
     }
 
     fn requests(&self) -> usize {
         self.count.load(Ordering::Relaxed)
-    }
-}
-
-impl Drop for RequestCounter {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            thread.join().unwrap();
-        }
     }
 }
 
@@ -339,7 +375,14 @@ fn launch_chatgpt_puts_cs_model_after_exec() {
         &fake_bin,
         &log,
         &[
-            "launch", "work", "--model", "gpt-5.4", "--", "exec", "--json", "hi",
+            "launch",
+            "work",
+            "--model",
+            "gpt-5.4",
+            "--",
+            "exec",
+            "--json",
+            ARGV_EDGE_CASE,
         ],
     );
     assert!(
@@ -349,7 +392,7 @@ fn launch_chatgpt_puts_cs_model_after_exec() {
     );
     assert_eq!(
         last_non_version_argv(&log),
-        ["exec", "--model", "gpt-5.4", "--json", "hi"]
+        ["exec", "--model", "gpt-5.4", "--json", ARGV_EDGE_CASE]
     );
     let _ = fs::remove_dir_all(home);
 }
@@ -372,7 +415,7 @@ fn launch_provider_puts_c_overrides_after_exec_and_keeps_json() {
             "--json",
             "--color",
             "never",
-            "review this",
+            ARGV_EDGE_CASE,
         ],
     );
     assert!(
@@ -398,7 +441,7 @@ fn launch_provider_puts_c_overrides_after_exec_and_keeps_json() {
     let json_at = argv.iter().position(|a| a == "--json").expect("--json");
     assert_eq!(
         &argv[json_at..],
-        ["--json", "--color", "never", "review this"]
+        ["--json", "--color", "never", ARGV_EDGE_CASE]
     );
     assert!(
         !argv.iter().any(|a| a.contains("sk-test-passthrough")),
@@ -407,6 +450,7 @@ fn launch_provider_puts_c_overrides_after_exec_and_keeps_json() {
     let _ = fs::remove_dir_all(home);
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_provider_sigterm_reaps_codex_and_exits_143() {
     use std::os::unix::process::ExitStatusExt;

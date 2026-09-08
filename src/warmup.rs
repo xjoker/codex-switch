@@ -283,11 +283,11 @@ fn normalized_pool_name(value: &str) -> String {
 /// The cache key for one account's resolved warmup model set.
 ///
 /// The alias alone is not enough to name the entry: the resolved set bakes in
-/// the additional pools that existed when it was built. A process that outlives
-/// a pool change — the daemon with `auto_warmup`, which runs for days — would
-/// otherwise keep warming the old set, and a pool the account just gained would
-/// never get its quota window opened until someone restarted the daemon. That
-/// failure is silent: nothing errors, so nothing invalidates the entry either.
+/// the additional pools that existed when it was built. A long-lived TUI session
+/// can outlive a pool change; without this key it would keep warming the old
+/// set, and a pool the account just gained would never get its quota window
+/// opened until the cache was invalidated. That failure is silent: nothing
+/// errors, so nothing invalidates the entry either.
 ///
 /// Only the pools `select_warmup_models` acts on take part, and they are sorted,
 /// so an upstream reordering does not needlessly discard a good entry.
@@ -959,7 +959,8 @@ mod tests {
     }
 
     /// A changed pool set must produce a different key — that miss is the only
-    /// thing that re-resolves the model list for a long-running daemon.
+    /// thing that re-resolves the model list after a long-lived TUI session
+    /// observes a changed pool set.
     #[test]
     fn cache_key_changes_when_a_pool_is_added() {
         let before = warmup_cache_key("alice", &[]);
@@ -2048,8 +2049,8 @@ mod tests {
         //
         // The model list decides both the main-pool request and the additional
         // -pool ones, so it is one question with one answer. Asking twice costs
-        // an upstream round trip per warmup, and the daemon runs warmup on a
-        // timer across every profile when `auto_warmup` is on.
+        // an upstream round trip per warmup, and a long-lived TUI session may
+        // issue several manual warmups.
 
         /// Mock server that counts `/codex/models` requests. `/codex/responses`
         /// always succeeds, so nothing but the fetch count is under test.
@@ -2067,7 +2068,10 @@ mod tests {
                             (
                                 StatusCode::OK,
                                 Json(serde_json::json!({
-                                    "models": [{"slug": "gpt-5-mini", "supported_in_api": true}]
+                                    "models": [
+                                        {"slug": "gpt-5-mini", "supported_in_api": true},
+                                        {"slug": "gpt-5-spark", "supported_in_api": true}
+                                    ]
                                 })),
                             )
                         }
@@ -2232,10 +2236,10 @@ mod tests {
 
         /// The resolved set bakes in the additional pools that existed when it
         /// was cached, so keying the cache on the alias alone freezes it for the
-        /// life of the process. The CLI exits between warmups and never notices;
-        /// the daemon with `auto_warmup` runs for days, so an account that gains
-        /// a model quota pool would keep warming the old set — the new pool's
-        /// quota window silently never opens until someone restarts the daemon.
+        /// life of the process. The CLI drops this process-local cache between
+        /// invocations, but a long-lived TUI session could gain a model quota
+        /// pool and keep warming the old set — the new pool's quota window
+        /// would silently never open until that cache was invalidated.
         #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn a_pool_added_after_the_first_warmup_is_still_warmed() {
