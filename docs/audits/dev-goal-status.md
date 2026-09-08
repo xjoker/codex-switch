@@ -49,4 +49,6 @@ A40为一次HTTP fixture根因诊断，不计Review轮次；A42依建议最小�
 - 测试消融：[20260908-test-ablation.md](20260908-test-ablation.md)。
 - 分支可恢复归档：[20260908-branch-retention.md](20260908-branch-retention.md)。
 - 下一步：取得provider策略决定；如接受已文档化限制，核对最终dev提交并请求远端推送授权；如需恢复实现，在剩余8次Agent/4轮Review与原截止时间内执行有界任务，重新验证受影响集合。
-- Goal工具显示paused；用户明确继续后手动执行既定目标，原墙钟上限未延长。不得因本地检查通过而标记目标完整达成。
+- 2026-09-09 00:54读取Goal工具确认状态active；原墙钟上限未延长。不得因本地检查通过而标记目标完整达成。
+
+- 已进一步核对两个独有 cursor 补丁及五个 Dependabot 目标：向量过滤行为、thiserror/webbrowser 目标已存在；账号启动选择器及其余可选升级保留归档，不重复合入。
