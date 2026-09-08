@@ -276,8 +276,20 @@ pub struct App {
     /// Session-level per-alias model list cache (no TTL). Populated lazily
     /// for the selected account or when its account details are opened.
     pub model_cache: HashMap<String, ModelStatus>,
-    pub pending_models: tokio::sync::mpsc::Receiver<(String, Result<Vec<ModelEntry>, String>)>,
-    pub model_sender: tokio::sync::mpsc::Sender<(String, Result<Vec<ModelEntry>, String>)>,
+    /// Active model-list request ID per alias. Late responses from a request
+    /// invalidated by an explicit refresh must not replace newer data.
+    model_requests: HashMap<String, u64>,
+    model_next_id: u64,
+    pub pending_models: tokio::sync::mpsc::Receiver<(
+        String,
+        u64,
+        Result<Vec<ModelEntry>, String>,
+    )>,
+    pub model_sender: tokio::sync::mpsc::Sender<(
+        String,
+        u64,
+        Result<Vec<ModelEntry>, String>,
+    )>,
     pending_switches: tokio::sync::mpsc::Receiver<SwitchCompletion>,
     switch_sender: tokio::sync::mpsc::Sender<SwitchCompletion>,
     switching_alias: Option<String>,
@@ -348,6 +360,8 @@ impl App {
             last_list_click: None,
             hitmap: super::hitmap::HitMap::default(),
             model_cache: HashMap::new(),
+            model_requests: HashMap::new(),
+            model_next_id: 0,
             pending_models: model_rx,
             model_sender: model_tx,
             pending_switches: switch_rx,
@@ -374,6 +388,9 @@ impl App {
         };
         self.model_cache
             .insert(alias.to_string(), ModelStatus::Loading);
+        let request_id = self.model_next_id;
+        self.model_next_id = self.model_next_id.wrapping_add(1);
+        self.model_requests.insert(alias.to_string(), request_id);
         let alias_owned = alias.to_string();
         let tx = self.model_sender.clone();
         let limiter = self.usage_limiter.clone();
@@ -382,7 +399,7 @@ impl App {
             let result = crate::warmup::fetch_models_for_profile(&alias_owned, &path)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send((alias_owned, result)).await;
+            let _ = tx.send((alias_owned, request_id, result)).await;
         });
     }
 
@@ -403,7 +420,11 @@ impl App {
 
     pub fn poll_model_results(&mut self) {
         let mut refresh_open_account = false;
-        while let Ok((alias, result)) = self.pending_models.try_recv() {
+        while let Ok((alias, request_id, result)) = self.pending_models.try_recv() {
+            if self.model_requests.get(&alias).copied() != Some(request_id) {
+                continue;
+            }
+            self.model_requests.remove(&alias);
             refresh_open_account |= matches!(
                 self.menu.as_ref(),
                 Some(super::menu::MenuState::Account { info, .. }) if info.alias == alias
@@ -818,6 +839,11 @@ impl App {
             },
             _ => {}
         }
+    }
+
+    fn invalidate_model_request(&mut self, alias: &str) {
+        self.model_cache.remove(alias);
+        self.model_requests.remove(alias);
     }
 
     /// Handle synchronous Accounts-list keys. Returns a selected alias when
@@ -1392,7 +1418,7 @@ impl App {
         else {
             return;
         };
-        self.model_cache.remove(alias);
+        self.invalidate_model_request(alias);
         self.fetch_usage_for(idx, Refresh::Forced);
         self.ensure_models_loaded(alias);
         self.set_status(format!("Refreshing {alias}"), 3);
@@ -1787,7 +1813,7 @@ impl App {
         for &i in target_indices {
             let alias = self.accounts[i].alias.clone();
             if matches!(refresh, Refresh::Forced) {
-                self.model_cache.remove(&alias);
+                self.invalidate_model_request(&alias);
             }
             let entry = &mut self.accounts[i];
             if let UsageStatus::Error(_) = &entry.usage {
@@ -2461,7 +2487,7 @@ impl App {
             return;
         }
 
-        if self.loading_count() > 0 {
+        if self.loading_count() > 0 || self.switch_in_flight() {
             self.next_auto_refresh = Some(now + Duration::from_secs(5));
             return;
         }
@@ -3798,11 +3824,15 @@ mod tests {
         app.view_indices.push(0);
         app.model_cache
             .insert("account".into(), ModelStatus::Loading);
+        let request_id = app.model_next_id;
+        app.model_next_id = app.model_next_id.wrapping_add(1);
+        app.model_requests.insert("account".into(), request_id);
         app.open_account_menu();
 
         app.model_sender
             .try_send((
                 "account".into(),
+                request_id,
                 Ok(vec![ModelEntry {
                     slug: "official-slug".into(),
                     display_name: Some("Official Name".into()),
@@ -3923,6 +3953,164 @@ mod tests {
             app.model_cache.get("account"),
             Some(ModelStatus::Error(error)) if error == "previous model request failed"
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_refresh_defers_until_an_account_switch_finishes() {
+        let _home = EnvHome::new();
+        let path = crate::profile::profile_auth_path("account").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices.push(0);
+        app.auto_refresh_enabled = true;
+        app.next_auto_refresh =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        // Keep the refresh task from making a network request if the old
+        // implementation reaches refresh_all after waiting on the lock.
+        app.usage_limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+
+        let lease = crate::profile::lock_launch_session().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let released_by_releaser = released.clone();
+        let releaser = std::thread::spawn(move || {
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(2));
+            released_by_releaser.store(true, std::sync::atomic::Ordering::SeqCst);
+            drop(lease);
+        });
+        app.switch_selected();
+        let switch_was_started = app.switch_in_flight();
+        let started = std::time::Instant::now();
+        let refresh_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.run_due_auto_refresh();
+        }));
+        let returned_before_lock_release = !released.load(std::sync::atomic::Ordering::SeqCst);
+        let deferred_deadline = app.next_auto_refresh;
+
+        let _ = release_tx.send(());
+        releaser.join().unwrap();
+        app.wait_for_switch_completion().await;
+        if let Err(payload) = refresh_result {
+            std::panic::resume_unwind(payload);
+        }
+
+        assert!(switch_was_started, "the switch must be in flight during refresh");
+        assert!(
+            returned_before_lock_release,
+            "auto-refresh must return while the account switch still owns the profile lock"
+        );
+        let deferred_deadline = deferred_deadline.expect("a due refresh must be deferred");
+        assert!(
+            deferred_deadline.saturating_duration_since(started)
+                <= std::time::Duration::from_secs(10),
+            "switch deferral must use the short retry window instead of the normal interval"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_refresh_ignores_late_results_and_retries_after_stale_error() {
+        let _home = EnvHome::new();
+        let path = crate::profile::profile_auth_path("account").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices.push(0);
+        // Any background fetch spawned by refresh/ensure must stay behind the
+        // limiter; all model responses below come from the injectable queue.
+        app.usage_limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        app.ensure_models_loaded("account");
+        let old_request_id = *app
+            .model_requests
+            .get("account")
+            .expect("the initial model request must be tracked");
+
+        app.refresh_one("account");
+        let new_request_id = *app
+            .model_requests
+            .get("account")
+            .expect("a forced refresh must start a replacement model request");
+        assert_ne!(old_request_id, new_request_id);
+        app.model_sender
+            .try_send((
+                "account".into(),
+                new_request_id,
+                Ok(vec![ModelEntry {
+                    slug: "fresh-model".into(),
+                    ..ModelEntry::default()
+                }]),
+            ))
+            .unwrap();
+        app.poll_model_results();
+        app.model_sender
+            .try_send((
+                "account".into(),
+                old_request_id,
+                Ok(vec![ModelEntry {
+                    slug: "stale-model".into(),
+                    ..ModelEntry::default()
+                }]),
+            ))
+            .unwrap();
+        app.poll_model_results();
+        assert!(matches!(
+            app.model_cache.get("account"),
+            Some(ModelStatus::Loaded(models)) if models[0].slug == "fresh-model"
+        ));
+
+        app.model_cache.insert(
+            "account".into(),
+            ModelStatus::Error("stale profile response".into()),
+        );
+        // This mirrors the successful relogin path: reload account metadata,
+        // then force-refresh before asking the detail panel for models again.
+        app.load_profiles();
+        app.refresh(Refresh::Forced);
+        app.ensure_models_loaded("account");
+        let relogin_request_id = *app
+            .model_requests
+            .get("account")
+            .expect("the relogin refresh must start a new model request");
+        assert_ne!(new_request_id, relogin_request_id);
+        app.model_sender
+            .try_send((
+                "account".into(),
+                relogin_request_id,
+                Ok(vec![ModelEntry {
+                    slug: "relogin-model".into(),
+                    ..ModelEntry::default()
+                }]),
+            ))
+            .unwrap();
+        app.model_sender
+            .try_send((
+                "account".into(),
+                new_request_id,
+                Err("stale profile response".into()),
+            ))
+            .unwrap();
+        app.poll_model_results();
+        assert!(
+            matches!(
+                app.model_cache.get("account"),
+                Some(ModelStatus::Loaded(models)) if models[0].slug == "relogin-model"
+            ),
+            "a relogin force refresh must replace the old model error"
+        );
     }
 
     #[test]
