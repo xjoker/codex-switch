@@ -4,6 +4,7 @@
 //! these tests prove the composed command rather than only the clap parse.
 
 use std::fs;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -12,9 +13,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
-#[cfg(unix)]
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
@@ -79,8 +78,47 @@ try:
     data = json.loads(open(path, encoding="utf-8").read())
 except Exception:
     data = []
-data.append({"argv": sys.argv[1:], "pid": os.getpid()})
+data.append({
+    "argv": sys.argv[1:],
+    "pid": os.getpid(),
+    "codex_home": os.environ.get("CODEX_HOME"),
+})
 open(path, "w", encoding="utf-8").write(json.dumps(data))
+
+# A real Codex invocation creates its session index and rollout under the
+# CODEX_HOME it received.  The fixture is opt-in so the older argv-only tests
+# keep exercising the same small fake.
+session_id = os.environ.get("CS_FAKE_CODEX_SESSION_ID")
+if session_id and sys.argv[1:] != ["--version"]:
+    codex_home = os.environ["CODEX_HOME"]
+    session_name = os.environ.get("CS_FAKE_CODEX_SESSION_NAME", session_id)
+    provider = os.environ.get("CS_FAKE_CODEX_SESSION_PROVIDER", "openrouter")
+    model = os.environ.get("CS_FAKE_CODEX_SESSION_MODEL", "openai/gpt-5.3-codex")
+    updated_at = os.environ.get("CS_FAKE_CODEX_SESSION_UPDATED_AT", "2026-09-09T00:00:00Z")
+    day = os.path.join(codex_home, "sessions", "2026", "09", "09")
+    os.makedirs(day, exist_ok=True)
+    rollout = os.path.join(day, "rollout-" + session_id + ".jsonl")
+    meta = {
+        "type": "session_meta",
+        "id": session_id,
+        "name": session_name,
+        "model_provider": provider,
+        "model": model,
+        "updated_at": updated_at,
+    }
+    with open(rollout, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(meta) + "\n")
+    index = os.path.join(codex_home, "session_index.jsonl")
+    with open(index, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps({
+            "id": session_id,
+            "name": session_name,
+            "thread_name": session_name,
+            "model_provider": provider,
+            "model": model,
+            "updated_at": updated_at,
+            "rollout_path": os.path.relpath(rollout, codex_home).replace(os.sep, "/"),
+        }) + "\n")
 if sys.argv[1:] == ["--version"]:
     sys.stdout.write("codex-cli 0.0.0-test\n")
 else:
@@ -152,6 +190,33 @@ fn recorded_argv(log: &Path) -> Vec<Vec<String>> {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+struct FakeLaunch {
+    argv: Vec<String>,
+    codex_home: PathBuf,
+}
+
+fn recorded_launches(log: &Path) -> Vec<FakeLaunch> {
+    let raw = fs::read_to_string(log).unwrap();
+    let data: Vec<Value> = serde_json::from_str(&raw).unwrap();
+    data.into_iter()
+        .filter_map(|entry| {
+            let argv: Vec<String> = entry["argv"]
+                .as_array()?
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            if argv.as_slice() == ["--version"] {
+                return None;
+            }
+            Some(FakeLaunch {
+                argv,
+                codex_home: PathBuf::from(entry["codex_home"].as_str().unwrap()),
+            })
+        })
+        .collect()
+}
+
 fn last_non_version_argv(log: &Path) -> Vec<String> {
     recorded_argv(log)
         .into_iter()
@@ -207,18 +272,46 @@ fn run(home: &Path, fake_bin: &Path, log: &Path, args: &[&str]) -> Output {
     command(home, fake_bin, log, args).output().unwrap()
 }
 
+fn run_env(
+    home: &Path,
+    fake_bin: &Path,
+    log: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
+    let mut cmd = command(home, fake_bin, log, args);
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    cmd.output().unwrap()
+}
+
+fn wait_for_launch_count(log: &Path, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while recorded_launches(log).len() < count {
+        assert!(
+            Instant::now() < deadline,
+            "fake codex did not start {count} times"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn setup_provider_at(home: &Path, base_url: &str) {
-    let dir = home.join(".codex-switch/providers/openrouter");
+    setup_provider_named_at(home, "openrouter", "openrouter", base_url);
+}
+
+fn setup_provider_named_at(home: &Path, alias: &str, provider_id: &str, base_url: &str) {
+    let dir = home.join(format!(".codex-switch/providers/{alias}"));
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("provider.toml"),
         format!(
-            r#"
-provider_id = "openrouter"
-name = "openrouter"
+            r#"provider_id = "{provider_id}"
+name = "{alias}"
 base_url = "{base_url}"
 allow_insecure_http = true
-env_key = "CODEX_SWITCH_OPENROUTER_KEY"
+env_key = "CODEX_SWITCH_{provider_id}_KEY"
 default_model = "openai/gpt-5.3-codex"
 wire_api = "responses"
 api_key = "sk-test-passthrough"
@@ -233,6 +326,52 @@ reasoning = "high"
 no_web_search = true
 "#
         ),
+    )
+    .unwrap();
+}
+
+fn write_session_fixture(
+    codex_home: &Path,
+    session_id: &str,
+    session_name: &str,
+    provider: &str,
+    model: &str,
+    updated_at: &str,
+) {
+    let day = codex_home.join("sessions/2026/09/09");
+    fs::create_dir_all(&day).unwrap();
+    let rollout = day.join(format!("rollout-{session_id}.jsonl"));
+    let meta = serde_json::json!({
+        "type": "session_meta",
+        "id": session_id,
+        "name": session_name,
+        "model_provider": provider,
+        "model": model,
+        "updated_at": updated_at,
+    });
+    fs::write(
+        &rollout,
+        format!("{}\n", serde_json::to_string(&meta).unwrap()),
+    )
+    .unwrap();
+    let index = codex_home.join("session_index.jsonl");
+    let mut stream = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(index)
+        .unwrap();
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({
+            "id": session_id,
+            "name": session_name,
+            "thread_name": session_name,
+            "model_provider": provider,
+            "model": model,
+            "updated_at": updated_at,
+            "rollout_path": format!("sessions/2026/09/09/rollout-{session_id}.jsonl"),
+        })
     )
     .unwrap();
 }
@@ -710,5 +849,522 @@ fn provider_sync_is_persisted_and_launch_stays_offline() {
         "a saved unsupported verdict must also be enforced offline"
     );
     assert_eq!(recorded_argv(&log).len(), codex_launches);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_launches_use_distinct_homes_per_run_and_provider() {
+    let home = temp_home("provider-resume-一致性");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    setup_provider_named_at(&home, "second", "second", "http://127.0.0.1:9/v1");
+
+    for (alias, id, provider) in [
+        ("openrouter", "first-run", "openrouter"),
+        ("openrouter", "second-run", "openrouter"),
+        ("second", "other-run", "second"),
+    ] {
+        let output = run_env(
+            &home,
+            &fake_bin,
+            &log,
+            &["launch", alias],
+            &[
+                ("CS_FAKE_CODEX_SESSION_ID", id),
+                ("CS_FAKE_CODEX_SESSION_PROVIDER", provider),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let launches = recorded_launches(&log);
+    assert_eq!(launches.len(), 3);
+    assert_ne!(launches[0].codex_home, launches[1].codex_home);
+    assert_ne!(launches[0].codex_home, launches[2].codex_home);
+    assert_ne!(launches[1].codex_home, launches[2].codex_home);
+    assert!(launches[0].codex_home.to_string_lossy().contains("一致性"));
+    assert_eq!(
+        launches[0].codex_home.parent(),
+        launches[1].codex_home.parent()
+    );
+    assert_ne!(
+        launches[0].codex_home.parent(),
+        launches[2].codex_home.parent()
+    );
+    assert_eq!(
+        launches[0]
+            .codex_home
+            .parent()
+            .and_then(|path| path.parent())
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str()),
+        Some("provider-runs")
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_resume_uses_named_session_and_latest_run_of_that_provider() {
+    let home = temp_home("provider-resume-index-一致性");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    setup_provider_named_at(&home, "second", "second", "http://127.0.0.1:9/v1");
+    write_session_fixture(
+        &home.join(".codex"),
+        "global-session",
+        "global session",
+        "openrouter",
+        "openai/gpt-5.3-codex",
+        "2026-09-09T23:59:59Z",
+    );
+
+    let first = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter"],
+        &[
+            ("CS_FAKE_CODEX_SESSION_ID", "session-唯一"),
+            ("CS_FAKE_CODEX_SESSION_NAME", "唯一会话"),
+            ("CS_FAKE_CODEX_SESSION_PROVIDER", "openrouter"),
+            ("CS_FAKE_CODEX_SESSION_UPDATED_AT", "2026-09-09T00:00:01Z"),
+        ],
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_home = recorded_launches(&log)[0].codex_home.clone();
+
+    let other = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "second"],
+        &[
+            ("CS_FAKE_CODEX_SESSION_ID", "other-session"),
+            ("CS_FAKE_CODEX_SESSION_NAME", "other session"),
+            ("CS_FAKE_CODEX_SESSION_PROVIDER", "second"),
+            ("CS_FAKE_CODEX_SESSION_UPDATED_AT", "2026-09-09T00:00:03Z"),
+        ],
+    );
+    assert!(
+        other.status.success(),
+        "{}",
+        String::from_utf8_lossy(&other.stderr)
+    );
+    let second_home = recorded_launches(&log)[1].codex_home.clone();
+
+    let latest = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter"],
+        &[
+            ("CS_FAKE_CODEX_SESSION_ID", "session-latest"),
+            ("CS_FAKE_CODEX_SESSION_NAME", "最近会话"),
+            ("CS_FAKE_CODEX_SESSION_PROVIDER", "openrouter"),
+            ("CS_FAKE_CODEX_SESSION_UPDATED_AT", "2026-09-09T00:00:02Z"),
+        ],
+    );
+    assert!(
+        latest.status.success(),
+        "{}",
+        String::from_utf8_lossy(&latest.stderr)
+    );
+    let latest_home = recorded_launches(&log)[2].codex_home.clone();
+
+    let named = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter", "resume", "唯一会话"],
+    );
+    assert!(
+        named.status.success(),
+        "{}",
+        String::from_utf8_lossy(&named.stderr)
+    );
+    let named_run = &recorded_launches(&log)[3];
+    assert_eq!(named_run.codex_home, first_home);
+    assert_eq!(named_run.argv.first().map(String::as_str), Some("resume"));
+    assert_eq!(
+        named_run.argv.last().map(String::as_str),
+        Some("session-唯一")
+    );
+
+    let last = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter", "resume", "--last"],
+    );
+    assert!(
+        last.status.success(),
+        "{}",
+        String::from_utf8_lossy(&last.stderr)
+    );
+    let last_run = &recorded_launches(&log)[4];
+    assert_eq!(last_run.codex_home, latest_home);
+    assert_ne!(last_run.codex_home, second_home);
+    assert!(!last_run.argv.contains(&"--last".to_string()));
+    assert_eq!(
+        last_run.argv.last().map(String::as_str),
+        Some("session-latest")
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_resume_skips_value_options_and_preserves_the_prompt() {
+    let home = temp_home("provider-resume-args");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let created = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter"],
+        &[
+            ("CS_FAKE_CODEX_SESSION_ID", "resume-args-session"),
+            ("CS_FAKE_CODEX_SESSION_NAME", "resume args"),
+            ("CS_FAKE_CODEX_SESSION_PROVIDER", "openrouter"),
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let resumed = run(
+        &home,
+        &fake_bin,
+        &log,
+        &[
+            "launch",
+            "openrouter",
+            "resume",
+            "-C",
+            "D:\\workspace\\project",
+            "--sandbox",
+            "workspace-write",
+            "-i",
+            "image.png",
+            "--remote",
+            "remote-name",
+            "resume-args-session",
+            "continue",
+            "this task",
+        ],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let argv = &recorded_launches(&log)[1].argv;
+    assert_eq!(argv.first().map(String::as_str), Some("resume"));
+    assert!(
+        argv.windows(2)
+            .any(|pair| { pair == ["-C", "D:\\workspace\\project"] })
+    );
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--sandbox", "workspace-write"])
+    );
+    assert!(argv.windows(2).any(|pair| pair == ["-i", "image.png"]));
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--remote", "remote-name"])
+    );
+    let session = argv
+        .iter()
+        .position(|arg| arg == "resume-args-session")
+        .expect("exact session id must be forwarded");
+    assert_eq!(
+        &argv[session..],
+        ["resume-args-session", "continue", "this task"]
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_resume_rejects_ambiguous_or_cross_provider_session_before_codex() {
+    let home = temp_home("provider-resume-errors");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    setup_provider_named_at(&home, "second", "second", "http://127.0.0.1:9/v1");
+
+    for (alias, id, name) in [
+        ("openrouter", "ambiguous-a", "same name"),
+        ("openrouter", "ambiguous-b", "same name"),
+        ("second", "foreign-id", "foreign session"),
+    ] {
+        let output = run_env(
+            &home,
+            &fake_bin,
+            &log,
+            &["launch", alias],
+            &[
+                ("CS_FAKE_CODEX_SESSION_ID", id),
+                ("CS_FAKE_CODEX_SESSION_NAME", name),
+                ("CS_FAKE_CODEX_SESSION_PROVIDER", alias),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let before = recorded_launches(&log).len();
+
+    let ambiguous = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter", "resume", "same name"],
+    );
+    assert!(!ambiguous.status.success());
+    assert_eq!(
+        recorded_launches(&log).len(),
+        before,
+        "ambiguous name must not start Codex"
+    );
+
+    let foreign = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter", "resume", "foreign-id"],
+    );
+    assert!(!foreign.status.success());
+    assert_eq!(
+        recorded_launches(&log).len(),
+        before,
+        "foreign provider id must not start Codex"
+    );
+
+    let bare = run(&home, &fake_bin, &log, &["launch", "resume", "--last"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&bare.stdout),
+        String::from_utf8_lossy(&bare.stderr)
+    )
+    .to_ascii_lowercase();
+    assert!(!bare.status.success());
+    assert_eq!(recorded_launches(&log).len(), before);
+    assert!(
+        combined.contains("provider") && combined.contains("alias"),
+        "{combined}"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_resume_history_follows_rename_but_not_remove_and_recreate() {
+    let home = temp_home("provider-resume-lifecycle");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let created = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter"],
+        &[
+            ("CS_FAKE_CODEX_SESSION_ID", "rename-history"),
+            ("CS_FAKE_CODEX_SESSION_NAME", "rename history"),
+            ("CS_FAKE_CODEX_SESSION_PROVIDER", "openrouter"),
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let original_home = recorded_launches(&log)[0].codex_home.clone();
+
+    let renamed = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["provider", "rename", "openrouter", "renamed"],
+    );
+    assert!(
+        renamed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&renamed.stderr)
+    );
+    let resumed = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "renamed", "resume", "rename-history"],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(recorded_launches(&log)[1].codex_home, original_home);
+
+    let removed = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["provider", "remove", "renamed", "--yes"],
+    );
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let before_rebuild = recorded_launches(&log).len();
+    let missing = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "renamed", "resume", "rename-history"],
+    );
+    assert!(!missing.status.success());
+    assert_eq!(recorded_launches(&log).len(), before_rebuild);
+
+    setup_provider_named_at(&home, "renamed", "renamed", "http://127.0.0.1:9/v1");
+    let rebuilt = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "renamed", "resume", "rename-history"],
+    );
+    assert!(!rebuilt.status.success());
+    assert_eq!(recorded_launches(&log).len(), before_rebuild);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_resume_requires_original_model_unless_explicitly_changed() {
+    let home = temp_home("provider-resume-model");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let created = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter"],
+        &[
+            ("CS_FAKE_CODEX_SESSION_ID", "model-history"),
+            ("CS_FAKE_CODEX_SESSION_MODEL", "openai/gpt-5.3-codex"),
+            ("CS_FAKE_CODEX_SESSION_PROVIDER", "openrouter"),
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let provider_path = home.join(".codex-switch/providers/openrouter/provider.toml");
+    let mut profile = fs::read_to_string(&provider_path).unwrap();
+    profile = profile.replace(
+        "default_model = \"openai/gpt-5.3-codex\"",
+        "default_model = \"deepseek/deepseek-r1-0528\"",
+    );
+    profile = profile.replace("[[models]]\nid = \"openai/gpt-5.3-codex\"\n\n", "");
+    fs::write(provider_path, profile).unwrap();
+
+    let before = recorded_launches(&log).len();
+    let missing = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter", "resume", "model-history"],
+    );
+    assert!(!missing.status.success());
+    assert_eq!(recorded_launches(&log).len(), before);
+
+    let changed = run(
+        &home,
+        &fake_bin,
+        &log,
+        &[
+            "launch",
+            "openrouter",
+            "--model",
+            "deepseek/deepseek-r1-0528",
+            "resume",
+            "model-history",
+        ],
+    );
+    assert!(
+        changed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    let argv = &recorded_launches(&log)[before].argv;
+    assert_eq!(argv.first().map(String::as_str), Some("resume"));
+    assert!(argv.iter().any(|arg| {
+        arg == "model=deepseek/deepseek-r1-0528" || arg == "model=\"deepseek/deepseek-r1-0528\""
+    }));
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_resume_serializes_same_run_but_allows_a_new_run() {
+    let home = temp_home("provider-resume-lock");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let created = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter"],
+        &[("CS_FAKE_CODEX_SESSION_ID", "locked-history")],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let mut running = command(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter", "resume", "locked-history"],
+    )
+    .env("CS_FAKE_CODEX_SLEEP", "2")
+    .spawn()
+    .unwrap();
+    wait_for_launch_count(&log, 2);
+
+    let started = Instant::now();
+    let duplicate = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter", "resume", "locked-history"],
+    );
+    let elapsed = started.elapsed();
+    assert!(!duplicate.status.success());
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "same-run resume waited {elapsed:?}"
+    );
+
+    let fresh = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+    assert!(
+        fresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let status = running.wait().unwrap();
+    assert!(status.success());
+    let launches = recorded_launches(&log);
+    assert_ne!(launches[1].codex_home, launches.last().unwrap().codex_home);
     let _ = fs::remove_dir_all(home);
 }

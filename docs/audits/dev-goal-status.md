@@ -3,7 +3,7 @@
 ## 范围与预算
 
 - 原窗口：2026-09-08 23:07:51 至 2026-09-09 05:07:51 +08:00；因断网中断，用户于 2026-09-09 07:30 明确重置全部限额。
-- 当前窗口：2026-09-09 07:30:23 至 13:30:23 +08:00；Agent 调用 0/50；Review 0/10；最多 4 个活跃 Agent（含主 Agent）；token 不限。
+- 当前窗口：2026-09-09 07:30:23 至 13:30:23 +08:00；Agent 调用 10/50；Review 2/10；最多 4 个活跃 Agent（含主 Agent）；token 不限。
 - 原窗口共使用 Agent 42/50、Review 6/10，作为历史审计记录保留，不计入当前窗口。
 - 普通实施 Luna max；独立审查 Sol high；测试、暂存和提交由主 Agent 统一执行。
 - 仅 dev 开发；master 不改名、不合并；禁止擅自发布正式 release。
@@ -16,10 +16,10 @@
 | Use保持响应、主列表u、凭据与并发边界 | 已实现并验证 |
 | 删除常驻daemon、自有调度、自动换号 | 已完成，保留一次性CLI及手动TUI |
 | 全项目审查阻断关闭 | R1/R2/R3原13项复审全部通过 |
-| 单元测试消融与Windows补全 | Windows700项有通过证据；Linux全量718通过 |
+| 单元测试消融与Windows补全 | 当前Windows候选全量721项通过；此前Linux全量718通过 |
 | 文档/Wiki/版本一致 | 仓库源文件已更新；候选20260909.1.0；线上Wiki待dev推送 |
-| provider会话恢复 | 策略待用户决定，未擅自修改或删除历史 |
-| 发布矩阵 | 本地可用检查通过；macOS/ARM64仍待CI |
+| provider会话恢复 | 稳定身份、跨运行恢复、并发隔离及旧历史迁移已实现；Windows 全量通过，待三平台 CI |
+| 发布矩阵 | Windows全量、Clippy与格式通过；新提交的Linux/macOS/Windows CI仍待运行 |
 | 分支收敛master/dev | 本地已仅两分支；22远端引用归档完成，远端裁剪待授权 |
 
 ## 本地检查点
@@ -45,11 +45,11 @@ A40为一次HTTP fixture根因诊断，不计Review轮次；A42依建议最小�
 
 ## 证据与恢复入口
 
-- 发布资格：[20260909-release-readiness.md](20260909-release-readiness.md)。当前裁决UNKNOWN，未标记全部发布条件完成。
+- 发布资格：[20260909-release-readiness.md](20260909-release-readiness.md)。当前裁决UNKNOWN；provider resume 新实现已进入待全量/CI验证状态，未标记全部发布条件完成。
 - 问题处置：[20260908-dev-assessment.md](20260908-dev-assessment.md)。
 - 测试消融：[20260908-test-ablation.md](20260908-test-ablation.md)。
 - 分支可恢复归档：[20260908-branch-retention.md](20260908-branch-retention.md)。
-- 下一步：取得provider策略决定；如接受已文档化限制，核对最终dev提交并请求远端推送授权；如需恢复实现，在剩余8次Agent/4轮Review与原截止时间内执行有界任务，重新验证受影响集合。
+- 下一步：完成本地全量检查并提交、推送 dev，等待同一提交的三平台 CI；dev tag 与远端分支裁剪仍分别等待明确授权。
 - 2026-09-09 00:54读取Goal工具确认状态active；原墙钟上限未延长。不得因本地检查通过而标记目标完整达成。
 
 - 已进一步核对两个独有 cursor 补丁及五个 Dependabot 目标：向量过滤行为、thiserror/webbrowser 目标已存在；账号启动选择器及其余可选升级保留归档，不重复合入。

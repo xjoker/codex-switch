@@ -21,12 +21,16 @@
 //! merged back on exit. `auth.json` is not swapped. Model and endpoint come
 //! from `-c`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use fs4::{FileExt, TryLockError};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -72,6 +76,10 @@ impl ProviderModel {
 pub struct ProviderProfile {
     #[serde(skip)]
     pub alias: String,
+    /// Stable identity for the provider's history. It deliberately survives
+    /// alias changes and is regenerated when an alias is recreated.
+    #[serde(default)]
+    pub identity_id: String,
     /// The `[model_providers.<id>]` key Codex sees.
     pub provider_id: String,
     /// Codex requires `model_providers.<id>.name`. Always equal to `alias`.
@@ -207,6 +215,22 @@ fn is_valid_env_key(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn new_identity_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let value = hex::encode(bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &value[0..8],
+        &value[8..12],
+        &value[12..16],
+        &value[16..20],
+        &value[20..32]
+    )
+}
+
 /// Pull legacy provider-level `model_reasoning_effort` / `web_search=disabled`
 /// out of `codex_config` when migrating a single-model file. Other overrides
 /// stay on the provider.
@@ -247,6 +271,7 @@ impl ProviderProfile {
             .map(|model| model.id.clone())
             .unwrap_or_default();
         Self {
+            identity_id: new_identity_id(),
             provider_id: sanitize_provider_id(&alias),
             name: alias.clone(),
             base_url: base_url.into(),
@@ -267,6 +292,9 @@ impl ProviderProfile {
     /// Fold a pre-multi-model file into `models` / `default_model`, and keep
     /// the Codex display name equal to the alias.
     pub fn normalize(&mut self) {
+        if self.identity_id.trim().is_empty() {
+            self.identity_id = new_identity_id();
+        }
         self.name = self.alias.clone();
         if self.models.is_empty() && !self.model.trim().is_empty() {
             let (reasoning, no_web_search, rest) =
@@ -292,6 +320,14 @@ impl ProviderProfile {
     /// it is written to disk.
     pub fn validate(&self) -> Result<()> {
         crate::profile::validate_alias(&self.alias)?;
+        if self.identity_id.trim().is_empty()
+            || !self
+                .identity_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            anyhow::bail!("provider identity id is invalid");
+        }
         if self.provider_id.is_empty()
             || !self
                 .provider_id
@@ -1714,12 +1750,31 @@ pub(crate) struct ProviderCodexHome {
     restored: bool,
 }
 
+pub(crate) trait ProviderHomeInput {
+    fn provider_home_identity(&self) -> (String, String);
+}
+
+impl ProviderHomeInput for &ProviderProfile {
+    fn provider_home_identity(&self) -> (String, String) {
+        (self.identity_id.clone(), self.alias.clone())
+    }
+}
+
+impl ProviderHomeInput for &str {
+    fn provider_home_identity(&self) -> (String, String) {
+        load(self)
+            .map(|profile| (profile.identity_id, profile.alias))
+            .unwrap_or_else(|_| ((*self).to_string(), (*self).to_string()))
+    }
+}
+
 impl ProviderCodexHome {
-    pub(crate) fn begin(alias: &str) -> Result<Self> {
+    pub(crate) fn begin<P: ProviderHomeInput>(provider: P) -> Result<Self> {
+        let (identity_id, alias) = provider.provider_home_identity();
         let user_home = auth::user_codex_home()?;
         let user_config_path = user_home.join("config.toml");
         let base_config = load_toml_if_present(&user_config_path)?;
-        let path = unique_run_dir(alias)?;
+        let path = unique_run_dir(&identity_id)?;
         ensure_private_dir(&path)?;
         for name in USER_PROMPT_LINKS {
             link_user_entry(&user_home.join(name), &path.join(name))?;
@@ -1729,12 +1784,63 @@ impl ProviderCodexHome {
             strip_provider_session_keys(&mut live);
             write_codex_config(&path.join("config.toml"), &live)?;
         }
+        write_run_meta(
+            &path,
+            &ProviderRunMeta {
+                provider_identity_id: identity_id,
+                alias,
+                model: None,
+                cwd: std::env::current_dir().ok(),
+                created_at: now_rfc3339(),
+            },
+        )?;
         Ok(Self {
             path,
             user_config_path,
             base_config,
             restored: false,
         })
+    }
+
+    pub(crate) fn open_existing(profile: &ProviderProfile, path: &Path) -> Result<Self> {
+        let identity_root = auth::app_home()?
+            .join("provider-runs")
+            .join(&profile.identity_id);
+        if !path.starts_with(&identity_root) || !path.is_dir() {
+            anyhow::bail!(
+                "provider session run {} is not part of provider '{}'",
+                path.display(),
+                profile.alias
+            );
+        }
+        let user_home = auth::user_codex_home()?;
+        let user_config_path = user_home.join("config.toml");
+        let _config_lock = crate::profile::lock_codex_config_merge()?;
+        let base_config = load_toml_if_present(&user_config_path)?;
+        refresh_existing_run_config(&path.join("config.toml"), base_config.as_ref())?;
+        drop(_config_lock);
+        for name in USER_PROMPT_LINKS {
+            link_user_entry(&user_home.join(name), &path.join(name))?;
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            user_config_path,
+            base_config,
+            restored: false,
+        })
+    }
+
+    pub(crate) fn write_model(&self, profile: &ProviderProfile, model: &str) -> Result<()> {
+        write_run_meta(
+            &self.path,
+            &ProviderRunMeta {
+                provider_identity_id: profile.identity_id.clone(),
+                alias: profile.alias.clone(),
+                model: Some(model.to_string()),
+                cwd: std::env::current_dir().ok(),
+                created_at: now_rfc3339(),
+            },
+        )
     }
 
     pub(crate) fn restore(&mut self) -> Result<()> {
@@ -1786,6 +1892,503 @@ fn unique_run_dir(alias: &str) -> Result<PathBuf> {
         .join(format!("{}-{nanos}-{seq}", std::process::id())))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderRunMeta {
+    provider_identity_id: String,
+    alias: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cwd: Option<PathBuf>,
+    created_at: String,
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn write_run_meta(path: &Path, meta: &ProviderRunMeta) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(meta).context("serializing provider run metadata")?;
+    auth::atomic_write_private(&path.join("provider_run.json"), &bytes)
+        .with_context(|| format!("writing provider run metadata in {}", path.display()))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderSession {
+    pub(crate) session_id: String,
+    pub(crate) name: String,
+    pub(crate) updated_at: String,
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) interactive: bool,
+    pub(crate) model: Option<String>,
+    pub(crate) run_id: String,
+    pub(crate) run_path: PathBuf,
+    name_source: SessionMetadataSource,
+    updated_at_source: SessionMetadataSource,
+    cwd_source: SessionMetadataSource,
+    interactive_source: SessionMetadataSource,
+    model_source: SessionMetadataSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SessionMetadataSource {
+    Rollout,
+    Index,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderResumeFilter {
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) all: bool,
+    pub(crate) include_noninteractive: bool,
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ProviderSessionIndex {
+    sessions: Vec<ProviderSession>,
+}
+
+impl ProviderSessionIndex {
+    pub(crate) fn rebuild(root: &Path, identity_id: &str) -> Result<Self> {
+        let identity_root = root.join(identity_id);
+        if !identity_root.exists() {
+            return Ok(Self::default());
+        }
+        let mut sessions = Vec::new();
+        for entry in std::fs::read_dir(&identity_root)
+            .with_context(|| format!("reading provider history {}", identity_root.display()))?
+        {
+            let entry = entry.with_context(|| format!("reading {}", identity_root.display()))?;
+            let path = entry.path();
+            if !path.is_dir() || entry.file_name() == "tombstone.json" {
+                continue;
+            }
+            // The direct layout is the current one. Accepting a nested
+            // `runs/` directory also lets a future layout migrate without
+            // widening the provider identity search boundary.
+            if path.file_name().is_some_and(|name| name == "runs") {
+                for nested in std::fs::read_dir(&path)
+                    .with_context(|| format!("reading provider runs {}", path.display()))?
+                {
+                    let nested = nested
+                        .with_context(|| format!("reading provider runs {}", path.display()))?;
+                    if nested.path().is_dir() {
+                        collect_run_sessions(&nested.path(), identity_id, &mut sessions)?;
+                    }
+                }
+            } else {
+                collect_run_sessions(&path, identity_id, &mut sessions)?;
+            }
+        }
+        sessions.sort_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        Ok(Self { sessions })
+    }
+
+    pub(crate) fn find_by_session_id(&self, session_id: &str) -> Result<&ProviderSession> {
+        self.sessions
+            .iter()
+            .find(|session| session.session_id == session_id)
+            .ok_or_else(|| anyhow::anyhow!("provider session '{session_id}' was not found"))
+    }
+
+    pub(crate) fn find_unique_name(&self, name: &str) -> Result<&ProviderSession> {
+        let matches: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|session| session.name == name)
+            .collect();
+        match matches.as_slice() {
+            [session] => Ok(session),
+            [] => anyhow::bail!("provider session named '{name}' was not found"),
+            _ => anyhow::bail!("provider session name '{name}' is ambiguous"),
+        }
+    }
+
+    pub(crate) fn last(&self, filter: &ProviderResumeFilter) -> Result<&ProviderSession> {
+        self.filtered(filter)
+            .into_iter()
+            .max_by(|left, right| {
+                left.updated_at
+                    .cmp(&right.updated_at)
+                    .then_with(|| left.session_id.cmp(&right.session_id))
+            })
+            .ok_or_else(|| anyhow::anyhow!("no provider session matches the requested scope"))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
+
+    pub(crate) fn filtered<'a>(
+        &'a self,
+        filter: &ProviderResumeFilter,
+    ) -> Vec<&'a ProviderSession> {
+        self.sessions
+            .iter()
+            .filter(|session| {
+                filter.all
+                    || filter.cwd.as_ref().is_none_or(|cwd| {
+                        session
+                            .cwd
+                            .as_ref()
+                            .is_some_and(|session_cwd| same_path(session_cwd, cwd))
+                    })
+            })
+            .filter(|session| filter.include_noninteractive || session.interactive)
+            .collect()
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn collect_run_sessions(
+    run_path: &Path,
+    identity_id: &str,
+    sessions: &mut Vec<ProviderSession>,
+) -> Result<()> {
+    let run_id = run_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    if run_id.is_empty() {
+        return Ok(());
+    }
+    let run_meta = read_run_meta(run_path)?;
+    if let Some(meta) = &run_meta
+        && meta.provider_identity_id != identity_id
+    {
+        return Ok(());
+    }
+    let mut found = HashMap::<String, ProviderSession>::new();
+    if let Some(value) = read_json_if_present(&run_path.join("session_meta.json"))? {
+        merge_session_value(
+            &mut found,
+            &value,
+            identity_id,
+            run_path,
+            &run_id,
+            run_meta.as_ref(),
+            SessionMetadataSource::Index,
+        );
+    }
+    if let Some(value) = read_json_if_present(&run_path.join("session_index.json"))? {
+        if let Some(items) = value.get("sessions").and_then(serde_json::Value::as_array) {
+            for item in items {
+                merge_session_value(
+                    &mut found,
+                    item,
+                    identity_id,
+                    run_path,
+                    &run_id,
+                    run_meta.as_ref(),
+                    SessionMetadataSource::Index,
+                );
+            }
+        } else {
+            merge_session_value(
+                &mut found,
+                &value,
+                identity_id,
+                run_path,
+                &run_id,
+                run_meta.as_ref(),
+                SessionMetadataSource::Index,
+            );
+        }
+    }
+    let jsonl = run_path.join("session_index.jsonl");
+    if jsonl.exists() {
+        let file = File::open(&jsonl)
+            .with_context(|| format!("opening provider session index {}", jsonl.display()))?;
+        for line in BufReader::new(file).lines() {
+            let line = line
+                .with_context(|| format!("reading provider session index {}", jsonl.display()))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                merge_session_value(
+                    &mut found,
+                    &value,
+                    identity_id,
+                    run_path,
+                    &run_id,
+                    run_meta.as_ref(),
+                    SessionMetadataSource::Index,
+                );
+            }
+        }
+    }
+    scan_rollouts(
+        run_path,
+        &run_id,
+        identity_id,
+        run_meta.as_ref(),
+        &mut found,
+    )?;
+    sessions.extend(found.into_values());
+    Ok(())
+}
+
+fn read_run_meta(path: &Path) -> Result<Option<ProviderRunMeta>> {
+    let meta = path.join("provider_run.json");
+    if !meta.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&meta)
+        .with_context(|| format!("reading provider run metadata {}", meta.display()))?;
+    Ok(Some(serde_json::from_str(&raw).with_context(|| {
+        format!("parsing provider run metadata {}", meta.display())
+    })?))
+}
+
+fn read_json_if_present(path: &Path) -> Result<Option<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading provider session metadata {}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&raw).with_context(|| {
+        format!("parsing provider session metadata {}", path.display())
+    })?))
+}
+
+fn scan_rollouts(
+    run_path: &Path,
+    run_id: &str,
+    identity_id: &str,
+    run_meta: Option<&ProviderRunMeta>,
+    found: &mut HashMap<String, ProviderSession>,
+) -> Result<()> {
+    let sessions_root = run_path.join("sessions");
+    if !sessions_root.exists() {
+        return Ok(());
+    }
+    let mut pending = vec![sessions_root];
+    while let Some(path) = pending.pop() {
+        for entry in std::fs::read_dir(&path)
+            .with_context(|| format!("reading provider sessions {}", path.display()))?
+        {
+            let entry = entry.with_context(|| format!("reading {}", path.display()))?;
+            let child = entry.path();
+            if child.is_dir() {
+                pending.push(child);
+                continue;
+            }
+            if child
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+            {
+                let file = File::open(&child)
+                    .with_context(|| format!("opening provider rollout {}", child.display()))?;
+                if let Some(Ok(line)) = BufReader::new(file).lines().next()
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
+                {
+                    merge_session_value(
+                        found,
+                        &value,
+                        identity_id,
+                        run_path,
+                        run_id,
+                        run_meta,
+                        SessionMetadataSource::Rollout,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_session_value(
+    found: &mut HashMap<String, ProviderSession>,
+    value: &serde_json::Value,
+    identity_id: &str,
+    run_path: &Path,
+    run_id: &str,
+    run_meta: Option<&ProviderRunMeta>,
+    source: SessionMetadataSource,
+) {
+    let payload = value.get("payload").unwrap_or(value);
+    if let Some(value_identity) = json_string(payload, "provider_identity_id")
+        .or_else(|| json_string(value, "provider_identity_id"))
+        && value_identity != identity_id
+    {
+        return;
+    }
+    let session_id = json_string(payload, "session_id")
+        .or_else(|| json_string(payload, "id"))
+        .or_else(|| json_string(value, "session_id"))
+        .or_else(|| json_string(value, "id"));
+    let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+        return;
+    };
+    let name = json_string(payload, "name")
+        .or_else(|| json_string(payload, "thread_name"))
+        .or_else(|| json_string(value, "name"))
+        .or_else(|| json_string(value, "thread_name"))
+        .unwrap_or_default();
+    let updated_at = json_string(payload, "updated_at")
+        .or_else(|| json_string(payload, "timestamp"))
+        .or_else(|| json_string(value, "updated_at"))
+        .or_else(|| json_string(value, "timestamp"))
+        .unwrap_or_default();
+    let cwd = json_string(payload, "cwd")
+        .or_else(|| json_string(value, "cwd"))
+        .map(PathBuf::from)
+        .or_else(|| run_meta.and_then(|meta| meta.cwd.clone()));
+    let interactive = session_interactive(value, payload);
+    let model = json_string(payload, "model")
+        .or_else(|| json_string(value, "model"))
+        .or_else(|| run_meta.and_then(|meta| meta.model.clone()));
+    let item = found
+        .entry(session_id.clone())
+        .or_insert_with(|| ProviderSession {
+            session_id: session_id.clone(),
+            name: String::new(),
+            updated_at: String::new(),
+            cwd: None,
+            interactive: true,
+            model: None,
+            run_id: run_id.to_string(),
+            run_path: run_path.to_path_buf(),
+            name_source: SessionMetadataSource::Rollout,
+            updated_at_source: SessionMetadataSource::Rollout,
+            cwd_source: SessionMetadataSource::Rollout,
+            interactive_source: SessionMetadataSource::Rollout,
+            model_source: SessionMetadataSource::Rollout,
+        });
+    if !name.is_empty() && source >= item.name_source {
+        item.name = name;
+        item.name_source = source;
+    }
+    if !updated_at.is_empty() && source >= item.updated_at_source {
+        item.updated_at = updated_at;
+        item.updated_at_source = source;
+    }
+    if cwd.is_some() && source >= item.cwd_source {
+        item.cwd = cwd;
+        item.cwd_source = source;
+    }
+    if let Some(interactive) = interactive
+        && source >= item.interactive_source
+    {
+        item.interactive = interactive;
+        item.interactive_source = source;
+    }
+    if model.is_some() && source >= item.model_source {
+        item.model = model;
+        item.model_source = source;
+    }
+}
+
+fn session_interactive(value: &serde_json::Value, payload: &serde_json::Value) -> Option<bool> {
+    if let Some(interactive) = value
+        .get("interactive")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| {
+            payload
+                .get("interactive")
+                .and_then(serde_json::Value::as_bool)
+        })
+    {
+        return Some(interactive);
+    }
+    for source in [
+        payload.get("source"),
+        value.get("source"),
+        payload.get("thread_source"),
+        value.get("thread_source"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if source
+            .as_object()
+            .is_some_and(|object| object.contains_key("subagent"))
+        {
+            return Some(false);
+        }
+    }
+    let source = json_string(payload, "source")
+        .or_else(|| json_string(value, "source"))
+        .or_else(|| json_string(payload, "thread_source"))
+        .or_else(|| json_string(value, "thread_source"))?;
+    let normalized = source.to_ascii_lowercase();
+    if normalized == "exec"
+        || normalized == "noninteractive"
+        || normalized.contains("noninteractive")
+    {
+        Some(false)
+    } else {
+        // Unknown sources remain compatible with Codex's interactive picker.
+        Some(true)
+    }
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    match value.get(key) {
+        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        Some(serde_json::Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+pub(crate) struct ProviderRunLease {
+    file: File,
+}
+
+impl ProviderRunLease {
+    pub(crate) fn acquire(run_path: &Path) -> Result<Self> {
+        let lock_path = run_path.join("resume.lock");
+        ensure_private_dir(run_path)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening provider resume lock {}", lock_path.display()))?;
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(Self { file }),
+            Err(TryLockError::WouldBlock) => anyhow::bail!(
+                "provider session run {} is already being resumed",
+                run_path.display()
+            ),
+            Err(TryLockError::Error(err)) => Err(anyhow::Error::from(err))
+                .with_context(|| format!("locking provider resume run {}", run_path.display())),
+        }
+    }
+}
+
+impl Drop for ProviderRunLease {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 fn load_toml_if_present(path: &Path) -> Result<Option<toml::Value>> {
     if !path.exists() {
         return Ok(None);
@@ -1814,6 +2417,33 @@ fn strip_provider_session_keys(value: &mut toml::Value) {
     for key in PROVIDER_SESSION_KEYS {
         table.remove(key);
     }
+}
+
+fn refresh_existing_run_config(
+    run_config_path: &Path,
+    current_user_config: Option<&toml::Value>,
+) -> Result<()> {
+    let run_config = load_toml_if_present(run_config_path)?;
+    let mut refreshed = current_user_config
+        .cloned()
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+    strip_provider_session_keys(&mut refreshed);
+    if let Some(run_table) = run_config.and_then(|value| value.as_table().cloned())
+        && let Some(refreshed_table) = refreshed.as_table_mut()
+    {
+        for key in PROVIDER_SESSION_KEYS {
+            if let Some(value) = run_table.get(key) {
+                refreshed_table.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    if refreshed.as_table().is_some_and(toml::map::Map::is_empty)
+        && current_user_config.is_none()
+        && !run_config_path.exists()
+    {
+        return Ok(());
+    }
+    write_codex_config(run_config_path, &refreshed)
 }
 
 fn link_user_entry(src: &Path, dest: &Path) -> Result<()> {
@@ -2009,11 +2639,90 @@ pub fn load(alias: &str) -> Result<ProviderProfile> {
     let mut profile: ProviderProfile = toml::from_str(&raw)
         .with_context(|| format!("parsing provider profile {}", path.display()))?;
     profile.alias = alias.to_string();
+    let needs_identity = profile.identity_id.trim().is_empty();
+    let legacy_history = auth::app_home()?.join("provider-runs").join(alias);
+    if needs_identity || legacy_history.exists() {
+        let lock_path = path.with_file_name("identity-migration.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| {
+                format!(
+                    "opening provider identity migration lock {}",
+                    lock_path.display()
+                )
+            })?;
+        FileExt::lock(&lock).with_context(|| {
+            format!(
+                "locking provider identity migration {}",
+                lock_path.display()
+            )
+        })?;
+        let locked_raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("rereading provider profile {}", path.display()))?;
+        profile = toml::from_str(&locked_raw)
+            .with_context(|| format!("parsing provider profile {}", path.display()))?;
+        profile.alias = alias.to_string();
+        let locked_needs_identity = profile.identity_id.trim().is_empty();
+        profile.normalize();
+        profile
+            .validate()
+            .with_context(|| format!("validating provider profile {}", path.display()))?;
+        if locked_needs_identity {
+            let toml = toml::to_string_pretty(&profile)
+                .context("serializing migrated provider profile")?;
+            auth::atomic_write_private(&path, toml.as_bytes())
+                .with_context(|| format!("migrating provider profile {}", path.display()))?;
+        }
+        migrate_legacy_provider_history(alias, &profile.identity_id)?;
+        drop(lock);
+        return Ok(profile);
+    }
     profile.normalize();
     profile
         .validate()
         .with_context(|| format!("validating provider profile {}", path.display()))?;
     Ok(profile)
+}
+
+fn migrate_legacy_provider_history(alias: &str, identity_id: &str) -> Result<()> {
+    let root = auth::app_home()?.join("provider-runs");
+    let source = root.join(alias);
+    if !source.exists() {
+        return Ok(());
+    }
+    let destination = root.join(identity_id);
+    if !destination.exists() {
+        std::fs::rename(&source, &destination).with_context(|| {
+            format!(
+                "migrating provider history {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        return Ok(());
+    }
+    ensure_private_dir(&destination)?;
+    for entry in std::fs::read_dir(&source)
+        .with_context(|| format!("reading legacy provider history {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("reading {}", source.display()))?;
+        let target = destination.join(entry.file_name());
+        if target.exists() {
+            anyhow::bail!(
+                "refusing to overwrite provider history {} while migrating {}",
+                target.display(),
+                source.display()
+            );
+        }
+        std::fs::rename(entry.path(), &target)
+            .with_context(|| format!("migrating provider history entry to {}", target.display()))?;
+    }
+    std::fs::remove_dir(&source)
+        .with_context(|| format!("removing migrated provider history {}", source.display()))
 }
 
 /// Persist a provider profile (directory `0700`, file `0600`).
@@ -2032,15 +2741,32 @@ pub fn save(profile: &ProviderProfile) -> Result<()> {
         existing_provider_dir(&stored.alias)?;
     }
     ensure_private_dir(&dir)?;
-    let path = dir.join("provider.toml");
-    let toml = toml::to_string_pretty(&stored).context("serializing provider profile")?;
-    auth::atomic_write_private(&path, toml.as_bytes())
+    write_profile(&dir.join("provider.toml"), &stored)
+}
+
+fn write_profile(path: &Path, profile: &ProviderProfile) -> Result<()> {
+    let toml = toml::to_string_pretty(profile).context("serializing provider profile")?;
+    auth::atomic_write_private(path, toml.as_bytes())
         .with_context(|| format!("writing provider profile {}", path.display()))
 }
 
 /// Remove a provider profile and its stored key.
 pub fn remove(alias: &str) -> Result<()> {
+    let profile = load(alias)?;
     let dir = existing_provider_dir(alias)?;
+    let history_root = auth::app_home()?
+        .join("provider-runs")
+        .join(&profile.identity_id);
+    ensure_private_dir(&history_root)?;
+    let tombstone = serde_json::json!({
+        "provider_identity_id": profile.identity_id,
+        "alias": alias,
+        "removed_at": now_rfc3339(),
+    });
+    let tombstone =
+        serde_json::to_vec_pretty(&tombstone).context("serializing provider tombstone")?;
+    auth::atomic_write_private(&history_root.join("tombstone.json"), &tombstone)
+        .with_context(|| format!("writing provider tombstone {}", history_root.display()))?;
     std::fs::remove_dir_all(&dir)
         .with_context(|| format!("removing provider profile {}", dir.display()))
 }
@@ -2203,6 +2929,482 @@ mod tests {
             vec![ProviderModel::from_id("openai/gpt-5.3-codex")],
             "sk-secret-1234",
         )
+    }
+
+    #[test]
+    fn rebuilding_a_provider_with_the_same_alias_gets_a_distinct_stable_identity() {
+        let first = sample("same-name");
+        let second = sample("same-name");
+
+        assert!(!first.identity_id.is_empty());
+        assert_ne!(
+            first.identity_id, second.identity_id,
+            "the alias is reusable, so it cannot be the provider identity"
+        );
+
+        let retained = first.identity_id.clone();
+        let cloned = first.clone();
+        assert_eq!(cloned.identity_id, retained);
+    }
+
+    #[test]
+    fn saving_loading_and_renaming_preserve_the_provider_identity() {
+        let _home = TestHome::new();
+        let profile = sample("stable-name");
+        let identity_id = profile.identity_id.clone();
+        save(&profile).unwrap();
+
+        assert_eq!(load("stable-name").unwrap().identity_id, identity_id);
+        rename("stable-name", "renamed").unwrap();
+
+        let renamed = load("renamed").unwrap();
+        assert_eq!(renamed.identity_id, identity_id);
+        assert_eq!(renamed.alias, "renamed");
+    }
+
+    #[test]
+    fn provider_run_root_is_keyed_by_identity_and_not_alias() {
+        let _home = TestHome::new();
+        let profile = sample("display-name");
+        let expected_root = auth::app_home()
+            .unwrap()
+            .join("provider-runs")
+            .join(&profile.identity_id);
+
+        let mut run = ProviderCodexHome::begin(&profile).unwrap();
+        assert!(
+            run.path.starts_with(&expected_root),
+            "run path was {}",
+            run.path.display()
+        );
+        assert!(
+            !run.path.starts_with(
+                auth::app_home()
+                    .unwrap()
+                    .join("provider-runs")
+                    .join(&profile.alias)
+            )
+        );
+        run.restore().unwrap();
+    }
+
+    #[test]
+    fn ordinary_provider_launches_get_unique_run_directories() {
+        let _home = TestHome::new();
+        let profile = sample("parallel");
+        let mut first = ProviderCodexHome::begin(&profile).unwrap();
+        let mut second = ProviderCodexHome::begin(&profile).unwrap();
+
+        assert_ne!(first.path, second.path);
+        assert_eq!(first.path.parent(), second.path.parent());
+        first.restore().unwrap();
+        second.restore().unwrap();
+    }
+
+    #[test]
+    fn reopening_a_provider_run_refreshes_non_provider_config_from_the_latest_user_snapshot() {
+        let _home = TestHome::new();
+        let user_config = crate::auth::user_codex_home().unwrap().join("config.toml");
+        std::fs::write(
+            &user_config,
+            "model = \"chatgpt-old\"\n\n[mcp_servers.demo]\ncommand = \"old\"\n",
+        )
+        .unwrap();
+        let profile = sample("resume-config");
+        let mut first = ProviderCodexHome::begin(&profile).unwrap();
+        std::fs::write(
+            first.path.join("config.toml"),
+            "model = \"provider-model\"\nmodel_provider = \"resume-config\"\nmodel_catalog_json = \"preserve\"\n\n[mcp_servers.demo]\ncommand = \"stale\"\n",
+        )
+        .unwrap();
+        first.restored = true;
+
+        std::fs::write(
+            &user_config,
+            "model = \"chatgpt-new\"\n\n[mcp_servers.demo]\ncommand = \"new\"\n",
+        )
+        .unwrap();
+
+        let mut resumed = ProviderCodexHome::open_existing(&profile, &first.path).unwrap();
+        let refreshed = std::fs::read_to_string(first.path.join("config.toml")).unwrap();
+        assert!(refreshed.contains("command = \"new\""), "{refreshed}");
+        assert!(!refreshed.contains("command = \"stale\""), "{refreshed}");
+        assert!(
+            refreshed.contains("model = \"provider-model\""),
+            "{refreshed}"
+        );
+        assert!(
+            refreshed.contains("model_provider = \"resume-config\""),
+            "{refreshed}"
+        );
+        assert!(
+            refreshed.contains("model_catalog_json = \"preserve\""),
+            "{refreshed}"
+        );
+
+        resumed.restore().unwrap();
+        let restored = std::fs::read_to_string(user_config).unwrap();
+        assert!(restored.contains("command = \"new\""), "{restored}");
+        assert!(!restored.contains("command = \"stale\""), "{restored}");
+        assert!(!restored.contains("provider-model"), "{restored}");
+    }
+
+    fn write_session_fixture(
+        run: &Path,
+        provider_id: &str,
+        session_id: &str,
+        name: &str,
+        updated_at: &str,
+        cwd: &str,
+        interactive: bool,
+    ) {
+        std::fs::create_dir_all(run).unwrap();
+        std::fs::write(
+            run.join("session_meta.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "provider_identity_id": provider_id,
+                "session_id": session_id,
+                "name": name,
+                "updated_at": updated_at,
+                "cwd": cwd,
+                "interactive": interactive
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            run.join("session_index.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "provider_identity_id": provider_id,
+                "sessions": [{
+                    "id": session_id,
+                    "name": name,
+                    "updated_at": updated_at,
+                    "cwd": cwd,
+                    "interactive": interactive
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn provider_session_index_rebuilds_exact_and_unique_name_lookups_per_provider() {
+        let _home = TestHome::new();
+        let provider = sample("provider-a");
+        let other = sample("provider-b");
+        let root = auth::app_home().unwrap().join("provider-runs");
+
+        write_session_fixture(
+            &root.join(&provider.identity_id).join("run-a"),
+            &provider.identity_id,
+            "session-a",
+            "Alpha",
+            "2026-09-09T00:00:01Z",
+            "workspace-a",
+            true,
+        );
+        write_session_fixture(
+            &root.join(&provider.identity_id).join("run-b"),
+            &provider.identity_id,
+            "session-b",
+            "Beta",
+            "2026-09-09T00:00:02Z",
+            "workspace-b",
+            true,
+        );
+        write_session_fixture(
+            &root.join(&provider.identity_id).join("run-c"),
+            &provider.identity_id,
+            "session-c",
+            "Alpha",
+            "2026-09-09T00:00:03Z",
+            "workspace-c",
+            true,
+        );
+        write_session_fixture(
+            &root.join(&other.identity_id).join("run-other"),
+            &other.identity_id,
+            "session-other",
+            "Alpha",
+            "2026-09-09T00:00:04Z",
+            "workspace-other",
+            true,
+        );
+
+        let index = ProviderSessionIndex::rebuild(&root, &provider.identity_id).unwrap();
+        assert_eq!(
+            index.find_by_session_id("session-a").unwrap().run_id,
+            "run-a"
+        );
+        assert_eq!(index.find_unique_name("Beta").unwrap().run_id, "run-b");
+        assert!(index.find_by_session_id("session-other").is_err());
+        assert!(index.find_unique_name("Alpha").is_err());
+    }
+
+    #[test]
+    fn provider_session_index_prefers_index_metadata_over_rollout_creation_metadata() {
+        let _home = TestHome::new();
+        let provider = sample("index-priority");
+        let root = auth::app_home().unwrap().join("provider-runs");
+        let run = root.join(&provider.identity_id).join("run-jsonl");
+        let sessions = run.join("sessions/2026/09/09");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            run.join("session_index.jsonl"),
+            concat!(
+                "{\"id\":\"indexed-session\",\"name\":\"Index name\",",
+                "\"updated_at\":\"2026-09-09T00:00:10Z\"}\n",
+                "{\"id\":\"rollout-only\",\"name\":\"Index fallback\"}\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            sessions.join("rollout-indexed-session.jsonl"),
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{",
+                "\"id\":\"indexed-session\",\"name\":\"Rollout name\",",
+                "\"timestamp\":\"2026-09-09T00:00:01Z\"}}\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            sessions.join("rollout-rollout-only.jsonl"),
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{",
+                "\"id\":\"rollout-only\",\"timestamp\":",
+                "\"2026-09-09T00:00:02Z\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let index = ProviderSessionIndex::rebuild(&root, &provider.identity_id).unwrap();
+        let indexed = index.find_by_session_id("indexed-session").unwrap();
+        assert_eq!(indexed.name, "Index name");
+        assert_eq!(indexed.updated_at, "2026-09-09T00:00:10Z");
+        assert_eq!(
+            index.find_by_session_id("rollout-only").unwrap().updated_at,
+            "2026-09-09T00:00:02Z"
+        );
+    }
+
+    #[test]
+    fn provider_session_index_classifies_real_session_meta_sources_for_noninteractive_filtering() {
+        let _home = TestHome::new();
+        let provider = sample("source-filter");
+        let root = auth::app_home().unwrap().join("provider-runs");
+        let cases = [
+            ("exec-session", "source", "exec", "2026-09-09T00:00:04Z"),
+            (
+                "noninteractive-session",
+                "thread_source",
+                "noninteractive",
+                "2026-09-09T00:00:02Z",
+            ),
+            (
+                "unknown-session",
+                "source",
+                "future-source",
+                "2026-09-09T00:00:03Z",
+            ),
+        ];
+        for (session_id, source_key, source, timestamp) in cases {
+            let run = root.join(&provider.identity_id).join(session_id);
+            let day = run.join("sessions/2026/09/09");
+            std::fs::create_dir_all(&day).unwrap();
+            std::fs::write(
+                day.join(format!("rollout-{session_id}.jsonl")),
+                serde_json::to_string(&serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "name": session_id,
+                        source_key: source,
+                        "timestamp": timestamp,
+                    }
+                }))
+                .unwrap()
+                    + "\n",
+            )
+            .unwrap();
+        }
+        let subagent_run = root.join(&provider.identity_id).join("subagent-session");
+        let subagent_day = subagent_run.join("sessions/2026/09/09");
+        std::fs::create_dir_all(&subagent_day).unwrap();
+        std::fs::write(
+            subagent_day.join("rollout-subagent-session.jsonl"),
+            serde_json::to_string(&serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "subagent-session",
+                    "name": "subagent-session",
+                    "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}},
+                    "timestamp": "2026-09-09T00:00:05Z",
+                }
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+
+        let index = ProviderSessionIndex::rebuild(&root, &provider.identity_id).unwrap();
+        assert!(
+            !index
+                .find_by_session_id("exec-session")
+                .unwrap()
+                .interactive
+        );
+        assert!(
+            !index
+                .find_by_session_id("noninteractive-session")
+                .unwrap()
+                .interactive
+        );
+        assert!(
+            index
+                .find_by_session_id("unknown-session")
+                .unwrap()
+                .interactive
+        );
+        assert!(
+            !index
+                .find_by_session_id("subagent-session")
+                .unwrap()
+                .interactive
+        );
+
+        let interactive_only = ProviderResumeFilter {
+            cwd: None,
+            all: true,
+            include_noninteractive: false,
+        };
+        assert_eq!(
+            index.last(&interactive_only).unwrap().session_id,
+            "unknown-session"
+        );
+        let all_sources = ProviderResumeFilter {
+            include_noninteractive: true,
+            ..interactive_only
+        };
+        assert_eq!(
+            index.last(&all_sources).unwrap().session_id,
+            "subagent-session"
+        );
+    }
+
+    #[test]
+    fn provider_last_selection_orders_updated_at_and_applies_scope_filters() {
+        let _home = TestHome::new();
+        let provider = sample("last-provider");
+        let root = auth::app_home().unwrap().join("provider-runs");
+        write_session_fixture(
+            &root.join(&provider.identity_id).join("old"),
+            &provider.identity_id,
+            "old-session",
+            "Old",
+            "2026-09-09T00:00:01Z",
+            "workspace-a",
+            true,
+        );
+        write_session_fixture(
+            &root.join(&provider.identity_id).join("cwd-new"),
+            &provider.identity_id,
+            "cwd-session",
+            "Cwd",
+            "2026-09-09T00:00:03Z",
+            "workspace-a",
+            true,
+        );
+        write_session_fixture(
+            &root.join(&provider.identity_id).join("other-new"),
+            &provider.identity_id,
+            "other-session",
+            "Other",
+            "2026-09-09T00:00:04Z",
+            "workspace-b",
+            true,
+        );
+        write_session_fixture(
+            &root.join(&provider.identity_id).join("noninteractive"),
+            &provider.identity_id,
+            "noninteractive-session",
+            "Noninteractive",
+            "2026-09-09T00:00:05Z",
+            "workspace-a",
+            false,
+        );
+
+        let index = ProviderSessionIndex::rebuild(&root, &provider.identity_id).unwrap();
+        let cwd_only = ProviderResumeFilter {
+            cwd: Some(PathBuf::from("workspace-a")),
+            all: false,
+            include_noninteractive: false,
+        };
+        assert_eq!(index.last(&cwd_only).unwrap().session_id, "cwd-session");
+        let all = ProviderResumeFilter {
+            cwd: Some(PathBuf::from("workspace-a")),
+            all: true,
+            include_noninteractive: false,
+        };
+        assert_eq!(index.last(&all).unwrap().session_id, "other-session");
+        let include_noninteractive = ProviderResumeFilter {
+            cwd: Some(PathBuf::from("workspace-a")),
+            all: false,
+            include_noninteractive: true,
+        };
+        assert_eq!(
+            index.last(&include_noninteractive).unwrap().session_id,
+            "noninteractive-session"
+        );
+    }
+
+    #[test]
+    fn removing_a_provider_keeps_tombstone_history_but_not_its_key_or_identity() {
+        let _home = TestHome::new();
+        let profile = sample("reusable");
+        let identity_id = profile.identity_id.clone();
+        save(&profile).unwrap();
+        let mut run = ProviderCodexHome::begin(&profile).unwrap();
+        run.restore().unwrap();
+
+        remove("reusable").unwrap();
+        assert!(!provider_path("reusable").unwrap().exists());
+        assert!(
+            auth::app_home()
+                .unwrap()
+                .join("provider-runs")
+                .join(&identity_id)
+                .join("tombstone.json")
+                .exists(),
+            "remove must preserve a tombstone for historical runs"
+        );
+
+        let recreated = sample("reusable");
+        assert_ne!(recreated.identity_id, identity_id);
+        save(&recreated).unwrap();
+        assert!(
+            ProviderSessionIndex::rebuild(
+                &auth::app_home().unwrap().join("provider-runs"),
+                &recreated.identity_id
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_run_resume_lease_rejects_a_second_open_of_the_same_run() {
+        let _home = TestHome::new();
+        let run = auth::app_home().unwrap().join("provider-runs/run-lease");
+        std::fs::create_dir_all(&run).unwrap();
+        let first = ProviderRunLease::acquire(&run).unwrap();
+        assert!(
+            ProviderRunLease::acquire(&run).is_err(),
+            "resume must not open one run concurrently twice"
+        );
+        drop(first);
+        assert!(ProviderRunLease::acquire(&run).is_ok());
     }
 
     #[test]
@@ -2410,6 +3612,46 @@ api_key = "sk-legacy-key"
             "legacy model field must not be written back: {raw}"
         );
         assert!(raw.contains("[[models]]"), "migrated file must list models");
+    }
+
+    #[test]
+    fn loading_a_legacy_provider_migrates_alias_history_to_its_stable_identity() {
+        let _home = TestHome::new();
+        let alias = "legacy-history";
+        let dir = provider_dir(alias).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut legacy = sample(alias);
+        legacy.identity_id.clear();
+        std::fs::write(
+            dir.join("provider.toml"),
+            toml::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let history_root = auth::app_home().unwrap().join("provider-runs");
+        let legacy_run = history_root.join(alias).join("run-legacy");
+        std::fs::create_dir_all(&legacy_run).unwrap();
+        std::fs::write(
+            legacy_run.join("session_index.jsonl"),
+            "{\"id\":\"legacy-session\",\"name\":\"Legacy history\",\"updated_at\":\"2026-09-09T00:00:01Z\"}\n",
+        )
+        .unwrap();
+
+        let loaded = load(alias).unwrap();
+        assert!(!loaded.identity_id.is_empty());
+        assert!(!history_root.join(alias).exists());
+        assert!(
+            history_root
+                .join(&loaded.identity_id)
+                .join("run-legacy")
+                .exists()
+        );
+        let index = ProviderSessionIndex::rebuild(&history_root, &loaded.identity_id).unwrap();
+        assert_eq!(
+            index.find_by_session_id("legacy-session").unwrap().name,
+            "Legacy history"
+        );
+        assert_eq!(load(alias).unwrap().identity_id, loaded.identity_id);
     }
 
     #[test]

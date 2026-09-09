@@ -3,6 +3,7 @@ use crate::provider::{self, ProviderProfile, ReasoningLaunch};
 use crate::signals::{ShutdownListener, ShutdownSignal};
 use crate::{auth, config, profile};
 use anyhow::{Context, Result};
+use std::io::{self, IsTerminal};
 
 /// How the window Codex needs to read the staged `auth.json` ended.
 #[derive(Debug, PartialEq, Eq)]
@@ -132,8 +133,6 @@ async fn launch_interactive(
     reasoning: ReasoningLaunch,
     tui_shutdown: Option<&mut ShutdownListener>,
 ) -> Result<TuiLaunchOutcome> {
-    use std::io::IsTerminal;
-
     // A custom API provider profile takes a separate, simpler path: it has no
     // OAuth auth.json to stage, so it never touches ~/.codex/auth.json. It is
     // translated into `codex -c …` overrides with the key injected via the
@@ -142,6 +141,12 @@ async fn launch_interactive(
         && provider::exists(alias)
     {
         let profile = provider::load(alias)?;
+        return launch_provider(profile, model, reasoning, args, json, tui_shutdown).await;
+    }
+
+    if alias.is_none() && provider_resume_requested(&args) {
+        let provider_alias = select_provider_for_resume(json)?;
+        let profile = provider::load(&provider_alias)?;
         return launch_provider(profile, model, reasoning, args, json, tui_shutdown).await;
     }
 
@@ -660,8 +665,23 @@ async fn launch_provider(
         }
     };
 
-    let selected = profile.resolve_model(model)?.clone();
-    let shown_model = passthrough_model_value(&args).unwrap_or_else(|| selected.id.clone());
+    let resume = provider_resume_target(&args, &profile)?;
+    let passthrough_model = passthrough_model_value(&args);
+    // `--model` parsed by codex-switch selects a saved provider model. A model
+    // forwarded after `--` belongs to Codex and intentionally keeps the
+    // established one-shot behavior, including models outside the saved list.
+    let explicit_model = model.map(str::to_string);
+    let selected_model = match (&resume, explicit_model.as_deref()) {
+        (Some((session, _)), None) => session.model.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "provider session '{}' has no saved model; resume it with an explicit --model",
+                session.session_id
+            )
+        })?,
+        (_, requested) => requested.unwrap_or(profile.default_model.as_str()),
+    };
+    let selected = profile.resolve_model(Some(selected_model))?.clone();
+    let shown_model = passthrough_model.unwrap_or_else(|| selected.id.clone());
     if profile.responses_support_for(&shown_model) == Some(false) {
         anyhow::bail!(
             "Model '{}' on provider '{}' has no Codex Responses channel. The saved explicit probe marked it unsupported; probe again with `codex-switch provider probe {} --model {}` after the endpoint changes.",
@@ -672,10 +692,27 @@ async fn launch_provider(
         );
     }
     let (env_name, env_value) = profile.launch_env();
-    let mut session = provider::ProviderCodexHome::begin(&profile.alias)?;
-    let overrides =
-        profile.codex_config_args_from_saved_catalog_at(model, reasoning.clone(), &session.path)?;
-    let codex_args = provider_codex_argv(overrides, args.clone());
+    let (mut session, _lease, codex_args) = if let Some((record, resume_args)) = resume {
+        let lease = provider::ProviderRunLease::acquire(&record.run_path)?;
+        let session = provider::ProviderCodexHome::open_existing(&profile, &record.run_path)?;
+        let overrides = profile.codex_config_args_from_saved_catalog_at(
+            Some(&selected.id),
+            reasoning.clone(),
+            &session.path,
+        )?;
+        let codex_args = provider_codex_argv(overrides, resume_args);
+        (session, Some(lease), codex_args)
+    } else {
+        let session = provider::ProviderCodexHome::begin(&profile)?;
+        session.write_model(&profile, &selected.id)?;
+        let overrides = profile.codex_config_args_from_saved_catalog_at(
+            model,
+            reasoning.clone(),
+            &session.path,
+        )?;
+        let codex_args = provider_codex_argv(overrides, args.clone());
+        (session, None, codex_args)
+    };
 
     if !json {
         let reasoning_note = match &reasoning {
@@ -743,6 +780,242 @@ async fn launch_provider(
     }
 
     Ok(TuiLaunchOutcome::Exited(exit_code))
+}
+
+fn provider_resume_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "resume")
+}
+
+fn select_provider_for_resume(json: bool) -> Result<String> {
+    let providers = provider::list_providers()?;
+    if providers.is_empty() {
+        anyhow::bail!("provider alias is required for resume; no providers are configured")
+    }
+    if !io::stdin().is_terminal() || json {
+        anyhow::bail!(
+            "provider alias is required for resume when stdin is not interactive; choose one of: {}",
+            providers.join(", ")
+        )
+    }
+    user_println("Select a provider alias for resume:");
+    for (index, alias) in providers.iter().enumerate() {
+        user_println(&format!("  {}. {alias}", index + 1));
+    }
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("reading provider alias")?;
+    let index = input
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|index| (1..=providers.len()).contains(index))
+        .ok_or_else(|| anyhow::anyhow!("invalid provider selection"))?;
+    Ok(providers[index - 1].clone())
+}
+
+fn provider_resume_target(
+    args: &[String],
+    profile: &ProviderProfile,
+) -> Result<Option<(provider::ProviderSession, Vec<String>)>> {
+    let Some(resume_at) = args.iter().position(|arg| arg == "resume") else {
+        return Ok(None);
+    };
+    let root = auth::app_home()?.join("provider-runs");
+    let index = provider::ProviderSessionIndex::rebuild(&root, &profile.identity_id)?;
+    let all = args.iter().any(|arg| arg == "--all");
+    let include_noninteractive = args.iter().any(|arg| arg == "--include-non-interactive");
+    let filter = provider::ProviderResumeFilter {
+        cwd: if all {
+            None
+        } else {
+            std::env::current_dir().ok()
+        },
+        all,
+        include_noninteractive,
+    };
+    let positional = resume_positional_indices(args, resume_at);
+    let has_last = resume_flag_before_separator(args, resume_at, "--last");
+    let selector = if has_last {
+        None
+    } else {
+        positional
+            .first()
+            .and_then(|index| args.get(*index))
+            .cloned()
+    };
+    let record = if has_last {
+        index.last(&filter)?.clone()
+    } else if let Some(selector) = selector {
+        index
+            .find_by_session_id(&selector)
+            .or_else(|_| index.find_unique_name(&selector))?
+            .clone()
+    } else {
+        select_provider_session(&index, &filter)?.clone()
+    };
+    let rewritten = rewrite_provider_resume_args(args, resume_at, &record.session_id);
+    Ok(Some((record, rewritten)))
+}
+
+fn resume_option_takes_value(arg: &str) -> bool {
+    [
+        "-c",
+        "--config",
+        "-m",
+        "--model",
+        "-C",
+        "--cd",
+        "--sandbox",
+        "-s",
+        "--remote",
+        "--remote-auth-token-env",
+        "--local-provider",
+        "-p",
+        "--profile",
+        "--add-dir",
+        "-a",
+        "--ask-for-approval",
+        "--enable",
+        "--disable",
+    ]
+    .iter()
+    .any(|option| arg == *option || arg.starts_with(&format!("{option}=")))
+}
+
+fn resume_positional_indices(args: &[String], resume_at: usize) -> Vec<usize> {
+    let mut positional = Vec::new();
+    let mut after_separator = false;
+    let mut skip_next = false;
+    let mut consuming_images = false;
+    for (index, item) in args.iter().enumerate().skip(resume_at + 1) {
+        let arg = item.as_str();
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if !after_separator && arg == "--" {
+            after_separator = true;
+            continue;
+        }
+        if !after_separator && consuming_images && !arg.starts_with('-') {
+            continue;
+        }
+        consuming_images = false;
+        if !after_separator && arg.starts_with('-') {
+            if matches!(arg, "-i" | "--image") {
+                consuming_images = true;
+                continue;
+            }
+            if resume_option_takes_value(arg) && !arg.contains('=') {
+                skip_next = true;
+            }
+            continue;
+        }
+        positional.push(index);
+    }
+    positional
+}
+
+fn resume_flag_before_separator(args: &[String], resume_at: usize, flag: &str) -> bool {
+    args[resume_at + 1..]
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == flag)
+}
+
+fn select_provider_session<'a>(
+    index: &'a provider::ProviderSessionIndex,
+    filter: &provider::ProviderResumeFilter,
+) -> Result<&'a provider::ProviderSession> {
+    if !io::stdin().is_terminal() {
+        anyhow::bail!("provider resume requires a session id or name when stdin is not interactive")
+    }
+    let sessions = index.filtered(filter);
+    if sessions.is_empty() {
+        anyhow::bail!("no provider session matches the requested scope")
+    }
+    user_println("Select a provider session:");
+    for (position, session) in sessions.iter().enumerate() {
+        let label = if session.name.is_empty() {
+            session.session_id.as_str()
+        } else {
+            session.name.as_str()
+        };
+        user_println(&format!(
+            "  {}. {}  {}  {}",
+            position + 1,
+            label,
+            session.session_id,
+            session.updated_at
+        ));
+    }
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("reading provider session selection")?;
+    resolve_provider_session_selection(index, &sessions, input.trim())
+}
+
+fn resolve_provider_session_selection<'a>(
+    index: &'a provider::ProviderSessionIndex,
+    displayed: &[&'a provider::ProviderSession],
+    selector: &str,
+) -> Result<&'a provider::ProviderSession> {
+    if let Ok(position) = selector.parse::<usize>() {
+        let index = displayed_selection_index(position, displayed.len())?;
+        return displayed
+            .get(index)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("invalid provider session selection"));
+    }
+    index
+        .find_by_session_id(selector)
+        .or_else(|_| index.find_unique_name(selector))
+}
+
+fn displayed_selection_index(position: usize, len: usize) -> Result<usize> {
+    position
+        .checked_sub(1)
+        .filter(|index| *index < len)
+        .ok_or_else(|| anyhow::anyhow!("invalid provider session selection"))
+}
+
+fn rewrite_provider_resume_args(
+    args: &[String],
+    resume_at: usize,
+    session_id: &str,
+) -> Vec<String> {
+    let had_last = resume_flag_before_separator(args, resume_at, "--last");
+    let last_at = had_last.then(|| {
+        (resume_at + 1..args.len())
+            .take_while(|index| args[*index] != "--")
+            .find(|index| args[*index] == "--last")
+            .expect("--last was found before the separator")
+    });
+    let mut rewritten = args
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != last_at)
+        .map(|(_, arg)| arg.clone())
+        .collect::<Vec<_>>();
+    let resume_at = rewritten
+        .iter()
+        .position(|arg| arg == "resume")
+        .unwrap_or(resume_at);
+    let positional = resume_positional_indices(&rewritten, resume_at);
+    if had_last {
+        if let Some(index) = positional.first() {
+            rewritten.insert(*index, session_id.to_string());
+        } else {
+            rewritten.push(session_id.to_string());
+        }
+    } else if let Some(index) = positional.first() {
+        rewritten[*index] = session_id.to_string();
+    } else {
+        rewritten.push(session_id.to_string());
+    }
+    rewritten
 }
 
 /// Snapshot the live auth.json into `backup` before it is overwritten by the
@@ -966,8 +1239,10 @@ mod tests {
     use std::sync::MutexGuard;
 
     use super::{
-        chatgpt_codex_argv, ensure_codex_available, passthrough_model_value, provider_codex_argv,
-        restore_launch_auth, shutdown_outcome,
+        chatgpt_codex_argv, displayed_selection_index, ensure_codex_available,
+        passthrough_model_value, provider_codex_argv, restore_launch_auth,
+        resume_flag_before_separator, resume_positional_indices, rewrite_provider_resume_args,
+        shutdown_outcome,
     };
     // Only the permission assertions call this, and those are unix-only, so an
     // unconditional import is dead on Windows and fails `-D warnings` there.
@@ -975,6 +1250,48 @@ mod tests {
     use super::spawn_codex;
     #[cfg(unix)]
     use super::{CodexPipes, backup_launch_auth, terminate_child};
+
+    #[test]
+    fn provider_session_picker_uses_one_based_bounded_positions() {
+        assert_eq!(displayed_selection_index(1, 2).unwrap(), 0);
+        assert_eq!(displayed_selection_index(2, 2).unwrap(), 1);
+        assert!(displayed_selection_index(0, 2).is_err());
+        assert!(displayed_selection_index(3, 2).is_err());
+    }
+
+    #[test]
+    fn provider_resume_parser_skips_every_supported_option_value_and_image_list() {
+        let args = [
+            "resume",
+            "--enable",
+            "feature",
+            "--profile",
+            "team",
+            "--add-dir",
+            "extra",
+            "--remote-auth-token-env",
+            "TOKEN",
+            "-i",
+            "a.png",
+            "b.png",
+            "--sandbox",
+            "workspace-write",
+            "session-id",
+            "continue",
+        ]
+        .map(str::to_string);
+        assert_eq!(resume_positional_indices(&args, 0), vec![14, 15]);
+
+        let separated = ["resume", "--", "--last", "prompt"].map(str::to_string);
+        assert!(!resume_flag_before_separator(&separated, 0, "--last"));
+        assert_eq!(resume_positional_indices(&separated, 0), vec![2, 3]);
+
+        let prompt_flag = ["resume", "session", "--", "--last", "prompt"].map(str::to_string);
+        assert_eq!(
+            rewrite_provider_resume_args(&prompt_flag, 0, "exact-session"),
+            ["resume", "exact-session", "--", "--last", "prompt"]
+        );
+    }
 
     #[cfg(unix)]
     #[test]

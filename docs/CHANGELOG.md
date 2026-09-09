@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Provider-scoped persistent resume** — Each provider now has a stable identity independent of its alias. Every launch gets a persistent isolated Codex home under `provider-runs/<identity_id>/<run_id>`, and provider `resume` resolves IDs, unique names, `--last`, and the bare picker only within that identity before passing the exact session ID to Codex. Rename preserves history; removal leaves a tombstone; concurrent resume of the same run is rejected. Real external-provider OAuth/completion and real Codex resume remain unverified.
+
 ## v20260909.1.0 (candidate) — 2026-09-09
 
 This candidate is prepared from `dev`; publication and CI verification remain pending.

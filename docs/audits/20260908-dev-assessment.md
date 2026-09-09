@@ -6,7 +6,7 @@
 
 账号一致性、启动恢复、Use 响应、主列表快捷键、别名边界和 warmup 主池选择已完成对应修复；R1、R2 定向复审通过。daemon 按用户决策删除，预热和切换保持为分开的功能，保留一次性预热与手动切换。R3 的安装、供应链和文档九项问题已全部通过定向复审。
 
-当前不具备发布就绪结论。provider `resume` 的持久会话策略仍待用户决定；真实 OAuth、真实 completion、真实 Codex resume 和真实业务预热收益均未测。macOS 尚未运行，Windows ARM64 编译受本机缺少 clang 阻塞。
+当前不具备发布就绪结论。provider 已采用稳定 identity、持久隔离 run home 和 provider-scoped `resume`；真实 OAuth、真实 completion、真实 Codex resume 和真实业务预热收益均未测。macOS 尚未运行，Windows ARM64 编译受本机缺少 clang 阻塞。
 
 ## 原 13 项问题的当前处置
 
@@ -17,7 +17,7 @@
 | 3 | 同账号 launch 恢复旧凭据 | 已修复，R1 复审通过。`src/launch.rs::restore_launch_auth` 区分同一凭据轮换与同身份的独立凭据：前者保留新 live，后者恢复原独立凭据。 |
 | 4 | 登录已有账号后 current/live 不一致 | 已修复，R1 复审通过。`src/profile.rs::save_auth_value` 更新已有 profile、live auth 和 current 的同一事务路径。 |
 | 5 | provider/profile 别名冲突不对称 | 已修复，R1 复审通过。创建、保存和重命名入口统一经过 `reject_provider_alias` 与别名占用检查。 |
-| 6 | provider 新 home 缺少稳定 resume 入口 | 未闭合，等待用户决定持久会话策略；没有删除历史目录，也没有声称 `resume` 已通过。 |
+| 6 | provider 新 home 缺少稳定 resume 入口 | 已按稳定 identity 与 provider-scoped session locator 实现；待新提交全量测试和 CI 验证。 |
 | 7 | Windows `.cmd` 预检与启动不一致 | 已修复，定向启动透传 8/8 通过。`src/launch.rs::ensure_codex_available` 解析出的具体候选路径继续用于启动。 |
 | 8 | daemon 探测失败仍允许自动换号 | 按用户决策删除常驻 daemon 与自动换号路径，原风险入口已移除。 |
 | 9 | daemon 慢请求阻塞停止和热加载 | 随常驻 daemon 删除处置；不再作为当前产品路径验收。 |
@@ -41,6 +41,6 @@
 - Windows 合计 700 项测试有通过证据；Linux 全量 718 项通过，HTTP fixture 更新后的 Linux 启动 9 项复测通过。Windows/Linux Clippy 和格式检查通过。
 - Windows 优化构建通过，release 产物的假账号 use 和已删除 daemon 命令边界冒烟通过；固定哈希的官方 v0.0.19 在隔离目录实际升级到本候选版本。
 - R1、R2、R3 定向复审通过，原审查 findings 已关闭。
-- provider resume 策略、真实 OAuth、真实 completion、真实 Codex resume、真实预热收益尚未验证；macOS 尚未运行，ARM64 仍缺 clang。
+- provider resume 的真实 Codex 交互、真实 OAuth、真实 completion、真实预热收益尚未验证；macOS 尚未运行，ARM64 仍缺 clang。
 
 本评估保留已验证的锁竞争、凭据恢复、别名/输入边界、warmup 主池和 Windows 启动证据；未将未测的真实业务效果、跨平台结果或 provider 会话恢复写成已完成。
