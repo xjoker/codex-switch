@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **TUI mouse double-click state** — Scrolling or using the keyboard now cancels a pending row double-click, so a later single click cannot unexpectedly open an account menu or provider launch picker. Render-backed tests cover all four tabs, provider rows, and modal click/wheel isolation.
 - **Account launch picker** — Accounts-page and account-menu `o` now opens the launch picker before starting Codex. It offers Codex's default behavior plus cached account models, with one-shot reasoning and extra arguments.
 - **Maintenance updates** — Updated `flate2` to 1.1.10, `owo-colors` to 4.4.0, and the pinned `softprops/action-gh-release` action to 3.0.3. Dependency resolution also retains the already-current `thiserror` 2.0.20 and `webbrowser` 1.2.4.
 - **Provider-scoped persistent resume** — Each provider now has a stable identity independent of its alias. Every launch gets a persistent isolated Codex home under `provider-runs/<identity_id>/<run_id>`, and provider `resume` resolves IDs, unique names, `--last`, and the bare picker only within that identity before passing the exact session ID to Codex. Rename preserves history; removal leaves a tombstone; concurrent resume of the same run is rejected. Real external-provider OAuth/completion and real Codex resume remain unverified.

@@ -719,6 +719,7 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.last_list_click = None;
                 let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
                 match self.hitmap.overlay {
                     OverlayHit::Modal => {}
@@ -842,6 +843,7 @@ impl App {
     /// Handle synchronous Accounts-list keys. Returns a selected alias when
     /// the caller must perform the terminal-backed launch action.
     pub fn handle_accounts_key(&mut self, code: KeyCode) -> Option<String> {
+        self.last_list_click = None;
         match code {
             KeyCode::Esc => {
                 if self.search.is_some() {
@@ -975,6 +977,7 @@ impl App {
     /// Providers list keys. Enter and `o` launch (pick a saved model). `e`
     /// edits. `l` is re-login on Accounts, so it never launches from this tab.
     pub fn handle_provider_list_key(&mut self, code: KeyCode) {
+        self.last_list_click = None;
         match code {
             KeyCode::Down | KeyCode::Char('j') => self.provider_select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.provider_select_prev(),
@@ -2620,6 +2623,7 @@ async fn run_app(
                     if !accepts_key_event(&key) {
                         continue;
                     }
+                    app.last_list_click = None;
 
                     // Search and rename inputs need raw case-sensitive keystrokes.
                     if app.rename.is_some() {
@@ -3285,6 +3289,7 @@ mod tests {
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn left_click(column: u16, row: u16) -> MouseEvent {
         MouseEvent {
@@ -3411,6 +3416,64 @@ mod tests {
         app.handle_mouse(left_click(5, 3));
         app.handle_mouse(left_click(45, 3));
         app.handle_mouse(left_click(5, 3));
+        assert!(app.menu.is_none());
+    }
+
+    #[tokio::test]
+    async fn mouse_wheel_interrupts_a_pending_double_click() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "a".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.hitmap.account_list = Some(crate::tui::hitmap::ListHit {
+            rows_area: ratatui::layout::Rect {
+                x: 1,
+                y: 3,
+                width: 40,
+                height: 1,
+            },
+            offset: 0,
+            row_count: 1,
+        });
+
+        app.handle_mouse(left_click(5, 3));
+        app.handle_mouse(scroll(MouseEventKind::ScrollDown, 5, 3));
+        app.handle_mouse(left_click(5, 3));
+
+        assert!(app.menu.is_none());
+    }
+
+    #[tokio::test]
+    async fn mouse_keyboard_and_popup_lifecycle_interrupt_pending_double_click() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "a".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.hitmap.account_list = Some(crate::tui::hitmap::ListHit {
+            rows_area: ratatui::layout::Rect {
+                x: 1,
+                y: 3,
+                width: 40,
+                height: 1,
+            },
+            offset: 0,
+            row_count: 1,
+        });
+
+        app.handle_mouse(left_click(5, 3));
+        app.handle_accounts_key(KeyCode::Char('i'));
+        app.open_help();
+        super::handle_help_key(&mut app, KeyCode::Esc);
+        app.handle_mouse(left_click(5, 3));
+
         assert!(app.menu.is_none());
     }
 
@@ -3548,6 +3611,118 @@ mod tests {
 
         app.handle_mouse(left_click(0, 0));
         assert!(app.menu.is_none());
+    }
+
+    #[test]
+    fn rendered_tab_regions_select_each_tab() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.providers.push(crate::provider::ProviderProfile::build(
+            "gateway",
+            "https://gateway.example/v1",
+            vec![crate::provider::ProviderModel::from_id("model")],
+            "sk",
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        for expected in [Tab::Accounts, Tab::Providers, Tab::Settings, Tab::Logs] {
+            terminal
+                .draw(|frame| crate::tui::ui::render(frame, &mut app))
+                .unwrap();
+            let (area, _) = app
+                .hitmap
+                .tabs
+                .iter()
+                .find(|(_, tab)| *tab == expected)
+                .copied()
+                .expect("rendered tab hit region");
+            app.handle_mouse(left_click(area.x + area.width / 2, area.y));
+            assert_eq!(app.active_tab, expected);
+        }
+    }
+
+    #[test]
+    fn rendered_provider_row_click_selects_without_launching() {
+        let mut app = App::new();
+        app.active_tab = Tab::Providers;
+        for alias in ["first", "second"] {
+            app.providers.push(crate::provider::ProviderProfile::build(
+                alias,
+                "https://gateway.example/v1",
+                vec![crate::provider::ProviderModel::from_id("model")],
+                "sk",
+            ));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        let list = app
+            .hitmap
+            .provider_list
+            .expect("rendered provider hit region");
+
+        app.handle_mouse(left_click(list.rows_area.x + 1, list.rows_area.y + 1));
+
+        assert_eq!(app.provider_selected, 1);
+        assert!(app.provider_launch.is_none());
+    }
+
+    #[test]
+    fn rendered_provider_launch_modal_absorbs_tab_click_and_wheel() {
+        let mut app = App::new();
+        app.active_tab = Tab::Providers;
+        app.providers.push(crate::provider::ProviderProfile::build(
+            "gateway",
+            "https://gateway.example/v1",
+            vec![crate::provider::ProviderModel::from_id("model")],
+            "sk",
+        ));
+        app.provider_launch =
+            Some(crate::tui::provider_launch::ProviderLaunchState::from_profile(&app.providers[0]));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(matches!(
+            app.hitmap.overlay,
+            crate::tui::hitmap::OverlayHit::Modal
+        ));
+        let (accounts_tab, _) = app
+            .hitmap
+            .tabs
+            .iter()
+            .find(|(_, tab)| *tab == Tab::Accounts)
+            .copied()
+            .expect("rendered Accounts tab hit region");
+        let before_scroll = app
+            .provider_launch
+            .as_ref()
+            .expect("launch picker")
+            .popup
+            .scroll;
+
+        app.handle_mouse(left_click(
+            accounts_tab.x + accounts_tab.width / 2,
+            accounts_tab.y,
+        ));
+        app.handle_mouse(scroll(MouseEventKind::ScrollDown, 5, 5));
+
+        assert_eq!(app.active_tab, Tab::Providers);
+        assert_eq!(
+            app.provider_launch
+                .as_ref()
+                .expect("launch picker")
+                .popup
+                .scroll,
+            before_scroll
+        );
     }
 
     fn capture_info_logs(action: impl FnOnce()) -> Vec<String> {
