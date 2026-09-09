@@ -13,6 +13,12 @@ use super::popup::{PopupState, render_popup};
 use super::theme::{
     C_CYAN, C_GREEN, C_PURPLE, C_RED, C_WHITE, C_YELLOW, DIM, base, dim as dim_style, header, key,
 };
+use ratatui::crossterm::event::KeyCode;
+
+pub struct MenuRender {
+    pub panel: Rect,
+    pub actions: Vec<(Rect, KeyCode)>,
+}
 
 /// Active menu state. Only one menu is visible at a time.
 pub enum MenuState {
@@ -344,7 +350,9 @@ impl MenuState {
                 KeyCode::Char('n') => MenuAction::Rename(info.alias.clone()),
                 KeyCode::Char('r') => MenuAction::RefreshOne(info.alias.clone()),
                 KeyCode::Char('w') => MenuAction::WarmupOne(info.alias.clone()),
-                KeyCode::Char('c') => MenuAction::ConsumeResetCard(info.alias.clone()),
+                KeyCode::Char('c') if info.can_consume_reset_card => {
+                    MenuAction::ConsumeResetCard(info.alias.clone())
+                }
                 KeyCode::Char('d') => MenuAction::DeleteRequest(info.alias.clone()),
                 _ => MenuAction::Noop,
             },
@@ -383,7 +391,7 @@ impl MenuState {
         }
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect) -> Option<Rect> {
+    pub fn render(&mut self, f: &mut Frame, area: Rect) -> Option<MenuRender> {
         let key_style = key();
         let label_style = base();
         let dim = dim_style();
@@ -571,7 +579,40 @@ impl MenuState {
                     "j k / arrows / PgUp PgDn scroll details · esc / q cancel",
                     dim,
                 )));
-                render_popup(f, title, &left_lines, popup, area)
+                let first_action_line = left_lines.len().saturating_sub(4);
+                let panel = render_popup(f, title, &left_lines, popup, area)?;
+                let mut hit_actions = Vec::new();
+                for (row_offset, row) in [&actions[..5], &actions[5..]].iter().enumerate() {
+                    let content_line = first_action_line + row_offset;
+                    let scroll = usize::from(popup.scroll);
+                    if content_line < scroll {
+                        continue;
+                    }
+                    let y = panel.y + 1 + u16::try_from(content_line - scroll).unwrap_or(u16::MAX);
+                    if y >= panel.y + panel.height.saturating_sub(1) {
+                        continue;
+                    }
+                    let mut x = panel.x + 2;
+                    let content_right = panel.x + panel.width.saturating_sub(2);
+                    for (idx, (key, label, enabled)) in row.iter().enumerate() {
+                        if idx > 0 {
+                            x = x.saturating_add(5);
+                        }
+                        let width = u16::try_from(key.len() + 1 + label.len()).unwrap_or(u16::MAX);
+                        if *enabled && x < content_right {
+                            let visible_width = width.min(content_right.saturating_sub(x));
+                            hit_actions.push((
+                                Rect::new(x, y, visible_width, 1),
+                                KeyCode::Char(key.chars().next().unwrap()),
+                            ));
+                        }
+                        x = x.saturating_add(width);
+                    }
+                }
+                Some(MenuRender {
+                    panel,
+                    actions: hit_actions,
+                })
             }
             MenuState::Add { popup } => {
                 let title = "Add new account";
@@ -588,7 +629,10 @@ impl MenuState {
                 ));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, title, &lines, popup, area)
+                render_popup(f, title, &lines, popup, area).map(|panel| MenuRender {
+                    panel,
+                    actions: Vec::new(),
+                })
             }
             MenuState::ReloginFlow {
                 alias,
@@ -614,7 +658,10 @@ impl MenuState {
                 ));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, "re-Login", &lines, popup, area)
+                render_popup(f, "re-Login", &lines, popup, area).map(|panel| MenuRender {
+                    panel,
+                    actions: Vec::new(),
+                })
             }
             MenuState::Batch { count, popup } => {
                 let title = "Batch";
@@ -634,7 +681,10 @@ impl MenuState {
                 ));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, title, &lines, popup, area)
+                render_popup(f, title, &lines, popup, area).map(|panel| MenuRender {
+                    panel,
+                    actions: Vec::new(),
+                })
             }
             MenuState::BatchReloginFlow { count, popup } => {
                 let mut lines: Vec<Line<'static>> = Vec::new();
@@ -655,7 +705,10 @@ impl MenuState {
                 ));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, "Batch re-Login", &lines, popup, area)
+                render_popup(f, "Batch re-Login", &lines, popup, area).map(|panel| MenuRender {
+                    panel,
+                    actions: Vec::new(),
+                })
             }
         }
     }
@@ -902,6 +955,57 @@ mod tests {
             unreachable!();
         };
         assert_eq!(popup.scroll, 1);
+    }
+
+    #[test]
+    fn account_action_hit_regions_follow_scroll_and_disable_reset_card() {
+        let mut menu = MenuState::account(AccountMenuInfo {
+            alias: "account".into(),
+            email: Some("account@example.com".into()),
+            account_id: Some("account-id".into()),
+            user_id: Some("user-id".into()),
+            workspace_name: Some("workspace".into()),
+            is_fedramp: false,
+            plan_label: "Pro".into(),
+            plan_type: Some("pro".into()),
+            is_current: true,
+            organizations: vec!["organization".into(); 4],
+            auth_expiries: vec!["ID token · expires soon".into(); 4],
+            usage: None,
+            usage_meta: vec!["usage metadata".into(); 4],
+            models: (0..16).map(|idx| format!("model-{idx}")).collect(),
+            reset_cards: Some(0),
+            reset_card_expiries: Vec::new(),
+            can_consume_reset_card: false,
+        });
+        for _ in 0..64 {
+            let _ = menu.handle_key(KeyCode::Down);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(32, 12)).unwrap();
+        let mut menu_render = None;
+        terminal
+            .draw(|frame| menu_render = menu.render(frame, frame.area()))
+            .unwrap();
+        let menu_render = menu_render.expect("account details popup should render");
+        let use_hit = menu_render
+            .actions
+            .iter()
+            .find(|(_, key)| *key == KeyCode::Char('u'))
+            .map(|(area, _)| *area)
+            .expect("visible use action hit region");
+        assert!(use_hit.x >= menu_render.panel.x);
+        assert!(use_hit.y >= menu_render.panel.y);
+        assert!(use_hit.x + use_hit.width <= menu_render.panel.x + menu_render.panel.width);
+        assert!(
+            !menu_render
+                .actions
+                .iter()
+                .any(|(_, key)| *key == KeyCode::Char('c'))
+        );
+        assert!(matches!(
+            menu.handle_key(KeyCode::Char('c')),
+            MenuAction::Noop
+        ));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -89,9 +90,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
         }
         app.hitmap.overlay = super::hitmap::OverlayHit::Modal;
     } else if app.menu.is_some() {
-        let panel = app.menu.as_mut().and_then(|menu| menu.render(f, area));
-        app.hitmap.overlay = match panel {
-            Some(panel) => super::hitmap::OverlayHit::Dismissible { panel },
+        let rendered = app.menu.as_mut().and_then(|menu| menu.render(f, area));
+        app.hitmap.menu_actions = rendered
+            .as_ref()
+            .map(|menu| menu.actions.clone())
+            .unwrap_or_default();
+        app.hitmap.overlay = match rendered {
+            Some(menu) => super::hitmap::OverlayHit::Dismissible { panel: menu.panel },
             None => super::hitmap::OverlayHit::Modal,
         };
     } else if app.confirm.is_some()
@@ -1066,21 +1071,178 @@ pub(super) fn credits_table_color(u: &UsageInfo) -> Color {
     }
 }
 
-fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    if app.active_tab == Tab::Logs {
-        let line = Line::from(vec![
-            Span::styled(" tab", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(" switch tabs │ ", base().fg(DIM)),
-            Span::styled("j k / PgUp PgDn", base().fg(C_YELLOW)),
-            Span::styled(" scroll │ ", base().fg(DIM)),
-            Span::styled("end", base().fg(C_YELLOW)),
-            Span::styled(" latest │ ", base().fg(DIM)),
-            Span::styled("q", base().fg(C_YELLOW)),
-            Span::styled(" quit", base().fg(DIM)),
-        ]);
-        f.render_widget(Paragraph::new(line).style(base()), area);
-        return;
+#[derive(Clone, Copy)]
+struct FooterActionSpec {
+    key: &'static str,
+    label: &'static str,
+    code: KeyCode,
+    enabled: bool,
+}
+
+type FooterHit = (usize, usize, usize, KeyCode);
+
+fn normal_footer_specs(app: &App) -> Vec<FooterActionSpec> {
+    match app.active_tab {
+        Tab::Logs => vec![
+            FooterActionSpec {
+                key: "tab",
+                label: "switch tabs",
+                code: KeyCode::Tab,
+                enabled: true,
+            },
+            FooterActionSpec {
+                key: "↑",
+                label: "up",
+                code: KeyCode::Up,
+                enabled: true,
+            },
+            FooterActionSpec {
+                key: "↓",
+                label: "down",
+                code: KeyCode::Down,
+                enabled: true,
+            },
+            FooterActionSpec {
+                key: "end",
+                label: "latest",
+                code: KeyCode::End,
+                enabled: true,
+            },
+            FooterActionSpec {
+                key: "q",
+                label: "quit",
+                code: KeyCode::Char('q'),
+                enabled: true,
+            },
+        ],
+        Tab::Providers => {
+            let enabled = !app.providers.is_empty();
+            vec![
+                FooterActionSpec {
+                    key: "↑",
+                    label: "previous",
+                    code: KeyCode::Up,
+                    enabled,
+                },
+                FooterActionSpec {
+                    key: "↓",
+                    label: "next",
+                    code: KeyCode::Down,
+                    enabled,
+                },
+                FooterActionSpec {
+                    key: "enter/o",
+                    label: "launch",
+                    code: KeyCode::Enter,
+                    enabled,
+                },
+                FooterActionSpec {
+                    key: "e",
+                    label: "edit",
+                    code: KeyCode::Char('e'),
+                    enabled,
+                },
+                FooterActionSpec {
+                    key: "a",
+                    label: "add",
+                    code: KeyCode::Char('a'),
+                    enabled: true,
+                },
+                FooterActionSpec {
+                    key: "n",
+                    label: "rename",
+                    code: KeyCode::Char('n'),
+                    enabled,
+                },
+                FooterActionSpec {
+                    key: "d",
+                    label: "remove",
+                    code: KeyCode::Char('d'),
+                    enabled,
+                },
+                FooterActionSpec {
+                    key: "h",
+                    label: "help",
+                    code: KeyCode::Char('h'),
+                    enabled: true,
+                },
+                FooterActionSpec {
+                    key: "q",
+                    label: "quit",
+                    code: KeyCode::Char('q'),
+                    enabled: true,
+                },
+            ]
+        }
+        Tab::Settings => vec![
+            FooterActionSpec {
+                key: "↑",
+                label: "previous",
+                code: KeyCode::Up,
+                enabled: true,
+            },
+            FooterActionSpec {
+                key: "↓",
+                label: "next",
+                code: KeyCode::Down,
+                enabled: true,
+            },
+            FooterActionSpec {
+                key: "enter",
+                label: "edit",
+                code: KeyCode::Enter,
+                enabled: true,
+            },
+            FooterActionSpec {
+                key: "s",
+                label: "save",
+                code: KeyCode::Char('s'),
+                enabled: true,
+            },
+            FooterActionSpec {
+                key: "h",
+                label: "help",
+                code: KeyCode::Char('h'),
+                enabled: true,
+            },
+            FooterActionSpec {
+                key: "q",
+                label: "quit",
+                code: KeyCode::Char('q'),
+                enabled: true,
+            },
+        ],
+        Tab::Accounts => keymap::status_bar_items()
+            .into_iter()
+            .flat_map(|(key, label)| {
+                if key == "j / k / ↑ ↓" {
+                    return vec![
+                        FooterActionSpec {
+                            key: "↑",
+                            label: "previous",
+                            code: KeyCode::Up,
+                            enabled: app.view_indices.len() > 1,
+                        },
+                        FooterActionSpec {
+                            key: "↓",
+                            label: "next",
+                            code: KeyCode::Down,
+                            enabled: app.view_indices.len() > 1,
+                        },
+                    ];
+                }
+                vec![FooterActionSpec {
+                    key,
+                    label: short_label(label),
+                    code: account_footer_code(key),
+                    enabled: account_footer_enabled(app, key),
+                }]
+            })
+            .collect(),
     }
+}
+
+fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
     // Rename input takes top priority
     if let Some(rs) = &app.rename {
         let line = Line::from(vec![
@@ -1144,70 +1306,163 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ));
         f.render_widget(Paragraph::new(msg).style(base()), area);
     } else if !app.marked.is_empty() {
+        let prefix = format!(" {} selected \u{2014} ", app.marked.len());
+        let enter_label = "for batch";
+        let esc_label = "to clear";
+        let enter_x = prefix.chars().count();
+        let esc_x = enter_x + "enter".chars().count() + 1 + enter_label.chars().count() + 3;
         let line = Line::from(vec![
-            Span::styled(" ", base()),
-            Span::styled(
-                format!("{}", app.marked.len()),
-                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" selected", base().fg(C_YELLOW)),
-            Span::styled(" \u{2014} ", base().fg(DIM)),
+            Span::styled(prefix, base().fg(C_YELLOW)),
             Span::styled("enter", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(" for batch \u{2502} ", base().fg(DIM)),
+            Span::styled(format!(" {enter_label} \u{2502} "), base().fg(DIM)),
             Span::styled("esc", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(" to clear", base().fg(DIM)),
+            Span::styled(format!(" {esc_label}"), base().fg(DIM)),
         ]);
         f.render_widget(Paragraph::new(line).style(base()), area);
-    } else if app.active_tab == Tab::Providers {
-        let key =
-            |k: &'static str| Span::styled(k, base().fg(C_YELLOW).add_modifier(Modifier::BOLD));
-        let dim = |t: &'static str| Span::styled(t, base().fg(DIM));
-        let line = Line::from(vec![
-            dim(" "),
-            key("j/k"),
-            dim(" nav \u{2502} "),
-            key("enter/o"),
-            dim(" launch \u{2502} "),
-            key("e"),
-            dim(" edit \u{2502} "),
-            key("a"),
-            dim(" add \u{2502} "),
-            key("n"),
-            dim(" rename \u{2502} "),
-            key("d"),
-            dim(" remove \u{2502} "),
-            key("h"),
-            dim(" help \u{2502} "),
-            key("q"),
-            dim(" quit"),
-        ]);
-        f.render_widget(Paragraph::new(line).style(base()), area);
-    } else if app.active_tab == Tab::Settings {
-        let key =
-            |k: &'static str| Span::styled(k, base().fg(C_YELLOW).add_modifier(Modifier::BOLD));
-        let dim = |t: &'static str| Span::styled(t, base().fg(DIM));
-        let line = Line::from(vec![
-            dim(" "),
-            key("j/k"),
-            dim(" field \u{2502} "),
-            key("enter"),
-            dim(" edit \u{2502} "),
-            key("s"),
-            dim(" save \u{2502} "),
-            key("h"),
-            dim(" help \u{2502} "),
-            key("q"),
-            dim(" quit"),
-        ]);
-        f.render_widget(Paragraph::new(line).style(base()), area);
+        register_footer_hit(app, area, 0, enter_x, "enter".len(), KeyCode::Enter);
+        register_footer_hit(app, area, 0, esc_x, "esc".len(), KeyCode::Esc);
     } else {
-        let lines = build_help_lines(area.width as usize);
-        f.render_widget(Paragraph::new(lines).style(base()), area);
+        let specs = normal_footer_specs(app);
+        render_footer_specs(f, app, area, &specs);
     }
 
     // Version indicator — always rendered at bottom-right corner
+    let ver_spans = version_spans(app);
+    if let Some(ver_area) = version_area(app, area) {
+        f.render_widget(
+            Paragraph::new(Line::from(ver_spans)).style(base()),
+            ver_area,
+        );
+    }
+}
+
+fn render_footer_specs(f: &mut Frame, app: &mut App, area: Rect, specs: &[FooterActionSpec]) {
+    let (lines, hits) = build_footer_layout(footer_content_width(app, area.width), specs);
+    f.render_widget(Paragraph::new(lines).style(base()), area);
+    for (line, x, width, code) in hits {
+        register_footer_hit(app, area, line, x, width, code);
+    }
+}
+
+fn footer_content_width(app: &App, width: u16) -> usize {
+    let version_width: usize = version_spans(app).iter().map(Span::width).sum();
+    usize::from(width).saturating_sub(version_width)
+}
+
+fn build_footer_layout(
+    width: usize,
+    specs: &[FooterActionSpec],
+) -> (Vec<Line<'static>>, Vec<FooterHit>) {
+    let separator = " \u{2502} ";
+    let mut lines = Vec::new();
+    let mut hits = Vec::new();
+    let mut spans = vec![Span::styled(" ", base())];
+    let mut used = 1usize;
+    let mut line = 0usize;
+
+    for (idx, spec) in specs.iter().enumerate() {
+        let key_width = spec.key.chars().count();
+        let label_width = spec.label.chars().count();
+        let separator_width = usize::from(idx + 1 < specs.len()) * separator.chars().count();
+        let item_width = key_width + 1 + label_width + separator_width;
+        if used + item_width > width && used > 1 {
+            lines.push(Line::from(spans));
+            spans = vec![Span::styled(" ", base())];
+            used = 1;
+            line += 1;
+        }
+
+        if spec.enabled {
+            hits.push((line, used, key_width + 1 + label_width, spec.code));
+        }
+        spans.push(Span::styled(
+            spec.key,
+            base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" ", base()));
+        spans.push(Span::styled(spec.label, base().fg(C_GRAY)));
+        if idx + 1 < specs.len() {
+            spans.push(Span::styled(separator, base().fg(DIM)));
+        }
+        used += item_width;
+    }
+    if spans.len() > 1 || lines.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    (lines, hits)
+}
+
+fn register_footer_hit(
+    app: &mut App,
+    area: Rect,
+    line: usize,
+    x: usize,
+    width: usize,
+    code: KeyCode,
+) {
+    let Ok(line) = u16::try_from(line) else {
+        return;
+    };
+    let Ok(x) = u16::try_from(x) else {
+        return;
+    };
+    let Ok(width) = u16::try_from(width) else {
+        return;
+    };
+    let y = area.y.saturating_add(line);
+    if y >= area.y.saturating_add(area.height) || x >= area.width {
+        return;
+    }
+    let mut right = x.saturating_add(width).min(area.width);
+    if let Some(version) = version_area(app, area)
+        && y == version.y
+        && version.x > area.x
+    {
+        right = right.min(version.x.saturating_sub(area.x));
+    }
+    if right > x {
+        app.hitmap.footer_actions.push((
+            Rect {
+                x: area.x.saturating_add(x),
+                y,
+                width: right - x,
+                height: 1,
+            },
+            code,
+        ));
+    }
+}
+
+fn account_footer_code(key: &str) -> KeyCode {
+    match key {
+        "j / k / ↑ ↓" => KeyCode::Char('j'),
+        "/" => KeyCode::Char('/'),
+        "enter" => KeyCode::Enter,
+        "o" => KeyCode::Char('o'),
+        "u" => KeyCode::Char('u'),
+        "a" => KeyCode::Char('a'),
+        "r" => KeyCode::Char('r'),
+        "i" => KeyCode::Char('i'),
+        "h" => KeyCode::Char('h'),
+        "q" => KeyCode::Char('q'),
+        _ => KeyCode::Null,
+    }
+}
+
+fn account_footer_enabled(app: &App, key: &str) -> bool {
+    let has_selected = app.selected_account_idx().is_some() && app.marked.is_empty();
+    match key {
+        "j / k / ↑ ↓" => app.view_indices.len() > 1,
+        "/" | "a" | "h" | "q" => true,
+        "enter" | "o" | "u" | "i" => has_selected,
+        "r" => !app.view_indices.is_empty(),
+        _ => false,
+    }
+}
+
+fn version_spans(app: &App) -> Vec<Span<'static>> {
     let version = crate::update::current_version();
-    let ver_spans: Vec<Span> = if let Some(latest) = &app.update_available {
+    if let Some(latest) = &app.update_available {
         vec![
             Span::styled(" \u{2502} ", base().fg(DIM)),
             Span::styled(format!("v{version}"), base().fg(DIM)),
@@ -1218,20 +1473,24 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" \u{2502} ", base().fg(DIM)),
             Span::styled(format!("v{version} "), base().fg(DIM)),
         ]
-    };
-    let ver_width: usize = ver_spans.iter().map(|s| s.width()).sum();
-    if (area.width as usize) > ver_width {
-        let ver_area = Rect {
-            x: area.x + area.width - ver_width as u16,
-            y: area.y + area.height.saturating_sub(1),
-            width: ver_width as u16,
-            height: 1,
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(ver_spans)).style(base()),
-            ver_area,
-        );
     }
+}
+
+fn version_area(app: &App, area: Rect) -> Option<Rect> {
+    let width: u16 = version_spans(app)
+        .iter()
+        .map(|span| span.width())
+        .try_fold(0u16, |acc, width| {
+            u16::try_from(width)
+                .ok()
+                .and_then(|width| acc.checked_add(width))
+        })?;
+    (area.width > width).then_some(Rect {
+        x: area.x + area.width - width,
+        y: area.y + area.height.saturating_sub(1),
+        width,
+        height: 1,
+    })
 }
 
 /// Render a single usage gauge (5h or 7d) with block chars and pace marker.
@@ -1466,50 +1725,6 @@ fn usage_pct_style(remaining_pct_str: &str, is_selected: bool) -> Style {
     }
 }
 
-fn build_help_lines(width: usize) -> Vec<Line<'static>> {
-    let key_style = base().fg(C_YELLOW);
-    let sep_style = base().fg(DIM);
-    let label_style = base().fg(C_GRAY);
-    let space_style = base();
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut spans: Vec<Span<'static>> = vec![Span::styled(" ", space_style)];
-    let mut used = 1usize;
-
-    let items = keymap::status_bar_items();
-    for (i, (k, label)) in items.iter().enumerate() {
-        let key_disp = (*k).to_string();
-        let label_short = short_label(label);
-        let sep = " \u{2502} ";
-        let item_len = key_disp.chars().count()
-            + 1
-            + label_short.chars().count()
-            + if i + 1 < items.len() {
-                sep.chars().count()
-            } else {
-                0
-            };
-        if used + item_len > width && used > 1 {
-            lines.push(Line::from(spans));
-            spans = vec![Span::styled(" ", space_style)];
-            used = 1;
-        }
-        spans.push(Span::styled(key_disp, key_style));
-        spans.push(Span::styled(" ", space_style));
-        spans.push(Span::styled(label_short.to_string(), label_style));
-        if i + 1 < items.len() {
-            spans.push(Span::styled(sep, sep_style));
-        }
-        used += item_len;
-    }
-    if spans.len() > 1 {
-        lines.push(Line::from(spans));
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled("", space_style)));
-    }
-    lines
-}
-
 /// Compress verbose keymap labels for status bar.
 fn short_label(label: &str) -> &str {
     match label {
@@ -1553,10 +1768,9 @@ fn status_bar_height(app: &App, width: u16) -> usize {
     {
         return 1;
     }
-    if matches!(app.active_tab, Tab::Providers | Tab::Settings | Tab::Logs) {
-        return 1;
-    }
-    build_help_lines(width as usize).len()
+    build_footer_layout(footer_content_width(app, width), &normal_footer_specs(app))
+        .0
+        .len()
 }
 
 #[cfg(test)]

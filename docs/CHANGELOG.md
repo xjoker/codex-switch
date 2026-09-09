@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Clickable TUI actions** — Account-detail actions and the visible main-view footer now accept mouse clicks through the same dispatch path as their keyboard shortcuts. Disabled actions are inert for both inputs, wrapped footer rows keep accurate hit regions, and overlays block clicks from reaching the footer beneath them.
 - **TUI mouse double-click state** — Scrolling or using the keyboard now cancels a pending row double-click, so a later single click cannot unexpectedly open an account menu or provider launch picker. Render-backed tests cover all four tabs, provider rows, and modal click/wheel isolation.
 - **Account launch picker** — Accounts-page and account-menu `o` now opens the launch picker before starting Codex. It offers Codex's default behavior plus cached account models, with one-shot reasoning and extra arguments.
 - **Maintenance updates** — Updated `flate2` to 1.1.10, `owo-colors` to 4.4.0, and the pinned `softprops/action-gh-release` action to 3.0.3. Dependency resolution also retains the already-current `thiserror` 2.0.20 and `webbrowser` 1.2.4.

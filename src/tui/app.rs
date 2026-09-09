@@ -711,7 +711,7 @@ impl App {
     /// Scope (P1+P2): wheel scroll on logs/help/menus; left-click tabs and
     /// list rows; click outside dismissible overlays closes them. Forms,
     /// launch picker, confirm, and text edits absorb mouse without action.
-    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<KeyCode> {
         use super::hitmap::{HitMap, OverlayHit};
 
         let col = mouse.column;
@@ -725,7 +725,7 @@ impl App {
                     OverlayHit::Modal => {}
                     OverlayHit::Dismissible { panel } => {
                         if !HitMap::contains(panel, col, row) {
-                            return;
+                            return None;
                         }
                         if self.help_popup.is_some() {
                             if let Some(state) = self.help_popup.as_mut() {
@@ -759,6 +759,11 @@ impl App {
                 OverlayHit::Modal => self.last_list_click = None,
                 OverlayHit::Dismissible { panel } => {
                     self.last_list_click = None;
+                    if self.menu.is_some()
+                        && let Some(key) = self.hitmap.menu_action_at(col, row)
+                    {
+                        return Some(key);
+                    }
                     if !HitMap::contains(panel, col, row) {
                         if self.help_popup.is_some() {
                             self.close_help();
@@ -768,10 +773,14 @@ impl App {
                     }
                 }
                 OverlayHit::None => {
+                    if let Some(code) = self.hitmap.footer_action_at(col, row) {
+                        self.last_list_click = None;
+                        return Some(code);
+                    }
                     if let Some(tab) = self.hitmap.tab_at(col, row) {
                         self.last_list_click = None;
                         self.select_tab(tab);
-                        return;
+                        return None;
                     }
                     match self.active_tab {
                         Tab::Accounts => {
@@ -833,6 +842,7 @@ impl App {
             },
             _ => {}
         }
+        None
     }
 
     fn invalidate_model_request(&mut self, alias: &str) {
@@ -2714,70 +2724,147 @@ async fn run_app(
                         continue;
                     }
 
-                    match code {
-                        KeyCode::Char('q') => {
-                            if app.request_quit() {
-                                if app.switch_in_flight() {
-                                    quit_after_switch = true;
-                                    app.set_status(
-                                        "Waiting for account switch to finish before exit"
-                                            .to_string(),
-                                        60,
-                                    );
-                                } else {
-                                    break;
-                                }
-                            }
+                    match dispatch_main_key(
+                        &mut app,
+                        terminal,
+                        code,
+                        shutdown,
+                        &mut quit_after_switch,
+                    )
+                    .await
+                    {
+                        MainKeyOutcome::Continue => {}
+                        MainKeyOutcome::Quit => break,
+                        MainKeyOutcome::Signal(signal) => {
+                            wait_for_switch_before_exit(&mut app).await;
+                            return Ok(Some(signal));
                         }
-                        KeyCode::Char('h') => app.open_help(),
-                        KeyCode::Tab => app.cycle_tab(true),
-                        KeyCode::BackTab => app.cycle_tab(false),
-                        _ => match app.active_tab {
-                            Tab::Accounts => {
-                                if let Some(alias) = app.handle_accounts_key(code)
-                                    && let Some(signal) = perform_launch(
-                                        terminal,
-                                        &mut app,
-                                        alias,
-                                        None,
-                                        crate::provider::ReasoningLaunch::Saved,
-                                        Vec::new(),
-                                        shutdown,
-                                    )
-                                    .await
-                                {
-                                    wait_for_switch_before_exit(&mut app).await;
-                                    return Ok(Some(signal));
-                                }
-                            }
-                            Tab::Providers => app.handle_provider_list_key(code),
-                            Tab::Settings => app.handle_settings_key(code),
-                            Tab::Logs => match code {
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    app.log_scroll = app.log_scroll.saturating_sub(1);
-                                }
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    app.log_scroll = app.log_scroll.saturating_add(1);
-                                }
-                                KeyCode::PageDown => {
-                                    app.log_scroll = app.log_scroll.saturating_sub(10);
-                                }
-                                KeyCode::PageUp => {
-                                    app.log_scroll = app.log_scroll.saturating_add(10);
-                                }
-                                KeyCode::End => app.log_scroll = 0,
-                                _ => {}
-                            },
-                        },
                     }
                 }
-                Event::Mouse(mouse) => app.handle_mouse(mouse),
+                Event::Mouse(mouse) => {
+                    if let Some(code) = app.handle_mouse(mouse) {
+                        let outcome = if app.menu.is_some() {
+                            handle_menu_key(&mut app, terminal, code, shutdown)
+                                .await
+                                .map_or(MainKeyOutcome::Continue, MainKeyOutcome::Signal)
+                        } else {
+                            dispatch_main_key(
+                                &mut app,
+                                terminal,
+                                code,
+                                shutdown,
+                                &mut quit_after_switch,
+                            )
+                            .await
+                        };
+                        match outcome {
+                            MainKeyOutcome::Continue => {}
+                            MainKeyOutcome::Quit => break,
+                            MainKeyOutcome::Signal(signal) => {
+                                wait_for_switch_before_exit(&mut app).await;
+                                return Ok(Some(signal));
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
 
     Ok(None)
+}
+
+enum MainKeyOutcome {
+    Continue,
+    Quit,
+    Signal(crate::signals::ShutdownSignal),
+}
+
+async fn dispatch_main_key(
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
+    code: KeyCode,
+    shutdown: &mut crate::signals::ShutdownListener,
+    quit_after_switch: &mut bool,
+) -> MainKeyOutcome {
+    match code {
+        KeyCode::Char('q') => {
+            if app.request_quit() {
+                if app.switch_in_flight() {
+                    *quit_after_switch = true;
+                    app.set_status(
+                        "Waiting for account switch to finish before exit".to_string(),
+                        60,
+                    );
+                    MainKeyOutcome::Continue
+                } else {
+                    MainKeyOutcome::Quit
+                }
+            } else {
+                MainKeyOutcome::Continue
+            }
+        }
+        KeyCode::Char('h') => {
+            app.open_help();
+            MainKeyOutcome::Continue
+        }
+        KeyCode::Tab => {
+            app.cycle_tab(true);
+            MainKeyOutcome::Continue
+        }
+        KeyCode::BackTab => {
+            app.cycle_tab(false);
+            MainKeyOutcome::Continue
+        }
+        _ => match app.active_tab {
+            Tab::Accounts => {
+                if let Some(alias) = app.handle_accounts_key(code)
+                    && let Some(signal) = perform_launch(
+                        terminal,
+                        app,
+                        alias,
+                        None,
+                        crate::provider::ReasoningLaunch::Saved,
+                        Vec::new(),
+                        shutdown,
+                    )
+                    .await
+                {
+                    MainKeyOutcome::Signal(signal)
+                } else {
+                    MainKeyOutcome::Continue
+                }
+            }
+            Tab::Providers => {
+                app.handle_provider_list_key(code);
+                MainKeyOutcome::Continue
+            }
+            Tab::Settings => {
+                app.handle_settings_key(code);
+                MainKeyOutcome::Continue
+            }
+            Tab::Logs => {
+                match code {
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.log_scroll = app.log_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.log_scroll = app.log_scroll.saturating_add(1);
+                    }
+                    KeyCode::PageDown => {
+                        app.log_scroll = app.log_scroll.saturating_sub(10);
+                    }
+                    KeyCode::PageUp => {
+                        app.log_scroll = app.log_scroll.saturating_add(10);
+                    }
+                    KeyCode::End => app.log_scroll = 0,
+                    _ => {}
+                }
+                MainKeyOutcome::Continue
+            }
+        },
+    }
 }
 
 async fn wait_for_switch_before_exit(app: &mut App) {
@@ -3723,6 +3810,136 @@ mod tests {
                 .scroll,
             before_scroll
         );
+    }
+
+    #[test]
+    fn rendered_accounts_footer_actions_return_the_same_keys_as_keyboard() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+
+        let (area, code) = app
+            .hitmap
+            .footer_actions
+            .iter()
+            .find(|(_, code)| *code == KeyCode::Char('u'))
+            .copied()
+            .expect("rendered use action hit region");
+        assert_eq!(app.handle_mouse(left_click(area.x, area.y)), Some(code));
+    }
+
+    #[test]
+    fn rendered_footer_actions_do_not_include_unusable_navigation() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.active_tab = Tab::Providers;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(
+            app.hitmap
+                .footer_actions
+                .iter()
+                .any(|(_, code)| *code == KeyCode::Char('a'))
+        );
+        assert!(
+            !app.hitmap
+                .footer_actions
+                .iter()
+                .any(|(_, code)| *code == KeyCode::Enter)
+        );
+    }
+
+    #[test]
+    fn rendered_wrapped_footer_keeps_its_last_action_clickable() {
+        let mut app = App::new();
+        app.active_tab = Tab::Providers;
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+
+        let (area, _) = app
+            .hitmap
+            .footer_actions
+            .iter()
+            .find(|(_, code)| *code == KeyCode::Char('q'))
+            .copied()
+            .expect("wrapped footer must retain the final quit action");
+        assert_eq!(
+            app.handle_mouse(left_click(area.x, area.y)),
+            Some(KeyCode::Char('q'))
+        );
+    }
+
+    #[tokio::test]
+    async fn rendered_menu_action_click_is_blocked_from_footer_passthrough() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.open_account_menu();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        let footer = app
+            .hitmap
+            .footer_actions
+            .iter()
+            .find(|(_, code)| *code == KeyCode::Char('u'))
+            .copied();
+        assert!(footer.is_some());
+        let result = footer.map(|(area, _)| app.handle_mouse(left_click(area.x, area.y)));
+        assert_eq!(result, Some(None));
+        assert!(app.menu.is_none());
+        assert!(!app.switch_in_flight());
+    }
+
+    #[tokio::test]
+    async fn rendered_account_menu_action_click_returns_its_keyboard_action() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "account".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.open_account_menu();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+
+        let (area, code) = app
+            .hitmap
+            .menu_actions
+            .iter()
+            .find(|(_, code)| *code == KeyCode::Char('u'))
+            .copied()
+            .expect("rendered use action hit region");
+        assert_eq!(app.handle_mouse(left_click(area.x, area.y)), Some(code));
     }
 
     fn capture_info_logs(action: impl FnOnce()) -> Vec<String> {

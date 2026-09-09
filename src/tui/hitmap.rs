@@ -3,6 +3,7 @@
 //! Render populates this map; the event loop reads it on click/scroll.
 //! Regions must use the same layout constraints as `ui::render`.
 
+use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 
 use super::app::Tab;
@@ -14,6 +15,10 @@ pub struct HitMap {
     pub provider_list: Option<ListHit>,
     pub logs: Option<Rect>,
     pub overlay: OverlayHit,
+    /// Clickable actions rendered in the bottom status/help bar.
+    pub footer_actions: Vec<(Rect, KeyCode)>,
+    /// Clickable key-equivalent actions inside the active dismissible menu.
+    pub menu_actions: Vec<(Rect, KeyCode)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +67,20 @@ impl HitMap {
             .iter()
             .find(|(area, _)| Self::contains(*area, column, row))
             .map(|(_, tab)| *tab)
+    }
+
+    pub fn menu_action_at(&self, column: u16, row: u16) -> Option<KeyCode> {
+        self.menu_actions
+            .iter()
+            .find(|(area, _)| Self::contains(*area, column, row))
+            .map(|(_, key)| *key)
+    }
+
+    pub fn footer_action_at(&self, column: u16, row: u16) -> Option<KeyCode> {
+        self.footer_actions
+            .iter()
+            .find(|(area, _)| Self::contains(*area, column, row))
+            .map(|(_, code)| *code)
     }
 }
 
