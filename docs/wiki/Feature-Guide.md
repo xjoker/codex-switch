@@ -76,6 +76,8 @@ Switching replaces the live `$CODEX_HOME/auth.json` atomically while holding a p
 
 `launch` selects or stages a profile, starts Codex, then restores the previous live authentication after the configured compatibility delay:
 
+In the TUI Accounts page or account menu, `o` opens the same launch picker used by providers. `(Codex default)` adds no model or reasoning override; cached account models can supply a one-shot model and reasoning effort, and the picker also accepts extra Codex arguments.
+
 ```bash
 codex-switch launch work -- --model gpt-5.4
 codex-switch launch work -- exec --json "review this"

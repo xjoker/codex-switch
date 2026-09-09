@@ -150,7 +150,7 @@ async fn launch_interactive(
         return launch_provider(profile, model, reasoning, args, json, tui_shutdown).await;
     }
 
-    let forwarded = chatgpt_codex_argv(model, args);
+    let forwarded = chatgpt_codex_argv(model, reasoning, args);
 
     let mut revival_hint = None;
     let target_alias = match alias {
@@ -366,14 +366,26 @@ async fn launch_interactive(
     Ok(TuiLaunchOutcome::Exited(exit_code))
 }
 
-/// Codex argv for a ChatGPT `launch`: optional `--model` is spliced after a
-/// Codex subcommand in `passthrough` (Codex 0.149 ignores flags in front of
-/// `exec`). Interactive launch has no subcommand, so `--model` stays in front.
-pub(crate) fn chatgpt_codex_argv(model: Option<&str>, passthrough: Vec<String>) -> Vec<String> {
+/// Codex argv for a ChatGPT `launch`: optional `--model` and one-shot
+/// reasoning are spliced after a Codex subcommand in `passthrough` (Codex
+/// 0.149 ignores flags in front of `exec`). Interactive launch has no
+/// subcommand, so those flags stay in front.
+pub(crate) fn chatgpt_codex_argv(
+    model: Option<&str>,
+    reasoning: ReasoningLaunch,
+    passthrough: Vec<String>,
+) -> Vec<String> {
     let mut extra = Vec::new();
     if let Some(model) = model.filter(|model| !model.is_empty()) {
         extra.push("--model".to_string());
         extra.push(model.to_string());
+    }
+    if let ReasoningLaunch::Effort(effort) = &reasoning {
+        let effort = effort.trim();
+        if !effort.is_empty() && !effort.eq_ignore_ascii_case("none") {
+            extra.push("-c".to_string());
+            extra.push(format!("model_reasoning_effort={effort}"));
+        }
     }
     splice_after_subcommand(extra, passthrough)
 }
@@ -1336,9 +1348,30 @@ mod tests {
         assert_eq!(
             chatgpt_codex_argv(
                 Some("gpt-5.4"),
+                crate::provider::ReasoningLaunch::Saved,
                 vec!["exec".into(), "--json".into(), "hi".into()]
             ),
             ["exec", "--model", "gpt-5.4", "--json", "hi"]
+        );
+    }
+
+    #[test]
+    fn chatgpt_argv_puts_one_shot_reasoning_after_a_codex_subcommand() {
+        assert_eq!(
+            chatgpt_codex_argv(
+                Some("gpt-5.4"),
+                crate::provider::ReasoningLaunch::Effort("high".into()),
+                vec!["exec".into(), "--json".into(), "hi".into()]
+            ),
+            [
+                "exec",
+                "--model",
+                "gpt-5.4",
+                "-c",
+                "model_reasoning_effort=high",
+                "--json",
+                "hi"
+            ]
         );
     }
 
@@ -1443,7 +1476,11 @@ mod tests {
     #[test]
     fn chatgpt_argv_without_model_is_passthrough_only() {
         assert_eq!(
-            chatgpt_codex_argv(None, vec!["resume".into(), "--last".into()]),
+            chatgpt_codex_argv(
+                None,
+                crate::provider::ReasoningLaunch::Skip,
+                vec!["resume".into(), "--last".into()]
+            ),
             ["resume", "--last"]
         );
     }

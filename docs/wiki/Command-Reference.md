@@ -95,7 +95,7 @@ Mouse input is available alongside the keyboard: click a tab to switch pages, cl
 | `s` | Cycle sort order (name / quota / status) |
 | `Space` | Mark or unmark an account |
 | `u` (Accounts page when no accounts are marked, or account menu) | Switch to the selected account; the status line shows `Switching to …` while it is in progress |
-| `o` | Launch Codex with the selected account (also `o` in the account menu) |
+| `o` | Open the selected account's launch picker (also `o` in the account menu): use Codex's default, or choose a cached model, one-shot reasoning, and extra Codex arguments |
 | `c` (account menu) | Confirm and consume the earliest-expiring reset card |
 | `w` (account menu) | Warm up the selected account |
 | `l` (account menu) | Re-login the selected account |

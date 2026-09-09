@@ -869,14 +869,7 @@ impl App {
                 if self.defer_while_switching("launching Codex") {
                     return None;
                 }
-                return self
-                    .selected_account_idx()
-                    .and_then(|idx| self.accounts.get(idx))
-                    .map(|entry| entry.alias.clone())
-                    .or_else(|| {
-                        self.set_status_error("No account selected".to_string(), 3);
-                        None
-                    });
+                self.open_account_launch();
             }
             KeyCode::Char('u') if self.marked.is_empty() => self.switch_selected(),
             KeyCode::Char('r') => self.refresh(Refresh::Forced),
@@ -899,6 +892,33 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    /// Open the ChatGPT launch picker for the selected account.
+    pub fn open_account_launch(&mut self) {
+        let Some(idx) = self.selected_account_idx() else {
+            self.set_status_error("No account selected".to_string(), 3);
+            return;
+        };
+        if !self.marked.is_empty() {
+            return;
+        }
+        let alias = self.accounts[idx].alias.clone();
+        self.open_account_launch_for(&alias);
+    }
+
+    /// Open the ChatGPT launch picker for an account alias, using only models
+    /// already cached by the TUI. A loading or failed cache still offers the
+    /// Codex default row immediately.
+    pub fn open_account_launch_for(&mut self, alias: &str) {
+        self.ensure_models_loaded(alias);
+        let models = match self.model_cache.get(alias) {
+            Some(ModelStatus::Loaded(models)) => models.clone(),
+            _ => Vec::new(),
+        };
+        self.provider_launch = Some(super::provider_launch::ProviderLaunchState::from_chatgpt(
+            alias, &models,
+        ));
     }
 
     pub fn handle_settings_key(&mut self, code: KeyCode) {
@@ -2630,7 +2650,7 @@ async fn run_app(
                                 terminal,
                                 &mut app,
                                 alias,
-                                Some(model),
+                                (!model.is_empty()).then_some(model),
                                 reasoning,
                                 extra_args,
                                 shutdown,
@@ -2770,7 +2790,7 @@ async fn handle_menu_key(
     app: &mut App,
     terminal: &mut DefaultTerminal,
     code: KeyCode,
-    shutdown: &mut crate::signals::ShutdownListener,
+    _shutdown: &mut crate::signals::ShutdownListener,
 ) -> Option<crate::signals::ShutdownSignal> {
     let menu = app.menu.as_mut()?;
     let action = menu.handle_key(code);
@@ -2793,19 +2813,7 @@ async fn handle_menu_key(
                 return None;
             }
             app.close_menu();
-            if let Some(signal) = perform_launch(
-                terminal,
-                app,
-                alias,
-                None,
-                crate::provider::ReasoningLaunch::Saved,
-                Vec::new(),
-                shutdown,
-            )
-            .await
-            {
-                return Some(signal);
-            }
+            app.open_account_launch_for(&alias);
         }
         MenuAction::ReloginRequest(alias, email) => {
             app.open_relogin_flow_menu(alias, email);
@@ -3713,6 +3721,50 @@ mod tests {
         app.handle_provider_list_key(KeyCode::Char('o'));
         assert!(app.provider_launch.is_some());
         assert!(app.provider_form.is_none());
+    }
+
+    #[test]
+    fn account_o_opens_picker_with_codex_default_and_cached_model() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "work".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Idle,
+            is_current: false,
+        });
+        app.view_indices.push(0);
+        app.model_cache.insert(
+            "work".into(),
+            ModelStatus::Loaded(vec![ModelEntry {
+                slug: "gpt-5.4".into(),
+                display_name: Some("GPT-5.4".into()),
+                default_reasoning_effort: Some("high".into()),
+                ..ModelEntry::default()
+            }]),
+        );
+
+        assert!(app.handle_accounts_key(KeyCode::Char('o')).is_none());
+        assert!(app.provider_launch.is_some());
+
+        let (alias, model, reasoning, extra_args) = app
+            .handle_provider_launch_key(KeyCode::Enter)
+            .expect("default row should launch");
+        assert_eq!(alias, "work");
+        assert!(model.is_empty());
+        assert_eq!(reasoning, crate::provider::ReasoningLaunch::Skip);
+        assert!(extra_args.is_empty());
+
+        app.handle_accounts_key(KeyCode::Char('o'));
+        app.handle_provider_launch_key(KeyCode::Down);
+        let (alias, model, reasoning, _) = app
+            .handle_provider_launch_key(KeyCode::Enter)
+            .expect("cached model row should launch");
+        assert_eq!(alias, "work");
+        assert_eq!(model, "gpt-5.4");
+        assert_eq!(
+            reasoning,
+            crate::provider::ReasoningLaunch::Effort("high".into())
+        );
     }
 
     #[test]
