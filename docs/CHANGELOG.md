@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v20260909.2.0 (candidate) — 2026-09-09
+
 - **Clickable TUI actions** — Account-detail actions and the visible main-view footer now accept mouse clicks through the same dispatch path as their keyboard shortcuts. Disabled actions are inert for both inputs, wrapped footer rows keep accurate hit regions, and overlays block clicks from reaching the footer beneath them.
 - **TUI mouse double-click state** — Scrolling or using the keyboard now cancels a pending row double-click, so a later single click cannot unexpectedly open an account menu or provider launch picker. Render-backed tests cover all four tabs, provider rows, and modal click/wheel isolation.
 - **Account launch picker** — Accounts-page and account-menu `o` now opens the launch picker before starting Codex. It offers Codex's default behavior plus cached account models, with one-shot reasoning and extra arguments.
