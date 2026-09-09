@@ -46,7 +46,7 @@ codex-switch import ~/auth-backups
 | 目的 | 命令 / 操作 |
 |---|---|
 | 查看额度与状态 | `codex-switch list`；强制刷新加 `-f` |
-| 一次性预热额度窗口 | `codex-switch warmup` 或 `codex-switch warmup <别名>` |
+| 一次性预热 5h 额度窗口 | `codex-switch warmup` 或 `codex-switch warmup <别名>`（只有 7d 窗口的账号会跳过） |
 | 自动选最佳账号 | `codex-switch use` |
 | 切换到指定账号 | `codex-switch use <别名>` |
 | 用某账号启动 Codex（结束后恢复现场 `auth.json`） | `codex-switch launch <别名> -- [codex 参数]` |

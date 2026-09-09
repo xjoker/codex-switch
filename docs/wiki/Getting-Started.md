@@ -76,7 +76,7 @@ codex-switch also notices logins performed outside of it: when the live `auth.js
 ```bash
 codex-switch list        # accounts, quota, availability
 codex-switch list --force # force a one-time usage refresh
-codex-switch warmup      # activate quota windows once for all profiles
+codex-switch warmup      # activate 5h quota windows once (skips 7d-only / free plans)
 codex-switch tui         # interactive dashboard
 codex-switch use         # switch to the best eligible account
 codex-switch launch      # select, start Codex, restore auth afterwards

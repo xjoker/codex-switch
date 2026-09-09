@@ -243,8 +243,10 @@ pub struct App {
     pub result_sender: tokio::sync::mpsc::Sender<(String, u64, Result<UsageInfo, UsageError>)>,
     pub pending_workspace: tokio::sync::mpsc::Receiver<String>,
     pub workspace_sender: tokio::sync::mpsc::Sender<String>,
-    pub pending_warmup: tokio::sync::mpsc::Receiver<(u64, String, Result<(), String>)>,
-    pub warmup_sender: tokio::sync::mpsc::Sender<(u64, String, Result<(), String>)>,
+    pub pending_warmup:
+        tokio::sync::mpsc::Receiver<(u64, String, Result<crate::warmup::WarmupOutcome, String>)>,
+    pub warmup_sender:
+        tokio::sync::mpsc::Sender<(u64, String, Result<crate::warmup::WarmupOutcome, String>)>,
     pub pending_reset_cards:
         tokio::sync::mpsc::Receiver<(String, Result<ConsumedResetCredit, ResetCardFailure>)>,
     pub reset_card_sender:
@@ -1132,7 +1134,14 @@ impl App {
                 skipped,
                 "warmup skipped"
             );
-            if skipped > 0 {
+            let no_five_hour = self
+                .accounts
+                .iter()
+                .find(|a| a.alias == alias)
+                .is_some_and(|a| self.account_lacks_five_hour_warmup(a));
+            if no_five_hour {
+                self.set_status(format!("{alias}: no 5h window, skipped"), 4);
+            } else if skipped > 0 {
                 self.set_status(format!("{alias}: already active or in flight"), 4);
             } else {
                 self.set_status(format!("{alias}: nothing to warm up"), 4);
@@ -1412,6 +1421,14 @@ impl App {
         self.warmup_tasks.values().any(|(a, _)| a == alias)
     }
 
+    fn account_lacks_five_hour_warmup(&self, account: &AccountEntry) -> bool {
+        match &account.usage {
+            UsageStatus::Loaded(u) => !crate::usage::usage_has_five_hour_warmup_target(u),
+            _ => crate::cache::get(&account.alias)
+                .is_some_and(|u| !crate::usage::usage_has_five_hour_warmup_target(&u)),
+        }
+    }
+
     fn warmup_indices(&mut self, target_indices: Vec<usize>) -> (usize, usize, usize) {
         let candidate_count = target_indices.len();
         let aliases: Vec<String> = target_indices
@@ -1419,6 +1436,7 @@ impl App {
             .filter_map(|&idx| self.accounts.get(idx))
             .filter(|a| {
                 !matches!(a.usage, UsageStatus::Error(_))
+                    && !self.account_lacks_five_hour_warmup(a)
                     && !self.is_already_warmed(&a.alias)
                     && !self.is_warmup_in_flight(&a.alias)
             })
@@ -1523,10 +1541,14 @@ impl App {
                 continue;
             }
             match result {
-                Ok(()) => {
+                Ok(crate::warmup::WarmupOutcome::Warmed) => {
                     tracing::info!(action = "warmup", alias = %alias, outcome = "completed", "warmup completed");
                     self.set_status(format!("Warmed up {alias} — refreshing usage..."), 4);
                     to_refresh.insert(alias);
+                }
+                Ok(crate::warmup::WarmupOutcome::SkippedNoFiveHour) => {
+                    tracing::info!(action = "warmup", alias = %alias, outcome = "skipped", reason = "no_5h", "warmup skipped");
+                    self.set_status(format!("{alias}: no 5h window, skipped"), 4);
                 }
                 Err(e) => {
                     tracing::error!(action = "warmup", alias = %alias, outcome = "failed", "warmup failed");
@@ -4789,6 +4811,34 @@ mod tests {
                     && line.contains("outcome=\"completed\"")
             }),
             "missing structured refresh event: {refreshed:?}"
+        );
+    }
+
+    #[test]
+    fn warmup_one_skips_accounts_without_a_five_hour_window() {
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "free".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Loaded(Box::new(UsageInfo {
+                secondary: Some(crate::usage::WindowUsage {
+                    used_percent: Some(10.0),
+                    resets_at: Some(1_000_000),
+                    window_minutes: Some(10_080),
+                }),
+                ..UsageInfo::default()
+            })),
+            is_current: true,
+        });
+        app.view_indices.push(0);
+        app.warmup_one("free");
+        assert!(
+            app.warmup_tasks.is_empty(),
+            "a 7d-only account must not be pinged"
+        );
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("free: no 5h window, skipped")
         );
     }
 

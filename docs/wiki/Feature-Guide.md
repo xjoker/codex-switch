@@ -117,14 +117,14 @@ JSON or non-interactive execution never consumes a card without the explicit fla
 
 ## Warm quota windows
 
-Fresh accounts show no reset timer until their first real request. `warmup` sends a one-time minimal request to activate inactive main and model-specific quota windows discovered from the official model response:
+Fresh paid accounts show no reset timer until their first real request. `warmup` sends a one-time minimal request to activate inactive 5h main and model-specific quota windows discovered from the official model response:
 
 ```bash
 codex-switch warmup
 codex-switch warmup work
 ```
 
-Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Already-active or unavailable pools are skipped. In the TUI, use the selected account menu's `w` for a one-time warmup; the batch menu's `w` warms marked accounts. The old `W` automatic-warmup shortcut and daemon schedule are removed. Press `t` on the Accounts page to toggle session-only automatic usage refresh.
+Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Accounts with only a 7-day window (free plans), already-active 5h pools, and unavailable pools are skipped. In the TUI, use the selected account menu's `w` for a one-time warmup; the batch menu's `w` warms marked accounts that have a 5h window. The old `W` automatic-warmup shortcut and daemon schedule are removed. Press `t` on the Accounts page to toggle session-only automatic usage refresh.
 
 ## Optional OS scheduling
 

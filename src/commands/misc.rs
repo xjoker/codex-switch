@@ -163,18 +163,20 @@ pub(crate) async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
     let now = auth::now_unix_secs();
     let mut to_warmup = Vec::new();
     for alias in &aliases {
-        let already_active = cache::get(alias)
-            .as_ref()
-            .is_some_and(|u| usage::usage_has_active_warmup_window(u, now));
-        if already_active {
+        let skip_reason = cache::get(alias).as_ref().and_then(|u| {
+            if !usage::usage_has_five_hour_warmup_target(u) {
+                Some("no 5h window, skipped")
+            } else if usage::usage_has_active_warmup_window(u, now) {
+                Some("already active, skipped")
+            } else {
+                None
+            }
+        });
+        if let Some(reason) = skip_reason {
             if json {
                 results.push(serde_json::json!({"alias": alias, "ok": true, "skipped": true}));
             } else {
-                user_println(&format!(
-                    "  {} {}",
-                    color::dim(alias),
-                    color::dim("already active, skipped")
-                ));
+                user_println(&format!("  {} {}", color::dim(alias), color::dim(reason)));
             }
         } else {
             to_warmup.push(alias.clone());
@@ -227,7 +229,7 @@ pub(crate) async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
     while let Some(res) = tasks.join_next().await {
         let (alias, result) = res.context("warmup task panicked")?;
         match &result {
-            Ok(()) => {
+            Ok(warmup::WarmupOutcome::Warmed) => {
                 tracing::info!(action = "warmup", alias = %alias, outcome = "completed", "warmup completed");
                 if json {
                     results.push(serde_json::json!({"alias": alias, "ok": true}));
@@ -236,6 +238,18 @@ pub(crate) async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
                         "  {} {}",
                         color::success(&alias),
                         color::dim("warmed up")
+                    ));
+                }
+            }
+            Ok(warmup::WarmupOutcome::SkippedNoFiveHour) => {
+                tracing::info!(action = "warmup", alias = %alias, outcome = "skipped", reason = "no_5h", "warmup skipped");
+                if json {
+                    results.push(serde_json::json!({"alias": alias, "ok": true, "skipped": true}));
+                } else {
+                    user_println(&format!(
+                        "  {} {}",
+                        color::dim(&alias),
+                        color::dim("no 5h window, skipped")
                     ));
                 }
             }

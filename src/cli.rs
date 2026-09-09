@@ -216,12 +216,13 @@ pub enum Commands {
         #[arg(long, conflicts_with = "dev")]
         stable: bool,
     },
-    /// Send a minimal request to activate the quota window countdown for one or all profiles
+    /// Send a minimal request to activate the 5h quota window for one or all profiles
     ///
-    /// Fresh accounts show no reset timer until their first real request.
-    /// This command triggers that timer without running a real task.
+    /// Fresh paid accounts show no reset timer until their first real request.
+    /// This command triggers that timer without running a real task. Accounts
+    /// with only a 7-day window (free plans) are skipped.
     #[command(
-        after_help = "Examples:\n  codex-switch warmup          # warmup all profiles\n  codex-switch warmup myalias  # warmup a specific profile"
+        after_help = "Examples:\n  codex-switch warmup          # warmup profiles that have a 5h window\n  codex-switch warmup myalias  # warmup a specific profile"
     )]
     Warmup {
         /// Profile alias to warm up (omit to warm up all profiles)

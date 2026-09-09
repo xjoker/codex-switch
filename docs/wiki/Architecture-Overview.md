@@ -75,7 +75,7 @@ Selection has two phases. Eligibility excludes candidates with missing authorita
 
 ## One-shot operations and scheduling boundary
 
-`warmup`, `list --force`, `use`, and `launch` perform one operation and exit. The TUI `w` action warms the selected account once, `u` starts a selected-account switch and reports progress in the status line, and `t` enables session-only automatic usage refresh. The project does not contain a resident daemon, PID-file lifecycle, service-manager integration, automatic account switcher, or internal schedule.
+`warmup`, `list --force`, `use`, and `launch` perform one operation and exit. The TUI `w` action warms the selected account once when it has a 5h window, `u` starts a selected-account switch and reports progress in the status line, and `t` enables session-only automatic usage refresh. The project does not contain a resident daemon, PID-file lifecycle, service-manager integration, automatic account switcher, or internal schedule.
 
 If periodic refresh or warmup is desired, a user-managed cron, systemd user timer, Task Scheduler task, or launchd agent may invoke the binary. That scheduler is outside the application and owns its environment, logs, lifecycle, and removal; see [Optional OS scheduling](Feature-Guide#optional-os-scheduling).
 

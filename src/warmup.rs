@@ -307,12 +307,7 @@ fn warmup_cache_key(
 }
 
 fn is_model_quota_limit(limit: &crate::usage::AdditionalRateLimit) -> bool {
-    limit
-        .metered_feature
-        .as_deref()
-        .is_some_and(|feature| feature.starts_with("codex_"))
-        && limit.allowed != Some(false)
-        && limit.limit_reached != Some(true)
+    crate::usage::is_five_hour_warmup_pool(limit)
 }
 
 fn select_warmup_models(
@@ -575,12 +570,21 @@ fn persist_refreshed_tokens(
     Ok(())
 }
 
-/// Send a minimal completion request to trigger the quota window countdown for a profile.
+/// Result of one account warmup. `SkippedNoFiveHour` means usage data showed
+/// only a 7-day window (typically a free plan) so no ping was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmupOutcome {
+    Warmed,
+    SkippedNoFiveHour,
+}
+
+/// Send a minimal completion request to trigger the 5h quota window countdown.
 ///
-/// The 5-hour and 7-day windows only start after the first real API call.
-/// This sends the lightest valid request ("ping") and discards the response body,
-/// which is enough for the server to stamp the window start time.
-pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
+/// The 5-hour window only starts after the first real API call. This sends the
+/// lightest valid request ("ping") and discards the response body, which is
+/// enough for the server to stamp the window start time. Accounts whose usage
+/// shows only a 7-day window are skipped — there is no 5h countdown to open.
+pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOutcome> {
     let usage = match crate::cache::get(alias) {
         Some(usage) => Some(usage),
         None => {
@@ -598,6 +602,13 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
             }
         }
     };
+    if usage
+        .as_ref()
+        .is_some_and(|u| !crate::usage::usage_has_five_hour_warmup_target(u))
+    {
+        debug!("[{alias}] no 5h window, skipping warmup");
+        return Ok(WarmupOutcome::SkippedNoFiveHour);
+    }
     let additional_limits = usage
         .map(|usage| usage.additional_limits)
         .unwrap_or_default();
@@ -709,6 +720,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                 additional_models,
             )
             .await
+            .map(|()| WarmupOutcome::Warmed)
         }
         400 => {
             let text = resp.text().await.unwrap_or_default();
@@ -755,7 +767,8 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                         is_fedramp,
                         new_additional_models,
                     )
-                    .await;
+                    .await
+                    .map(|()| WarmupOutcome::Warmed);
                 }
                 bail!("{alias}: HTTP {retry_status} after model refresh")
             }
@@ -806,7 +819,8 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<()> {
                                 is_fedramp,
                                 additional_models,
                             )
-                            .await;
+                            .await
+                            .map(|()| WarmupOutcome::Warmed);
                         }
                         bail!("{alias}: HTTP {retry_status} after token refresh retry")
                     }
@@ -995,9 +1009,25 @@ mod tests {
             limit_reached: Some(true),
             ..model_pool("gpt-5-spark")
         };
+        let seven_day_only = crate::usage::AdditionalRateLimit {
+            secondary: Some(crate::usage::WindowUsage {
+                used_percent: Some(8.0),
+                resets_at: Some(1_000_000),
+                window_minutes: Some(10_080),
+            }),
+            ..model_pool("gpt-5-spark")
+        };
         assert_eq!(
             warmup_cache_key("alice", &[model_pool("gpt-5-mini")]),
-            warmup_cache_key("alice", &[model_pool("gpt-5-mini"), non_model, exhausted])
+            warmup_cache_key(
+                "alice",
+                &[
+                    model_pool("gpt-5-mini"),
+                    non_model,
+                    exhausted,
+                    seven_day_only
+                ]
+            )
         );
     }
 
@@ -1181,6 +1211,41 @@ mod tests {
             allowed: Some(false),
             limit_reached: Some(false),
             ..Default::default()
+        }];
+
+        assert_eq!(
+            select_warmup_models(&models, &limits).unwrap(),
+            vec!["gpt-5.4-mini"]
+        );
+    }
+
+    #[test]
+    fn test_warmup_models_exclude_seven_day_only_additional_pool() {
+        let models = vec![
+            ModelEntry {
+                slug: "gpt-5.4-mini".to_string(),
+                visibility: Some("List".to_string()),
+                supported_in_api: Some(true),
+                ..Default::default()
+            },
+            ModelEntry {
+                slug: "gpt-5.3-codex-spark".to_string(),
+                visibility: Some("List".to_string()),
+                supported_in_api: Some(true),
+                ..Default::default()
+            },
+        ];
+        let limits = vec![crate::usage::AdditionalRateLimit {
+            limit_name: Some("GPT-5.3-Codex-Spark".to_string()),
+            metered_feature: Some("codex_bengalfox".to_string()),
+            allowed: Some(true),
+            limit_reached: Some(false),
+            primary: None,
+            secondary: Some(crate::usage::WindowUsage {
+                used_percent: Some(8.0),
+                resets_at: Some(1_000_000),
+                window_minutes: Some(10_080),
+            }),
         }];
 
         assert_eq!(
@@ -2023,7 +2088,7 @@ mod tests {
                     (alias, result)
                 });
             }
-            let mut outcomes: HashMap<String, Result<()>> = HashMap::new();
+            let mut outcomes: HashMap<String, Result<WarmupOutcome>> = HashMap::new();
             while let Some(joined) = tasks.join_next().await {
                 let (alias, result) = joined.unwrap();
                 outcomes.insert(alias, result);
@@ -2297,6 +2362,36 @@ mod tests {
                 "the second warmup must open a quota window for the main pool AND the pool \
                  the account just gained"
             );
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn a_seven_day_only_account_is_not_pinged() {
+            let _lock = ENV_LOCK.lock().await;
+            let _profile_env_lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = tempfile::tempdir().unwrap();
+            let _codex_switch_home =
+                EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
+
+            let alias = "free-no-five-hour";
+            crate::cache::put(
+                alias,
+                &crate::usage::UsageInfo {
+                    secondary: Some(crate::usage::WindowUsage {
+                        used_percent: Some(10.0),
+                        resets_at: Some(1_000_000),
+                        window_minutes: Some(10_080),
+                    }),
+                    ..Default::default()
+                },
+            );
+
+            let outcome = warmup_account(alias, &home.path().join("does-not-exist.json"))
+                .await
+                .expect("skipping a 7d-only account is success, not an error");
+            assert_eq!(outcome, WarmupOutcome::SkippedNoFiveHour);
         }
     }
 }

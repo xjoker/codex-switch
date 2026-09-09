@@ -1,8 +1,8 @@
 use crate::auth;
 
 use super::{
-    Candidate, FREE_FLOOR_PCT, MIN_WARMUP_ELAPSED_SECS, ScoredCandidate, UsageInfo, WINDOW_5H_SECS,
-    WINDOW_7D_SECS, WindowUsage,
+    AdditionalRateLimit, Candidate, FREE_FLOOR_PCT, MIN_WARMUP_ELAPSED_SECS, ScoredCandidate,
+    UsageInfo, WINDOW_5H_SECS, WindowUsage,
 };
 
 /// Returns true only when usage data proves a warmup-opened window is active.
@@ -18,40 +18,49 @@ pub fn warmup_window_active(w: &WindowUsage, window_secs: i64, now: i64) -> bool
     elapsed >= MIN_WARMUP_ELAPSED_SECS
 }
 
-/// Decide whether warmup should be skipped because the relevant window is already active.
+/// True when this account still has (or might still open) a 5h window.
+///
+/// Free accounts remap their only window onto `secondary` (7d). They have nothing
+/// 5h to open, so warmup leaves them alone. Empty usage (no windows yet) is still
+/// a candidate — the first ping is how a paid account's 5h countdown starts.
+pub fn usage_has_five_hour_warmup_target(u: &UsageInfo) -> bool {
+    u.primary.is_some() || u.secondary.is_none()
+}
+
+/// Model-quota additional pools that still have, or might still open, a 5h window.
+///
+/// Confirmed 7d-only pools (`primary` remapped away, `secondary` present) are not
+/// warmup targets. Unopened pools (both windows absent) still are.
+pub fn is_five_hour_warmup_pool(limit: &AdditionalRateLimit) -> bool {
+    limit
+        .metered_feature
+        .as_deref()
+        .is_some_and(|feature| feature.starts_with("codex_"))
+        && limit.allowed != Some(false)
+        && limit.limit_reached != Some(true)
+        && (limit.primary.is_some() || limit.secondary.is_none())
+}
+
+/// Decide whether warmup should be skipped because the relevant 5h window is already active.
 ///
 /// Paid accounts have both 5h (primary) and 7d (secondary) windows; only the 5h window
 /// is what warmup is meant to (re)open, so a still-active 7d window must NOT suppress
-/// warmup once the 5h window has closed. Free accounts only have the 7d window, so it
-/// is the only signal available.
+/// warmup once the 5h window has closed. Free accounts have no 5h target and are
+/// skipped earlier by [`usage_has_five_hour_warmup_target`].
 pub fn usage_has_active_warmup_window(u: &UsageInfo, now: i64) -> bool {
-    let main_active = match u.primary.as_ref() {
-        Some(w) => warmup_window_active(w, WINDOW_5H_SECS, now),
-        None => u
-            .secondary
-            .as_ref()
-            .is_some_and(|w| warmup_window_active(w, WINDOW_7D_SECS, now)),
+    let Some(w) = u.primary.as_ref() else {
+        return false;
     };
+    let main_active = warmup_window_active(w, WINDOW_5H_SECS, now);
     let additional_active = u
         .additional_limits
         .iter()
-        .filter(|limit| {
-            limit
-                .metered_feature
-                .as_deref()
-                .is_some_and(|feature| feature.starts_with("codex_"))
-        })
+        .filter(|limit| is_five_hour_warmup_pool(limit))
         .all(|limit| {
-            if limit.allowed == Some(false) || limit.limit_reached == Some(true) {
-                return true;
-            }
-            match limit.primary.as_ref() {
-                Some(w) => warmup_window_active(w, WINDOW_5H_SECS, now),
-                None => limit
-                    .secondary
-                    .as_ref()
-                    .is_some_and(|w| warmup_window_active(w, WINDOW_7D_SECS, now)),
-            }
+            limit
+                .primary
+                .as_ref()
+                .is_some_and(|w| warmup_window_active(w, WINDOW_5H_SECS, now))
         });
     main_active && additional_active
 }
@@ -373,6 +382,7 @@ pub fn score_candidates(
 
 #[cfg(test)]
 mod tests {
+    use super::super::WINDOW_7D_SECS;
     use super::*;
 
     fn usage_with(primary: Option<WindowUsage>, secondary: Option<WindowUsage>) -> UsageInfo {
@@ -949,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn test_free_account_falls_back_to_7d_window() {
+    fn test_free_account_is_not_a_five_hour_warmup_target() {
         // Free accounts have primary=None (remapped to secondary in parse_usage).
         let now = 1_000_000i64;
         let active_7d = WindowUsage {
@@ -962,6 +972,42 @@ mod tests {
             secondary: Some(active_7d),
             ..Default::default()
         };
+        assert!(!usage_has_five_hour_warmup_target(&u));
+        assert!(!usage_has_active_warmup_window(&u, now));
+    }
+
+    #[test]
+    fn test_empty_usage_is_still_a_five_hour_warmup_target() {
+        // No windows yet: a paid account's 5h countdown has not started.
+        assert!(usage_has_five_hour_warmup_target(&UsageInfo::default()));
+    }
+
+    #[test]
+    fn test_seven_day_only_additional_pool_does_not_block_already_warmed() {
+        let now = 1_000_000i64;
+        let active_5h = WindowUsage {
+            used_percent: Some(20.0),
+            resets_at: Some(now + WINDOW_5H_SECS - MIN_WARMUP_ELAPSED_SECS),
+            window_minutes: Some(300),
+        };
+        let seven_day_only = super::super::AdditionalRateLimit {
+            limit_name: Some("GPT-5.3-Codex-Spark".to_string()),
+            metered_feature: Some("codex_bengalfox".to_string()),
+            allowed: Some(true),
+            limit_reached: Some(false),
+            primary: None,
+            secondary: Some(WindowUsage {
+                used_percent: Some(8.0),
+                resets_at: Some(now + WINDOW_7D_SECS - MIN_WARMUP_ELAPSED_SECS),
+                window_minutes: Some(10_080),
+            }),
+        };
+        let u = UsageInfo {
+            primary: Some(active_5h),
+            additional_limits: vec![seven_day_only],
+            ..Default::default()
+        };
         assert!(usage_has_active_warmup_window(&u, now));
+        assert!(!is_five_hour_warmup_pool(&u.additional_limits[0]));
     }
 }

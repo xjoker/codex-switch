@@ -27,8 +27,8 @@ pub use reset_credits::{
     refresh_reset_credits_for_profile,
 };
 pub use scoring::{
-    is_available, is_candidate_eligible, pace_percent, score_candidates,
-    usage_has_active_warmup_window, visible_pace_percent,
+    is_available, is_candidate_eligible, is_five_hour_warmup_pool, pace_percent, score_candidates,
+    usage_has_active_warmup_window, usage_has_five_hour_warmup_target, visible_pace_percent,
 };
 #[allow(unused_imports)]
 pub use scoring::{score_unified, warmup_window_active};

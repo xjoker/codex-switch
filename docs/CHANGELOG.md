@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20260909.3.0 (candidate) — 2026-09-09
+
+- **Warmup only opens 5h windows** — CLI `warmup` and TUI `w` skip accounts whose usage shows only a 7-day window (free plans). Paid accounts still open inactive 5h main and model-specific pools; confirmed 7d-only additional pools are left alone.
+
 ## v20260909.2.0 (candidate) — 2026-09-09
 
 - **Clickable TUI actions** — Account-detail actions and the visible main-view footer now accept mouse clicks through the same dispatch path as their keyboard shortcuts. Disabled actions are inert for both inputs, wrapped footer rows keep accurate hit regions, and overlays block clicks from reaching the footer beneath them.

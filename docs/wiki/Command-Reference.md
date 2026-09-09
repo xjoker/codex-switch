@@ -19,7 +19,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | `provider rename <old> <new>` | Rename a provider (directory + derived ids). |
 | `provider remove <alias> [-y]` | Delete a provider and its stored key; `-y` / `--yes` skips the prompt. Non-interactive and `--json` runs require `--yes`. |
 | `reset-card <alias> [-y]` | Consume the earliest-expiring reset card for a profile after confirmation; `-y` / `--yes` skips the prompt. |
-| `warmup [alias]` | Send a minimal request to activate the quota-window countdown for one or all profiles. |
+| `warmup [alias]` | Send a minimal request to activate the 5h quota-window countdown for one or all profiles. Accounts with only a 7-day window are skipped. |
 | `rename <old> <new>` | Rename a saved profile. |
 | `delete <alias> [-y]` | Move an inactive profile into recoverable deleted storage; `-y` / `--yes` skips the prompt. |
 | `self-update [--check] [--dev\|--stable] [--version <VERSION>]` | Check or update a direct installation. Without flags it stays on the current channel; `--version` installs a specific newer stable version and conflicts with the channel flags. |

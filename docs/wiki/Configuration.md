@@ -70,7 +70,7 @@ restore_delay_secs = 3             # seconds before restoring auth.json after la
 
 `launch.restore_delay_secs` is a compatibility delay, not a handshake; increase it only if the local Codex process reads authentication later than three seconds after launch.
 
-Usage refresh and warmup are explicit one-time operations: `list --force` bypasses the usage cache, and `warmup [alias]` activates quota windows for one or all profiles. The TUI `t` key enables session-only automatic refresh; it does not write a scheduler configuration. If periodic work is needed, install a user-level OS task that invokes these commands; see [Optional OS scheduling](Feature-Guide#optional-os-scheduling).
+Usage refresh and warmup are explicit one-time operations: `list --force` bypasses the usage cache, and `warmup [alias]` activates 5h quota windows for profiles that have one. Accounts with only a 7-day window are skipped. The TUI `t` key enables session-only automatic refresh; it does not write a scheduler configuration. If periodic work is needed, install a user-level OS task that invokes these commands; see [Optional OS scheduling](Feature-Guide#optional-os-scheduling).
 
 The old `[daemon]` section is no longer read. Remove its keys when migrating; unknown TOML sections continue to be ignored by the configuration decoder. The unified selection settings under `[use]` remain active.
 
