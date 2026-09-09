@@ -1485,7 +1485,10 @@ fn version_area(app: &App, area: Rect) -> Option<Rect> {
                 .ok()
                 .and_then(|width| acc.checked_add(width))
         })?;
-    (area.width > width).then_some(Rect {
+    if area.width <= width {
+        return None;
+    }
+    Some(Rect {
         x: area.x + area.width - width,
         y: area.y + area.height.saturating_sub(1),
         width,
@@ -1779,13 +1782,13 @@ mod tests {
         C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, DIM, credits_table_color,
         credits_table_text, plan_color, render_account_table, render_usage_gauges,
         reset_cards_color, reset_cards_table_state, status_message_color, table_text_widths,
-        usage_gauges_height,
+        usage_gauges_height, version_area,
     };
     use crate::jwt::AccountInfo;
     use crate::tui::app::{AccountEntry, App, Tab, UsageStatus};
     use crate::usage::{AdditionalRateLimit, ResetCredit, UsageInfo, WindowUsage};
     use ratatui::style::Modifier;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use std::io::Write;
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -1806,6 +1809,11 @@ mod tests {
     fn status_message_color_distinguishes_errors_from_information() {
         assert_eq!(status_message_color(false), C_CYAN);
         assert_eq!(status_message_color(true), C_RED);
+    }
+
+    #[test]
+    fn version_area_is_absent_when_the_terminal_is_narrower_than_the_version() {
+        assert!(version_area(&App::new(), Rect::new(0, 0, 0, 0)).is_none());
     }
 
     #[test]
