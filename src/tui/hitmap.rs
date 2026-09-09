@@ -23,6 +23,10 @@ pub struct HitMap {
     pub footer_actions: Vec<(Rect, KeyCode)>,
     /// Clickable key-equivalent actions inside the active dismissible menu.
     pub menu_actions: Vec<(Rect, KeyCode)>,
+    /// Clickable controls inside a modal overlay (forms, launch picker, confirm).
+    pub overlay_clicks: Vec<(Rect, OverlayClick)>,
+    /// Modal popup panel, used to decide whether a wheel event is inside it.
+    pub overlay_panel: Option<Rect>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,8 +44,33 @@ pub enum OverlayHit {
     None,
     /// Help / menus: click outside dismisses; wheel scrolls when over panel.
     Dismissible { panel: Rect },
-    /// Forms / launch / confirm / text edit: absorb mouse, no pass-through.
+    /// Forms / launch / confirm / text edit: no click-through to the page behind.
+    /// Overlay-local hits live in `overlay_clicks`.
     Modal,
+}
+
+/// A mouse target recorded while a modal overlay is visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayClick {
+    Key(KeyCode),
+    ProviderField(ProviderField),
+    ProviderModel(usize),
+    ProviderPick(usize),
+    ProviderPickFilter,
+    LaunchModel(usize),
+    LaunchReasoning,
+    LaunchArgs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderField {
+    Alias,
+    BaseUrl,
+    RequireHttps,
+    ApiKey,
+    EnvKey,
+    WireApi,
+    Extra,
 }
 
 impl HitMap {
@@ -92,6 +121,14 @@ impl HitMap {
             .iter()
             .find(|(area, _)| Self::contains(*area, column, row))
             .map(|(_, index)| *index)
+    }
+
+    pub fn overlay_click_at(&self, column: u16, row: u16) -> Option<OverlayClick> {
+        self.overlay_clicks
+            .iter()
+            .rev()
+            .find(|(area, _)| Self::contains(*area, column, row))
+            .map(|(_, click)| *click)
     }
 }
 

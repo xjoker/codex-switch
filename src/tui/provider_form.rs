@@ -18,6 +18,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use super::hitmap::{HitMap, OverlayClick, OverlayHit, ProviderField};
 use super::popup::{self, PopupState};
 use super::theme::{C_GREEN, C_RED, base, dim, header, key};
 use crate::provider::{
@@ -261,6 +262,110 @@ impl ProviderFormState {
             FormMode::Add => "Add provider",
             FormMode::Edit => "Edit provider",
         }
+    }
+
+    pub(crate) fn require_https(&self) -> bool {
+        self.require_https
+    }
+
+    pub(crate) fn is_editing(&self) -> bool {
+        self.editing
+    }
+
+    pub(crate) fn focus_is_base_url(&self) -> bool {
+        self.focus == Focus::BaseUrl
+    }
+
+    pub(crate) fn model_idx(&self) -> usize {
+        self.model_idx
+    }
+
+    pub(crate) fn click_field(&mut self, field: ProviderField) {
+        if self.confirm_remove || self.pick.is_some() {
+            return;
+        }
+        let focus = match field {
+            ProviderField::Alias => Focus::Alias,
+            ProviderField::BaseUrl => Focus::BaseUrl,
+            ProviderField::RequireHttps => Focus::RequireHttps,
+            ProviderField::ApiKey => Focus::ApiKey,
+            ProviderField::EnvKey => Focus::EnvKey,
+            ProviderField::WireApi => Focus::WireApi,
+            ProviderField::Extra => Focus::Extra,
+        };
+        if self.editing {
+            if self.focus == focus {
+                return;
+            }
+            self.commit_edit();
+        }
+        self.error = None;
+        self.focus = focus;
+        if focus == Focus::RequireHttps {
+            self.require_https = !self.require_https;
+            return;
+        }
+        self.begin_edit();
+    }
+
+    pub(crate) fn click_model(&mut self, idx: usize) {
+        if self.confirm_remove || self.pick.is_some() {
+            return;
+        }
+        if self.editing {
+            if self.focus == Focus::Models && self.model_idx == idx && idx < self.models.len() {
+                return;
+            }
+            self.commit_edit();
+        }
+        self.error = None;
+        self.focus = Focus::Models;
+        if idx >= self.models.len() {
+            self.add_model_and_edit();
+            return;
+        }
+        let same = self.model_idx == idx;
+        self.model_idx = idx;
+        if same {
+            self.begin_edit();
+        }
+    }
+
+    pub(crate) fn click_pick(&mut self, slug_idx: usize) {
+        if self.confirm_remove {
+            return;
+        }
+        self.toggle_pick_at(slug_idx);
+    }
+
+    pub(crate) fn click_pick_filter(&mut self) {
+        if self.confirm_remove {
+            return;
+        }
+        if let Some(pick) = self.pick.as_mut() {
+            pick.filtering = true;
+            pick.message = None;
+        }
+    }
+
+    pub(crate) fn handle_wheel(&mut self, down: bool) {
+        if self.confirm_remove {
+            return;
+        }
+        if self.pick.is_some() {
+            if self.pick.as_ref().is_some_and(|pick| pick.filtering) {
+                return;
+            }
+            if let Some(pick) = self.pick.as_mut() {
+                pick.move_cursor(if down { 1 } else { -1 });
+                pick.message = None;
+            }
+            return;
+        }
+        if self.editing {
+            return;
+        }
+        let _ = self.handle_key(if down { KeyCode::Down } else { KeyCode::Up });
     }
 
     pub fn handle_key(&mut self, code: KeyCode) -> FormOutcome {
@@ -678,15 +783,29 @@ impl ProviderFormState {
     }
 
     fn toggle_pick(&mut self) {
-        let Some(pick) = self.pick.as_mut() else {
+        let Some(pick) = self.pick.as_ref() else {
             return;
         };
-        pick.message = None;
         let filtered = pick.filtered();
         let Some(&idx) = filtered.get(pick.cursor) else {
             return;
         };
-        pick.checked[idx] = !pick.checked[idx];
+        self.toggle_pick_at(idx);
+    }
+
+    fn toggle_pick_at(&mut self, slug_idx: usize) {
+        let Some(pick) = self.pick.as_mut() else {
+            return;
+        };
+        if slug_idx >= pick.checked.len() {
+            return;
+        }
+        pick.filtering = false;
+        pick.message = None;
+        pick.checked[slug_idx] = !pick.checked[slug_idx];
+        if let Some(vis) = pick.filtered().iter().position(|&i| i == slug_idx) {
+            pick.cursor = vis;
+        }
     }
 
     fn apply_pick(&mut self) {
@@ -1072,12 +1191,13 @@ fn list_viewport_rows(inner_h: usize, header_len: usize, footer_len: usize) -> u
         .max(1)
 }
 
-fn render_pick(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
+fn render_pick(f: &mut Frame, form: &mut ProviderFormState, area: Rect, hitmap: &mut HitMap) {
     let Some(pick) = form.pick.as_ref() else {
         return;
     };
     let filtered = pick.filtered();
     let mut lines = Vec::new();
+    let mut hits: Vec<Option<OverlayClick>> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!(
             "{} chat models   {} selected",
@@ -1086,6 +1206,7 @@ fn render_pick(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
         ),
         dim(),
     )));
+    hits.push(None);
     let filter_shown = if pick.filtering {
         format!("{}$", pick.filter)
     } else if pick.filter.is_empty() {
@@ -1097,9 +1218,12 @@ fn render_pick(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
         Span::styled("filter  ", dim()),
         Span::styled(filter_shown, if pick.filtering { header() } else { base() }),
     ]));
+    hits.push(Some(OverlayClick::ProviderPickFilter));
     lines.push(Line::from(""));
+    hits.push(None);
     if filtered.is_empty() {
         lines.push(Line::from(Span::styled("no matches", dim())));
+        hits.push(None);
     } else {
         let start = pick
             .cursor
@@ -1119,18 +1243,22 @@ fn render_pick(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
                 Span::styled(marker, base().fg(C_GREEN)),
                 Span::styled(format!("{mark} {}", pick.slugs[idx]), style),
             ]));
+            hits.push(Some(OverlayClick::ProviderPick(idx)));
         }
     }
     if let Some(message) = &pick.message {
         lines.push(Line::from(""));
+        hits.push(None);
         lines.push(Line::from(Span::styled(
             message.clone(),
             base()
                 .fg(C_RED)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         )));
+        hits.push(None);
     }
     lines.push(Line::from(""));
+    hits.push(None);
     lines.push(Line::from(vec![
         Span::styled("space", key()),
         Span::styled(" toggle  ", dim()),
@@ -1143,17 +1271,39 @@ fn render_pick(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
         Span::styled("esc", key()),
         Span::styled(" cancel", dim()),
     ]));
-    popup::render_popup(f, "Pick models", &lines, &mut form.popup, area);
+    hits.push(Some(OverlayClick::Key(KeyCode::Enter)));
+    let layout = popup::render_popup(f, "Pick models", &lines, &mut form.popup, area);
+    record_modal_hits(hitmap, layout, &hits);
 }
 
-pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: Rect) {
+fn record_modal_hits(
+    hitmap: &mut HitMap,
+    layout: Option<popup::PopupLayout>,
+    hits: &[Option<OverlayClick>],
+) {
+    hitmap.overlay = OverlayHit::Modal;
+    hitmap.overlay_clicks.clear();
+    let Some(layout) = layout else {
+        return;
+    };
+    hitmap.overlay_panel = Some(layout.panel);
+    layout.push_line_hits(&mut hitmap.overlay_clicks, hits);
+}
+
+pub fn render_provider_form(
+    f: &mut Frame,
+    form: &mut ProviderFormState,
+    area: Rect,
+    hitmap: &mut HitMap,
+) {
     if form.pick.is_some() {
-        render_pick(f, form, area);
+        render_pick(f, form, area, hitmap);
         return;
     }
     let label = base();
     let focus_style = header().add_modifier(ratatui::style::Modifier::UNDERLINED);
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut hits: Vec<Option<OverlayClick>> = Vec::new();
 
     let alias_style = if form.focus == Focus::Alias {
         focus_style
@@ -1183,6 +1333,7 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             Span::styled("", base())
         },
     ]));
+    hits.push(Some(OverlayClick::ProviderField(ProviderField::Alias)));
     lines.push(Line::from(vec![
         Span::styled("Base URL  ", dim()),
         Span::styled(
@@ -1190,6 +1341,7 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             url_style,
         ),
     ]));
+    hits.push(Some(OverlayClick::ProviderField(ProviderField::BaseUrl)));
     lines.push(Line::from(vec![
         Span::styled("HTTPS only", dim()),
         Span::styled(
@@ -1202,6 +1354,9 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
         ),
         Span::styled("  (off sends the API key over HTTP)", dim()),
     ]));
+    hits.push(Some(OverlayClick::ProviderField(
+        ProviderField::RequireHttps,
+    )));
     lines.push(Line::from(vec![
         Span::styled("API key   ", dim()),
         Span::styled(
@@ -1209,6 +1364,7 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             key_style,
         ),
     ]));
+    hits.push(Some(OverlayClick::ProviderField(ProviderField::ApiKey)));
     let env_style = if form.focus == Focus::EnvKey {
         focus_style
     } else {
@@ -1236,6 +1392,7 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             Span::styled("", base())
         },
     ]));
+    hits.push(Some(OverlayClick::ProviderField(ProviderField::EnvKey)));
     lines.push(Line::from(vec![
         Span::styled("Wire API  ", dim()),
         Span::styled(
@@ -1243,6 +1400,7 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             wire_style,
         ),
     ]));
+    hits.push(Some(OverlayClick::ProviderField(ProviderField::WireApi)));
     lines.push(Line::from(vec![
         Span::styled("Extra -c  ", dim()),
         Span::styled(
@@ -1251,7 +1409,9 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
         ),
         Span::styled("  (KEY=VALUE, comma-separated)", dim()),
     ]));
+    hits.push(Some(OverlayClick::ProviderField(ProviderField::Extra)));
     lines.push(Line::from(""));
+    hits.push(None);
 
     let mut footer: Vec<Line<'static>> = Vec::new();
     if let Some(error) = &form.error {
@@ -1333,6 +1493,7 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
         heading.push(Span::styled(format!("  {pos}"), dim()));
     }
     lines.push(Line::from(heading));
+    hits.push(None);
     for idx in start..end {
         if idx < form.models.len() {
             let model = &form.models[idx];
@@ -1373,10 +1534,15 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
                 Span::styled("   d/- remove   f fetch", dim()),
             ]));
         }
+        hits.push(Some(OverlayClick::ProviderModel(idx)));
     }
+    let footer_len = footer.len();
     lines.extend(footer);
+    for _ in 0..footer_len {
+        hits.push(None);
+    }
     form.popup.scroll = 0;
-    popup::render_popup(f, form.title(), &lines, &mut form.popup, area);
+    let layout = popup::render_popup(f, form.title(), &lines, &mut form.popup, area);
     if form.confirm_remove {
         let confirm_lines = vec![
             Line::from(Span::styled(
@@ -1394,7 +1560,40 @@ pub fn render_provider_form(f: &mut Frame, form: &mut ProviderFormState, area: R
             ]),
         ];
         let mut confirm_popup = PopupState::new();
-        popup::render_popup(f, "Confirm", &confirm_lines, &mut confirm_popup, area);
+        let confirm_layout =
+            popup::render_popup(f, "Confirm", &confirm_lines, &mut confirm_popup, area);
+        hitmap.overlay = OverlayHit::Modal;
+        hitmap.overlay_clicks.clear();
+        if let Some(layout) = confirm_layout {
+            hitmap.overlay_panel = Some(layout.panel);
+            if let Some(row) = layout.line_rect(2) {
+                if row.width > 0 {
+                    hitmap.overlay_clicks.push((
+                        Rect {
+                            x: row.x,
+                            y: row.y,
+                            width: 1,
+                            height: 1,
+                        },
+                        OverlayClick::Key(KeyCode::Char('y')),
+                    ));
+                }
+                let n_x = row.x.saturating_add(10);
+                if n_x < row.right() {
+                    hitmap.overlay_clicks.push((
+                        Rect {
+                            x: n_x,
+                            y: row.y,
+                            width: 1,
+                            height: 1,
+                        },
+                        OverlayClick::Key(KeyCode::Char('n')),
+                    ));
+                }
+            }
+        }
+    } else {
+        record_modal_hits(hitmap, layout, &hits);
     }
 }
 
@@ -1761,7 +1960,14 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| super::render_provider_form(frame, &mut form, frame.area()))
+            .draw(|frame| {
+                super::render_provider_form(
+                    frame,
+                    &mut form,
+                    frame.area(),
+                    &mut crate::tui::hitmap::HitMap::default(),
+                )
+            })
             .unwrap();
         let area = terminal.backend().buffer().area;
         let joined = (0..area.height)
@@ -1800,7 +2006,14 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| super::render_provider_form(frame, &mut form, frame.area()))
+            .draw(|frame| {
+                super::render_provider_form(
+                    frame,
+                    &mut form,
+                    frame.area(),
+                    &mut crate::tui::hitmap::HitMap::default(),
+                )
+            })
             .unwrap();
         let area = terminal.backend().buffer().area;
         let joined = (0..area.height)
@@ -1835,7 +2048,14 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| super::render_provider_form(frame, form, frame.area()))
+            .draw(|frame| {
+                super::render_provider_form(
+                    frame,
+                    form,
+                    frame.area(),
+                    &mut crate::tui::hitmap::HitMap::default(),
+                )
+            })
             .unwrap();
         let area = terminal.backend().buffer().area;
         (0..area.height)
@@ -2141,7 +2361,14 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| super::render_provider_form(frame, &mut form, frame.area()))
+            .draw(|frame| {
+                super::render_provider_form(
+                    frame,
+                    &mut form,
+                    frame.area(),
+                    &mut crate::tui::hitmap::HitMap::default(),
+                )
+            })
             .unwrap();
         let area = terminal.backend().buffer().area;
         let joined = (0..area.height)

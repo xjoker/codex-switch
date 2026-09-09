@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Modal TUI forms accept mouse input** — Provider add/edit fields, HTTPS toggle, model rows, launch-picker models/reasoning/args, confirmation `y`/`n`, and the remaining account menus now respond to clicks. The wheel moves modal lists. Clicks still do not pass through to the page behind a modal.
+
 ## v20260909.4.0 (candidate) — 2026-09-09
 
 - **Settings fields accept mouse input** — Click a Settings field to focus and edit or toggle it. The wheel moves among fields. Active field edits still absorb mouse so they do not click through.

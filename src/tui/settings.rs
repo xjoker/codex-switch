@@ -68,12 +68,21 @@ impl SettingsState {
     }
 
     pub(crate) fn click_field(&mut self, index: usize) {
-        if self.editing {
-            return;
-        }
         let Some(&focus) = FOCUS_ORDER.get(index) else {
             return;
         };
+        if self.editing {
+            if self.focus == focus {
+                return;
+            }
+            if let Err(err) = self.commit_edit() {
+                self.error = Some(err);
+                return;
+            }
+            self.editing = false;
+            self.input.clear();
+            self.cursor = 0;
+        }
         self.error = None;
         self.notice = None;
         self.focus = focus;

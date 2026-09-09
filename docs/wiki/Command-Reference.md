@@ -76,7 +76,7 @@ See [Custom API providers](Providers) for OpenRouter, DeepSeek-via-gateway, stor
 
 Four tabs: **Accounts**, **Providers**, **Settings**, and **Logs**. `Tab` / `Shift+Tab` cycles them. `q` and `h` are main-view shortcuts; forms, text edits, menus, and confirmations use their own `Esc` and confirmation rules.
 
-Mouse input is available alongside the keyboard: click a tab to switch pages, click an Accounts or Providers row to select it, and double-click the selected row to open its account menu or provider launch menu. On Settings, click a field to edit or toggle it and use the wheel to move among fields. Use the wheel to scroll Logs, Help, and account menus. Clicking outside a dismissible popup closes it. Forms, launch pickers, confirmations, and active text edits consume mouse input without clicking through to the page behind them.
+Mouse input is available alongside the keyboard: click a tab to switch pages, click an Accounts or Providers row to select it, and double-click the selected row to open its account menu or provider launch menu. On Settings, click a field to edit or toggle it and use the wheel to move among fields; clicking another field while editing commits the current value first. Provider add/edit forms, launch pickers, and confirmation prompts accept clicks on their own controls (fields, checkboxes, model rows, `y`/`n`) and do not click through to the page behind them. Use the wheel to scroll Logs, Help, menus, and modal lists. Clicking outside a dismissible popup closes it.
 
 ### Accounts tab
 

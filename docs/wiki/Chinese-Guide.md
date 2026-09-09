@@ -122,7 +122,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 ## TUI 操作说明
 
-运行 `codex-switch tui`。四页：**Accounts**（ChatGPT 额度与选号）、**Providers**（自定义提供方）、**Settings**（编辑 `config.toml`）与 **Logs**（本次会话诊断）。`Tab` / `Shift+Tab` 循环切换；`h` 帮助；`q` 退出。设置未保存时，退出前会要求确认。TUI 内按 `h` 看到的快捷键表与代码同源，以当前版本为准。
+运行 `codex-switch tui`。四页：**Accounts**（ChatGPT 额度与选号）、**Providers**（自定义提供方）、**Settings**（编辑 `config.toml`）与 **Logs**（本次会话诊断）。`Tab` / `Shift+Tab` 循环切换；`h` 帮助；`q` 退出。设置未保存时，退出前会要求确认。TUI 内按 `h` 看到的快捷键表与代码同源，以当前版本为准。鼠标可点 Tab、列表行、Settings 字段、提供方表单、启动选择器和确认框的 `y`/`n`；这些弹层不会点到背后的页面。
 
 设置 `NO_COLOR` 时，**CLI** 仍遵守无颜色；**TUI** 仍使用设计好的深色配色，避免浅色终端把按键提示洗成黑字。
 
@@ -169,7 +169,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 新增与编辑共用一张表单：
 
-- **新增**：打开后直接输入 Alias；`Enter` 提交当前字段并进入下一项（Alias → URL → Key → Models；env key / wire API / extra `-c` 保持默认）。
+- **新增**：打开后直接输入 Alias；`Enter` 提交当前字段并进入下一项（Alias → URL → Key → Models；env key / wire API / extra `-c` 保持默认）。也可以直接点击某一栏（含 HTTPS 开关和模型行）切换过去。
 - **编辑**：从 Base URL 的导航态开始（避免 `s` 被当成输入字符）；`Enter` 进入当前格编辑。
 - `Tab` 走遍每一栏，包括 Env key、Wire API、Extra `-c`；在 Models 内用 `j` / `k` 移动。模型很多时表头和底栏帮助钉住，只滚动模型视口并跟着光标；超出一屏时标题显示 `n/N`。 Extra `-c` 是 `KEY=VALUE`，值里的逗号会保留。
 - 模型列表最后一行是 **`+ add model`**：`Enter` 或 `+` / `=` / `a` 添加模型并输入 id。导航态按 `f` 从接入站 `GET /models` 拉取对话模型（去掉 embedding / reranker；超过 48 条打开选择器：`/` 过滤，`space` 勾选，`Enter` 应用）。

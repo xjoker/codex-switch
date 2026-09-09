@@ -9,7 +9,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use super::popup::{PopupState, render_popup};
+use super::popup::{PopupLayout, PopupState, render_popup};
 use super::theme::{
     C_CYAN, C_GREEN, C_PURPLE, C_RED, C_WHITE, C_YELLOW, DIM, base, dim as dim_style, header, key,
 };
@@ -580,20 +580,14 @@ impl MenuState {
                     dim,
                 )));
                 let first_action_line = left_lines.len().saturating_sub(4);
-                let panel = render_popup(f, title, &left_lines, popup, area)?;
+                let layout = render_popup(f, title, &left_lines, popup, area)?;
                 let mut hit_actions = Vec::new();
                 for (row_offset, row) in [&actions[..5], &actions[5..]].iter().enumerate() {
-                    let content_line = first_action_line + row_offset;
-                    let scroll = usize::from(popup.scroll);
-                    if content_line < scroll {
+                    let Some(row_area) = layout.line_rect(first_action_line + row_offset) else {
                         continue;
-                    }
-                    let y = panel.y + 1 + u16::try_from(content_line - scroll).unwrap_or(u16::MAX);
-                    if y >= panel.y + panel.height.saturating_sub(1) {
-                        continue;
-                    }
-                    let mut x = panel.x + 2;
-                    let content_right = panel.x + panel.width.saturating_sub(2);
+                    };
+                    let mut x = row_area.x;
+                    let content_right = row_area.x.saturating_add(row_area.width);
                     for (idx, (key, label, enabled)) in row.iter().enumerate() {
                         if idx > 0 {
                             x = x.saturating_add(5);
@@ -602,7 +596,7 @@ impl MenuState {
                         if *enabled && x < content_right {
                             let visible_width = width.min(content_right.saturating_sub(x));
                             hit_actions.push((
-                                Rect::new(x, y, visible_width, 1),
+                                Rect::new(x, row_area.y, visible_width, 1),
                                 KeyCode::Char(key.chars().next().unwrap()),
                             ));
                         }
@@ -610,28 +604,25 @@ impl MenuState {
                     }
                 }
                 Some(MenuRender {
-                    panel,
+                    panel: layout.panel,
                     actions: hit_actions,
                 })
             }
             MenuState::Add { popup } => {
                 let title = "Add new account";
+                let items = [
+                    ("b", "Browser (PKCE, opens local callback)"),
+                    ("d", "Device code (for headless / no browser)"),
+                ];
                 let mut lines: Vec<Line<'static>> = Vec::new();
                 lines.push(Line::from(Span::styled("Choose OAuth flow:", header_style)));
                 lines.push(Line::from(""));
-                lines.extend(menu_items(
-                    &[
-                        ("b", "Browser (PKCE, opens local callback)"),
-                        ("d", "Device code (for headless / no browser)"),
-                    ],
-                    key_style,
-                    label_style,
-                ));
+                lines.extend(menu_items(&items, key_style, label_style));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, title, &lines, popup, area).map(|panel| MenuRender {
-                    panel,
-                    actions: Vec::new(),
+                render_popup(f, title, &lines, popup, area).map(|layout| MenuRender {
+                    panel: layout.panel,
+                    actions: hits_for_menu_items(&layout, 2, &items),
                 })
             }
             MenuState::ReloginFlow {
@@ -643,50 +634,45 @@ impl MenuState {
                     Some(e) => format!("{alias}  ({e})"),
                     None => alias.clone(),
                 };
+                let items = [
+                    ("b", "Browser (PKCE, opens local callback)"),
+                    ("d", "Device code (for headless / no browser)"),
+                ];
                 let mut lines: Vec<Line<'static>> =
                     vec![Line::from(Span::styled(header, header_style))];
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("Choose OAuth flow:", header_style)));
                 lines.push(Line::from(""));
-                lines.extend(menu_items(
-                    &[
-                        ("b", "Browser (PKCE, opens local callback)"),
-                        ("d", "Device code (for headless / no browser)"),
-                    ],
-                    key_style,
-                    label_style,
-                ));
+                lines.extend(menu_items(&items, key_style, label_style));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, "re-Login", &lines, popup, area).map(|panel| MenuRender {
-                    panel,
-                    actions: Vec::new(),
+                render_popup(f, "re-Login", &lines, popup, area).map(|layout| MenuRender {
+                    panel: layout.panel,
+                    actions: hits_for_menu_items(&layout, 4, &items),
                 })
             }
             MenuState::Batch { count, popup } => {
                 let title = "Batch";
                 let header = format!("{count} account(s) marked");
+                let items = [
+                    ("r", "Refresh selected"),
+                    ("w", "Warmup selected"),
+                    ("l", "re-Login selected (sequential)"),
+                    ("d", "Delete selected"),
+                ];
                 let mut lines: Vec<Line<'static>> = Vec::new();
                 lines.push(Line::from(Span::styled(header, header_style)));
                 lines.push(Line::from(""));
-                lines.extend(menu_items(
-                    &[
-                        ("r", "Refresh selected"),
-                        ("w", "Warmup selected"),
-                        ("l", "re-Login selected (sequential)"),
-                        ("d", "Delete selected"),
-                    ],
-                    key_style,
-                    label_style,
-                ));
+                lines.extend(menu_items(&items, key_style, label_style));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, title, &lines, popup, area).map(|panel| MenuRender {
-                    panel,
-                    actions: Vec::new(),
+                render_popup(f, title, &lines, popup, area).map(|layout| MenuRender {
+                    panel: layout.panel,
+                    actions: hits_for_menu_items(&layout, 2, &items),
                 })
             }
             MenuState::BatchReloginFlow { count, popup } => {
+                let items = [("b", "Browser (PKCE)"), ("d", "Device code")];
                 let mut lines: Vec<Line<'static>> = Vec::new();
                 lines.push(Line::from(Span::styled(
                     format!("{count} account(s) marked"),
@@ -698,20 +684,31 @@ impl MenuState {
                     base().fg(DIM),
                 )));
                 lines.push(Line::from(""));
-                lines.extend(menu_items(
-                    &[("b", "Browser (PKCE)"), ("d", "Device code")],
-                    key_style,
-                    label_style,
-                ));
+                lines.extend(menu_items(&items, key_style, label_style));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, "Batch re-Login", &lines, popup, area).map(|panel| MenuRender {
-                    panel,
-                    actions: Vec::new(),
+                render_popup(f, "Batch re-Login", &lines, popup, area).map(|layout| MenuRender {
+                    panel: layout.panel,
+                    actions: hits_for_menu_items(&layout, 4, &items),
                 })
             }
         }
     }
+}
+
+fn hits_for_menu_items(
+    layout: &PopupLayout,
+    first_line: usize,
+    items: &[(&str, &str)],
+) -> Vec<(Rect, KeyCode)> {
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, (key, _))| {
+            let ch = key.chars().next()?;
+            Some((layout.line_rect(first_line + offset)?, KeyCode::Char(ch)))
+        })
+        .collect()
 }
 
 fn menu_items(items: &[(&str, &str)], key_style: Style, label_style: Style) -> Vec<Line<'static>> {

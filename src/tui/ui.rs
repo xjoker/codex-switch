@@ -8,6 +8,7 @@ use ratatui::{
 };
 
 use super::app::{App, Tab, UsageStatus};
+use super::hitmap::OverlayClick;
 use super::keymap;
 use super::popup;
 use super::theme::{
@@ -81,16 +82,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
             Some(panel) => super::hitmap::OverlayHit::Dismissible { panel },
             None => super::hitmap::OverlayHit::Modal,
         };
-    } else if app.provider_form.is_some() {
-        if let Some(form) = app.provider_form.as_mut() {
-            super::provider_form::render_provider_form(f, form, area);
-        }
-        app.hitmap.overlay = super::hitmap::OverlayHit::Modal;
-    } else if app.provider_launch.is_some() {
-        if let Some(launch) = app.provider_launch.as_mut() {
-            super::provider_launch::render_provider_launch(f, launch, area);
-        }
-        app.hitmap.overlay = super::hitmap::OverlayHit::Modal;
+    } else if let Some(form) = app.provider_form.as_mut() {
+        super::provider_form::render_provider_form(f, form, area, &mut app.hitmap);
+    } else if let Some(launch) = app.provider_launch.as_mut() {
+        super::provider_launch::render_provider_launch(f, launch, area, &mut app.hitmap);
     } else if app.menu.is_some() {
         let rendered = app.menu.as_mut().and_then(|menu| menu.render(f, area));
         app.hitmap.menu_actions = rendered
@@ -222,7 +217,7 @@ fn render_help_popup(
         dim_style,
     )));
 
-    popup::render_popup(f, "Help", &lines, state, area)
+    popup::render_popup(f, "Help", &lines, state, area).map(|layout| layout.panel)
 }
 
 fn display_width(s: &str) -> usize {
@@ -1246,20 +1241,29 @@ fn normal_footer_specs(app: &App) -> Vec<FooterActionSpec> {
 
 fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
     // Rename input takes top priority
-    if let Some(rs) = &app.rename {
+    if app.rename.is_some() {
+        let input = app.rename.as_ref().expect("rename").input.clone();
+        let shown = format!(" Rename: {input}#  (Enter confirm / Esc cancel)");
         let line = Line::from(vec![
             Span::styled(" Rename: ", base().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(&rs.input, base().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(input, base().fg(C_WHITE).add_modifier(Modifier::BOLD)),
             Span::styled("#", base().fg(C_GRAY)),
             Span::styled("  (Enter confirm / Esc cancel)", base().fg(DIM)),
         ]);
         f.render_widget(Paragraph::new(line).style(base()), area);
+        app.hitmap.overlay_panel = Some(area);
+        if let Some(pos) = shown.find("Enter") {
+            register_overlay_key(app, area, pos, 5, KeyCode::Enter);
+        }
+        if let Some(pos) = shown.find("Esc") {
+            register_overlay_key(app, area, pos, 3, KeyCode::Esc);
+        }
         return;
     }
 
     // Confirmation prompt
-    if let Some(confirm) = &app.confirm {
-        let msg = match confirm {
+    if app.confirm.is_some() {
+        let msg = match app.confirm.as_ref().expect("confirm") {
             super::app::ConfirmAction::DiscardSettings => {
                 "Discard unsaved settings and quit? (y/n)".to_string()
             }
@@ -1281,23 +1285,52 @@ fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
             }
         };
         let line = Line::from(Span::styled(
-            msg,
+            msg.clone(),
             base().fg(C_RED).add_modifier(Modifier::BOLD),
         ));
         f.render_widget(Paragraph::new(line).style(base()), area);
+        app.hitmap.overlay_panel = Some(area);
+        if let Some(pos) = msg.find("(y/n)") {
+            register_overlay_key(app, area, pos + 1, 1, KeyCode::Char('y'));
+            register_overlay_key(app, area, pos + 3, 1, KeyCode::Char('n'));
+        } else if let Some(pos) = msg.find("y to use") {
+            register_overlay_key(app, area, pos, 1, KeyCode::Char('y'));
+            if pos > 0 {
+                register_overlay_key(app, area, 0, pos, KeyCode::Esc);
+            }
+            let after = pos + 1;
+            if after < msg.chars().count() {
+                register_overlay_key(
+                    app,
+                    area,
+                    after,
+                    msg.chars().count().saturating_sub(after),
+                    KeyCode::Esc,
+                );
+            }
+        }
         return;
     }
 
-    if app.search_active
-        && let Some(s) = &app.search
-    {
+    if app.search_active {
+        let Some(query) = app.search.as_ref().map(|s| s.query.clone()) else {
+            return;
+        };
+        let shown = format!(" /{query}#  (Enter accept / Esc clear)");
         let line = Line::from(vec![
             Span::styled(" /", base().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(&s.query, base().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(query, base().fg(C_WHITE).add_modifier(Modifier::BOLD)),
             Span::styled("#", base().fg(C_GRAY)),
             Span::styled("  (Enter accept / Esc clear)", base().fg(DIM)),
         ]);
         f.render_widget(Paragraph::new(line).style(base()), area);
+        app.hitmap.overlay_panel = Some(area);
+        if let Some(pos) = shown.find("Enter") {
+            register_overlay_key(app, area, pos, 5, KeyCode::Enter);
+        }
+        if let Some(pos) = shown.find("Esc") {
+            register_overlay_key(app, area, pos, 3, KeyCode::Esc);
+        }
         return;
     }
 
@@ -1392,6 +1425,27 @@ fn build_footer_layout(
         lines.push(Line::from(spans));
     }
     (lines, hits)
+}
+
+fn register_overlay_key(app: &mut App, area: Rect, x: usize, width: usize, code: KeyCode) {
+    let Ok(x) = u16::try_from(x) else {
+        return;
+    };
+    let Ok(width) = u16::try_from(width) else {
+        return;
+    };
+    if width == 0 || x >= area.width {
+        return;
+    }
+    app.hitmap.overlay_clicks.push((
+        Rect {
+            x: area.x.saturating_add(x),
+            y: area.y,
+            width: width.min(area.width.saturating_sub(x)),
+            height: 1,
+        },
+        OverlayClick::Key(code),
+    ));
 }
 
 fn register_footer_hit(

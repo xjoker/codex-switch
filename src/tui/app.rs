@@ -710,10 +710,9 @@ impl App {
 
     /// Handle a mouse event against the last frame's hit map.
     ///
-    /// Scope: wheel scroll on logs/help/menus/settings; left-click tabs,
-    /// list rows, and settings fields; click outside dismissible overlays
-    /// closes them. Forms, launch picker, confirm, and text edits absorb
-    /// mouse without action.
+    /// Scope: wheel scroll on logs/help/menus/settings/modal lists; left-click
+    /// tabs, list rows, settings fields, and modal form controls. Click outside
+    /// dismissible overlays closes them. Modal overlays do not click through.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<KeyCode> {
         use super::hitmap::{HitMap, OverlayHit};
 
@@ -725,7 +724,18 @@ impl App {
                 self.last_list_click = None;
                 let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
                 match self.hitmap.overlay {
-                    OverlayHit::Modal => {}
+                    OverlayHit::Modal => {
+                        if let Some(panel) = self.hitmap.overlay_panel
+                            && !HitMap::contains(panel, col, row)
+                        {
+                            return None;
+                        }
+                        if let Some(form) = self.provider_form.as_mut() {
+                            form.handle_wheel(down);
+                        } else if let Some(launch) = self.provider_launch.as_mut() {
+                            launch.handle_wheel(down);
+                        }
+                    }
                     OverlayHit::Dismissible { panel } => {
                         if !HitMap::contains(panel, col, row) {
                             return None;
@@ -766,7 +776,17 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => match self.hitmap.overlay {
-                OverlayHit::Modal => self.last_list_click = None,
+                OverlayHit::Modal => {
+                    self.last_list_click = None;
+                    if let Some(click) = self.hitmap.overlay_click_at(col, row) {
+                        return self.apply_overlay_click(click);
+                    }
+                    if self.settings.is_editing()
+                        && let Some(index) = self.hitmap.settings_field_at(col, row)
+                    {
+                        self.settings.click_field(index);
+                    }
+                }
                 OverlayHit::Dismissible { panel } => {
                     self.last_list_click = None;
                     if self.menu.is_some()
@@ -859,6 +879,55 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    fn apply_overlay_click(&mut self, click: super::hitmap::OverlayClick) -> Option<KeyCode> {
+        use super::hitmap::OverlayClick;
+        match click {
+            OverlayClick::Key(code) => Some(code),
+            OverlayClick::ProviderField(field) => {
+                if let Some(form) = self.provider_form.as_mut() {
+                    form.click_field(field);
+                }
+                None
+            }
+            OverlayClick::ProviderModel(idx) => {
+                if let Some(form) = self.provider_form.as_mut() {
+                    form.click_model(idx);
+                }
+                None
+            }
+            OverlayClick::ProviderPick(idx) => {
+                if let Some(form) = self.provider_form.as_mut() {
+                    form.click_pick(idx);
+                }
+                None
+            }
+            OverlayClick::ProviderPickFilter => {
+                if let Some(form) = self.provider_form.as_mut() {
+                    form.click_pick_filter();
+                }
+                None
+            }
+            OverlayClick::LaunchModel(idx) => {
+                let Some(picker) = self.provider_launch.as_mut() else {
+                    return None;
+                };
+                picker.click_model(idx).then_some(KeyCode::Enter)
+            }
+            OverlayClick::LaunchReasoning => {
+                if let Some(picker) = self.provider_launch.as_mut() {
+                    picker.click_reasoning();
+                }
+                None
+            }
+            OverlayClick::LaunchArgs => {
+                if let Some(picker) = self.provider_launch.as_mut() {
+                    picker.click_args();
+                }
+                None
+            }
+        }
     }
 
     fn invalidate_model_request(&mut self, alias: &str) {
@@ -2779,6 +2848,61 @@ async fn run_app(
                 }
                 Event::Mouse(mouse) => {
                     if let Some(code) = app.handle_mouse(mouse) {
+                        if app.provider_form.is_some() {
+                            app.handle_provider_form_key(code);
+                            continue;
+                        }
+                        if app.provider_launch.is_some() {
+                            if let Some((alias, model, reasoning, extra_args)) =
+                                app.handle_provider_launch_key(code)
+                            {
+                                if app.defer_while_switching("launching Codex") {
+                                    continue;
+                                }
+                                if let Some(signal) = perform_launch(
+                                    terminal,
+                                    &mut app,
+                                    alias,
+                                    (!model.is_empty()).then_some(model),
+                                    reasoning,
+                                    extra_args,
+                                    shutdown,
+                                )
+                                .await
+                                {
+                                    wait_for_switch_before_exit(&mut app).await;
+                                    return Ok(Some(signal));
+                                }
+                            }
+                            continue;
+                        }
+                        if app.rename.is_some() {
+                            app.handle_rename_key(code);
+                            continue;
+                        }
+                        if app.search_active {
+                            app.handle_search_key(code);
+                            continue;
+                        }
+                        if app.confirm.is_some() {
+                            match code {
+                                KeyCode::Char('y') if app.confirm_action() => {
+                                    if app.switch_in_flight() {
+                                        quit_after_switch = true;
+                                        app.set_status(
+                                            "Waiting for account switch to finish before exit"
+                                                .to_string(),
+                                            60,
+                                        );
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                KeyCode::Char('y') => {}
+                                _ => app.cancel_confirm(),
+                            }
+                            continue;
+                        }
                         let outcome = if app.menu.is_some() {
                             handle_menu_key(&mut app, terminal, code, shutdown)
                                 .await
@@ -3810,7 +3934,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_settings_wheel_moves_focus_and_edit_absorbs_other_fields() {
+    fn rendered_settings_wheel_moves_focus_and_edit_stays_on_tab() {
         let mut app = App::new();
         app.active_tab = Tab::Settings;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -3831,8 +3955,22 @@ mod tests {
             .unwrap();
         assert!(
             matches!(app.hitmap.overlay, crate::tui::hitmap::OverlayHit::Modal),
-            "an active settings edit must absorb mouse"
+            "an active settings edit must not click through"
         );
+        let (accounts_tab, _) = app
+            .hitmap
+            .tabs
+            .iter()
+            .find(|(_, tab)| *tab == Tab::Accounts)
+            .copied()
+            .expect("rendered Accounts tab hit region");
+        app.handle_mouse(left_click(
+            accounts_tab.x + accounts_tab.width / 2,
+            accounts_tab.y,
+        ));
+        assert_eq!(app.active_tab, Tab::Settings);
+        assert!(app.settings.is_editing());
+
         let (priority, _) = app
             .hitmap
             .settings_fields
@@ -3841,8 +3979,8 @@ mod tests {
             .copied()
             .expect("team_priority remains hittable in the map");
         app.handle_mouse(left_click(priority.x + 1, priority.y));
-        assert_eq!(app.settings.focused_index(), 1);
-        assert!(app.settings.is_editing());
+        assert_eq!(app.settings.focused_index(), 6);
+        assert!(!app.settings.is_editing());
     }
 
     #[test]
@@ -3897,7 +4035,10 @@ mod tests {
         app.providers.push(crate::provider::ProviderProfile::build(
             "gateway",
             "https://gateway.example/v1",
-            vec![crate::provider::ProviderModel::from_id("model")],
+            vec![
+                crate::provider::ProviderModel::from_id("model-a"),
+                crate::provider::ProviderModel::from_id("model-b"),
+            ],
             "sk",
         ));
         app.provider_launch =
@@ -3917,28 +4058,172 @@ mod tests {
             .find(|(_, tab)| *tab == Tab::Accounts)
             .copied()
             .expect("rendered Accounts tab hit region");
-        let before_scroll = app
-            .provider_launch
-            .as_ref()
-            .expect("launch picker")
-            .popup
-            .scroll;
+        let (model_b, _) = app
+            .hitmap
+            .overlay_clicks
+            .iter()
+            .find(|(_, click)| matches!(click, crate::tui::hitmap::OverlayClick::LaunchModel(1)))
+            .copied()
+            .expect("rendered launch model row");
+        assert_eq!(
+            app.provider_launch
+                .as_ref()
+                .expect("launch picker")
+                .selected_index(),
+            0
+        );
 
+        app.handle_mouse(left_click(model_b.x + 1, model_b.y));
         app.handle_mouse(left_click(
             accounts_tab.x + accounts_tab.width / 2,
             accounts_tab.y,
         ));
-        app.handle_mouse(scroll(MouseEventKind::ScrollDown, 5, 5));
+        app.handle_mouse(scroll(
+            MouseEventKind::ScrollDown,
+            accounts_tab.x,
+            accounts_tab.y,
+        ));
 
         assert_eq!(app.active_tab, Tab::Providers);
         assert_eq!(
             app.provider_launch
                 .as_ref()
                 .expect("launch picker")
-                .popup
-                .scroll,
-            before_scroll
+                .selected_index(),
+            1
         );
+    }
+
+    #[test]
+    fn rendered_provider_form_click_edits_fields_without_click_through() {
+        let mut app = App::new();
+        app.active_tab = Tab::Providers;
+        app.provider_form = Some(crate::tui::provider_form::ProviderFormState::add());
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(matches!(
+            app.hitmap.overlay,
+            crate::tui::hitmap::OverlayHit::Modal
+        ));
+        let form = app.provider_form.as_ref().expect("add form");
+        assert!(form.is_editing());
+        assert!(form.require_https());
+
+        let (https, _) = app
+            .hitmap
+            .overlay_clicks
+            .iter()
+            .find(|(_, click)| {
+                matches!(
+                    click,
+                    crate::tui::hitmap::OverlayClick::ProviderField(
+                        crate::tui::hitmap::ProviderField::RequireHttps
+                    )
+                )
+            })
+            .copied()
+            .expect("rendered HTTPS field");
+        app.handle_mouse(left_click(https.x + 1, https.y));
+        let form = app.provider_form.as_ref().expect("add form");
+        assert!(!form.require_https());
+        assert!(!form.is_editing());
+
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        let (url, _) = app
+            .hitmap
+            .overlay_clicks
+            .iter()
+            .find(|(_, click)| {
+                matches!(
+                    click,
+                    crate::tui::hitmap::OverlayClick::ProviderField(
+                        crate::tui::hitmap::ProviderField::BaseUrl
+                    )
+                )
+            })
+            .copied()
+            .expect("rendered Base URL field");
+        app.handle_mouse(left_click(url.x + 1, url.y));
+        let form = app.provider_form.as_ref().expect("add form");
+        assert!(form.focus_is_base_url());
+        assert!(form.is_editing());
+
+        let (accounts_tab, _) = app
+            .hitmap
+            .tabs
+            .iter()
+            .find(|(_, tab)| *tab == Tab::Accounts)
+            .copied()
+            .expect("rendered Accounts tab hit region");
+        app.handle_mouse(left_click(
+            accounts_tab.x + accounts_tab.width / 2,
+            accounts_tab.y,
+        ));
+        assert_eq!(app.active_tab, Tab::Providers);
+        assert!(app.provider_form.is_some());
+    }
+
+    #[test]
+    fn rendered_confirm_prompt_exposes_y_and_n_hits() {
+        let mut app = App::new();
+        app.confirm = Some(ConfirmAction::Delete("demo".into()));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(matches!(
+            app.hitmap.overlay,
+            crate::tui::hitmap::OverlayHit::Modal
+        ));
+        let (yes, _) = app
+            .hitmap
+            .overlay_clicks
+            .iter()
+            .find(|(_, click)| {
+                matches!(
+                    click,
+                    crate::tui::hitmap::OverlayClick::Key(KeyCode::Char('y'))
+                )
+            })
+            .copied()
+            .expect("rendered confirm y");
+        let (no, _) = app
+            .hitmap
+            .overlay_clicks
+            .iter()
+            .find(|(_, click)| {
+                matches!(
+                    click,
+                    crate::tui::hitmap::OverlayClick::Key(KeyCode::Char('n'))
+                )
+            })
+            .copied()
+            .expect("rendered confirm n");
+        assert_eq!(
+            app.handle_mouse(left_click(yes.x, yes.y)),
+            Some(KeyCode::Char('y'))
+        );
+        assert_eq!(
+            app.handle_mouse(left_click(no.x, no.y)),
+            Some(KeyCode::Char('n'))
+        );
+        let (providers_tab, _) = app
+            .hitmap
+            .tabs
+            .iter()
+            .find(|(_, tab)| *tab == Tab::Providers)
+            .copied()
+            .expect("rendered Providers tab hit region");
+        app.handle_mouse(left_click(
+            providers_tab.x + providers_tab.width / 2,
+            providers_tab.y,
+        ));
+        assert_eq!(app.active_tab, Tab::Accounts);
+        assert!(app.confirm.is_some());
     }
 
     #[test]

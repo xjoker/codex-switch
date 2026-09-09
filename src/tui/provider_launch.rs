@@ -1,6 +1,8 @@
 //! Launch picker for a custom API provider: choose one saved model and the
 //! reasoning effort for this session. The saved provider file is not written.
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
@@ -8,6 +10,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use super::hitmap::{HitMap, OverlayClick, OverlayHit};
 use super::popup::{self, PopupState};
 use super::provider_form::{REASONING_CHOICES, reasoning_choice};
 use super::theme::{base, dim, header, key};
@@ -41,6 +44,7 @@ pub struct ProviderLaunchState {
     extra_args: String,
     extra_editing: bool,
     extra_cursor: usize,
+    last_model_click: Option<(usize, Instant)>,
 }
 
 pub enum LaunchPickerOutcome {
@@ -86,6 +90,7 @@ impl ProviderLaunchState {
             extra_args: String::new(),
             extra_editing: false,
             extra_cursor: 0,
+            last_model_click: None,
         }
     }
 
@@ -126,7 +131,60 @@ impl ProviderLaunchState {
             extra_args: String::new(),
             extra_editing: false,
             extra_cursor: 0,
+            last_model_click: None,
         }
+    }
+
+    pub(crate) fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    pub(crate) fn extra_editing(&self) -> bool {
+        self.extra_editing
+    }
+
+    /// Click a model row. A second click on the same row within 500ms launches.
+    pub(crate) fn click_model(&mut self, idx: usize) -> bool {
+        if self.extra_editing {
+            self.extra_editing = false;
+        }
+        if idx >= self.models.len() {
+            return false;
+        }
+        let now = Instant::now();
+        let double = self.last_model_click.is_some_and(|(prev, at)| {
+            prev == idx && now.duration_since(at) <= Duration::from_millis(500)
+        });
+        self.select(idx);
+        if double {
+            self.last_model_click = None;
+            true
+        } else {
+            self.last_model_click = Some((idx, now));
+            false
+        }
+    }
+
+    pub(crate) fn click_reasoning(&mut self) {
+        if self.extra_editing {
+            self.extra_editing = false;
+        }
+        self.nudge_reasoning(1);
+    }
+
+    pub(crate) fn click_args(&mut self) {
+        if self.extra_editing {
+            return;
+        }
+        self.extra_editing = true;
+        self.extra_cursor = self.extra_args.chars().count();
+    }
+
+    pub(crate) fn handle_wheel(&mut self, down: bool) {
+        if self.extra_editing {
+            return;
+        }
+        let _ = self.handle_key(if down { KeyCode::Down } else { KeyCode::Up });
     }
 
     fn select(&mut self, idx: usize) {
@@ -285,8 +343,14 @@ impl ProviderLaunchState {
     }
 }
 
-pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, area: Rect) {
+pub fn render_provider_launch(
+    f: &mut Frame,
+    state: &mut ProviderLaunchState,
+    area: Rect,
+    hitmap: &mut HitMap,
+) {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut hits: Vec<Option<OverlayClick>> = Vec::new();
 
     let (kind_label, title, hint) = match state.kind {
         LaunchKind::Provider => (
@@ -304,8 +368,11 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
         Span::styled(kind_label, dim()),
         Span::styled(state.alias.clone(), header()),
     ]));
+    hits.push(None);
     lines.push(Line::from(Span::styled(hint, dim())));
+    hits.push(None);
     lines.push(Line::from(""));
+    hits.push(None);
 
     for (idx, model) in state.models.iter().enumerate() {
         let selected = idx == state.selected;
@@ -321,14 +388,17 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
             Span::styled(marker, key()),
             Span::styled(format!("{}{default}{search}", model.title), style),
         ]));
+        hits.push(Some(OverlayClick::LaunchModel(idx)));
     }
 
     lines.push(Line::from(""));
+    hits.push(None);
     lines.push(Line::from(vec![
         Span::styled("reasoning  ", dim()),
         Span::styled(state.reasoning_label().to_string(), header()),
         Span::styled("   (this session)", dim()),
     ]));
+    hits.push(Some(OverlayClick::LaunchReasoning));
     let extra_shown = if state.extra_editing {
         let mut shown = state.extra_args.clone();
         let byte = shown
@@ -348,7 +418,9 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
         Span::styled(extra_shown, header()),
         Span::styled("   (this session)", dim()),
     ]));
+    hits.push(Some(OverlayClick::LaunchArgs));
     lines.push(Line::from(""));
+    hits.push(None);
     lines.push(Line::from(vec![
         Span::styled("j/k", key()),
         Span::styled(" model  ", dim()),
@@ -361,8 +433,15 @@ pub fn render_provider_launch(f: &mut Frame, state: &mut ProviderLaunchState, ar
         Span::styled("esc", key()),
         Span::styled(" cancel", dim()),
     ]));
+    hits.push(Some(OverlayClick::Key(KeyCode::Enter)));
 
-    popup::render_popup(f, title, &lines, &mut state.popup, area);
+    let layout = popup::render_popup(f, title, &lines, &mut state.popup, area);
+    hitmap.overlay = OverlayHit::Modal;
+    hitmap.overlay_clicks.clear();
+    if let Some(layout) = layout {
+        hitmap.overlay_panel = Some(layout.panel);
+        layout.push_line_hits(&mut hitmap.overlay_clicks, &hits);
+    }
 }
 
 #[cfg(test)]
@@ -441,7 +520,14 @@ mod tests {
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| super::render_provider_launch(frame, &mut picker, frame.area()))
+            .draw(|frame| {
+                super::render_provider_launch(
+                    frame,
+                    &mut picker,
+                    frame.area(),
+                    &mut crate::tui::hitmap::HitMap::default(),
+                )
+            })
             .unwrap();
         let joined = (0..20)
             .map(|y| row_text(terminal.backend(), y))

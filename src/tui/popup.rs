@@ -67,15 +67,56 @@ impl PopupState {
 /// If terminal is too small, renders a single-line fallback at the bottom
 /// of `screen` instead of the popup.
 ///
-/// Returns the popup panel rect for mouse hit-testing, or `None` when the
-/// terminal is too small for a normal popup.
+/// Geometry of a rendered popup, used to map content lines to mouse hits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PopupLayout {
+    pub panel: Rect,
+    pub content: Rect,
+    pub scroll: u16,
+}
+
+impl PopupLayout {
+    /// Visible row for `line_index` in the original `lines` slice, or `None`
+    /// when that line is scrolled out of the inner content area.
+    pub fn line_rect(&self, line_index: usize) -> Option<Rect> {
+        if self.content.width == 0 || self.content.height == 0 {
+            return None;
+        }
+        let vis = line_index.checked_sub(usize::from(self.scroll))?;
+        let vis = u16::try_from(vis).ok()?;
+        let y = self.content.y.checked_add(vis)?;
+        if y >= self.content.bottom() {
+            return None;
+        }
+        Some(Rect {
+            x: self.content.x,
+            y,
+            width: self.content.width,
+            height: 1,
+        })
+    }
+
+    pub fn push_line_hits<T: Copy>(&self, out: &mut Vec<(Rect, T)>, hits: &[Option<T>]) {
+        for (index, hit) in hits.iter().enumerate() {
+            let Some(hit) = *hit else {
+                continue;
+            };
+            if let Some(area) = self.line_rect(index) {
+                out.push((area, hit));
+            }
+        }
+    }
+}
+
+/// Returns popup layout for mouse hit-testing, or `None` when the terminal is
+/// too small for a normal popup.
 pub fn render_popup(
     f: &mut Frame,
     title: &str,
     lines: &[Line<'_>],
     state: &mut PopupState,
     screen: Rect,
-) -> Option<Rect> {
+) -> Option<PopupLayout> {
     if screen.width < MIN_TERM_W || screen.height < MIN_TERM_H {
         render_too_small_fallback(f, screen);
         return None;
@@ -155,7 +196,11 @@ pub fn render_popup(
     if scrollable && inner.width >= 1 && visible_h > 0 {
         render_scrollbar(f, inner, scroll, max_scroll, visible_h, total_lines);
     }
-    Some(area)
+    Some(PopupLayout {
+        panel: area,
+        content: content_area,
+        scroll,
+    })
 }
 
 fn render_scrollbar(
@@ -285,6 +330,19 @@ mod tests {
         assert_eq!(max_inner_height(Rect::new(0, 0, 80, 12)), 8);
         assert_eq!(max_inner_height(Rect::new(0, 0, 80, 6)), 4);
         assert_eq!(max_inner_height(Rect::new(0, 0, 10, 24)), 0);
+    }
+
+    #[test]
+    fn line_rect_accounts_for_scroll_and_content_bounds() {
+        let layout = PopupLayout {
+            panel: Rect::new(2, 2, 20, 6),
+            content: Rect::new(4, 3, 16, 4),
+            scroll: 2,
+        };
+        assert_eq!(layout.line_rect(1), None);
+        assert_eq!(layout.line_rect(2), Some(Rect::new(4, 3, 16, 1)));
+        assert_eq!(layout.line_rect(5), Some(Rect::new(4, 6, 16, 1)));
+        assert_eq!(layout.line_rect(6), None);
     }
 
     #[test]
