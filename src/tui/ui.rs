@@ -64,7 +64,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
             }
         }
         Tab::Providers => render_providers_tab(f, app, vertical[1]),
-        Tab::Settings => super::settings::render_settings_tab(f, &app.settings, vertical[1]),
+        Tab::Settings => {
+            super::settings::render_settings_tab(f, &app.settings, vertical[1], &mut app.hitmap)
+        }
         Tab::Logs => render_logs(f, app, vertical[1]),
     }
 

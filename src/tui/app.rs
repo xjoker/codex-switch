@@ -710,9 +710,10 @@ impl App {
 
     /// Handle a mouse event against the last frame's hit map.
     ///
-    /// Scope (P1+P2): wheel scroll on logs/help/menus; left-click tabs and
-    /// list rows; click outside dismissible overlays closes them. Forms,
-    /// launch picker, confirm, and text edits absorb mouse without action.
+    /// Scope: wheel scroll on logs/help/menus/settings; left-click tabs,
+    /// list rows, and settings fields; click outside dismissible overlays
+    /// closes them. Forms, launch picker, confirm, and text edits absorb
+    /// mouse without action.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<KeyCode> {
         use super::hitmap::{HitMap, OverlayHit};
 
@@ -753,6 +754,13 @@ impl App {
                             } else {
                                 self.log_scroll = self.log_scroll.saturating_add(1);
                             }
+                        } else if self.active_tab == Tab::Settings
+                            && self
+                                .hitmap
+                                .settings_body
+                                .is_some_and(|area| HitMap::contains(area, col, row))
+                        {
+                            self.settings.handle_wheel(down);
                         }
                     }
                 }
@@ -838,7 +846,13 @@ impl App {
                                 self.last_list_click = None;
                             }
                         }
-                        Tab::Settings | Tab::Logs => self.last_list_click = None,
+                        Tab::Settings => {
+                            if let Some(index) = self.hitmap.settings_field_at(col, row) {
+                                self.settings.click_field(index);
+                            }
+                            self.last_list_click = None;
+                        }
+                        Tab::Logs => self.last_list_click = None,
                     }
                 }
             },
@@ -3754,6 +3768,99 @@ mod tests {
             app.handle_mouse(left_click(area.x + area.width / 2, area.y));
             assert_eq!(app.active_tab, expected);
         }
+    }
+
+    #[test]
+    fn rendered_settings_field_click_toggles_boolean_and_starts_text_edit() {
+        let mut app = App::new();
+        app.active_tab = Tab::Settings;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+
+        let (priority, index) = app
+            .hitmap
+            .settings_fields
+            .iter()
+            .find(|(_, index)| *index == 6)
+            .copied()
+            .expect("rendered team_priority hit region");
+        assert_eq!(index, 6);
+        let before = app.settings.draft.use_cfg.team_priority;
+        app.handle_mouse(left_click(priority.x + 1, priority.y));
+        assert_eq!(app.settings.focused_index(), 6);
+        assert_eq!(app.settings.draft.use_cfg.team_priority, !before);
+        assert!(app.settings.is_dirty());
+        assert!(!app.settings.is_editing());
+
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        let (url, _) = app
+            .hitmap
+            .settings_fields
+            .iter()
+            .find(|(_, index)| *index == 0)
+            .copied()
+            .expect("rendered proxy.url hit region");
+        app.handle_mouse(left_click(url.x + 1, url.y));
+        assert_eq!(app.settings.focused_index(), 0);
+        assert!(app.settings.is_editing());
+    }
+
+    #[test]
+    fn rendered_settings_wheel_moves_focus_and_edit_absorbs_other_fields() {
+        let mut app = App::new();
+        app.active_tab = Tab::Settings;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        let body = app
+            .hitmap
+            .settings_body
+            .expect("rendered settings body hit region");
+        app.handle_mouse(scroll(MouseEventKind::ScrollDown, body.x + 1, body.y + 1));
+        assert_eq!(app.settings.focused_index(), 1);
+
+        app.handle_settings_key(KeyCode::Enter);
+        assert!(app.settings.is_editing());
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(
+            matches!(app.hitmap.overlay, crate::tui::hitmap::OverlayHit::Modal),
+            "an active settings edit must absorb mouse"
+        );
+        let (priority, _) = app
+            .hitmap
+            .settings_fields
+            .iter()
+            .find(|(_, index)| *index == 6)
+            .copied()
+            .expect("team_priority remains hittable in the map");
+        app.handle_mouse(left_click(priority.x + 1, priority.y));
+        assert_eq!(app.settings.focused_index(), 1);
+        assert!(app.settings.is_editing());
+    }
+
+    #[test]
+    fn rendered_settings_footer_save_returns_the_same_key_as_keyboard() {
+        let mut app = App::new();
+        app.active_tab = Tab::Settings;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::render(frame, &mut app))
+            .unwrap();
+        let (area, code) = app
+            .hitmap
+            .footer_actions
+            .iter()
+            .find(|(_, code)| *code == KeyCode::Char('s'))
+            .copied()
+            .expect("rendered settings save action");
+        assert_eq!(app.handle_mouse(left_click(area.x, area.y)), Some(code));
     }
 
     #[test]

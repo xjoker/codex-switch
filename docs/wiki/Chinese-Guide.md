@@ -163,7 +163,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 ### Settings 页
 
-编辑 `$CODEX_SWITCH_HOME/config.toml`（代理、缓存、并发、TUI 自动刷新、选号和 launch 恢复延迟）。`j` / `k` 移动字段，`Enter` 编辑或开关，`s` 保存；TUI 进程内立即生效。Accounts 页的 `s` 仍是排序，`t` 只控制当前会话的自动刷新；预热用账号菜单 `w` 或一次性 CLI `warmup`。保存会重写整个配置文件，不保留注释。未保存的修改切走 Tab 仍会保留；正在编辑字段时 `Tab` 不会切页，`Esc` 取消当前编辑。详情以英文 [Configuration](Configuration) 为准。
+编辑 `$CODEX_SWITCH_HOME/config.toml`（代理、缓存、并发、TUI 自动刷新、选号和 launch 恢复延迟）。`j` / `k` 移动字段，`Enter` 编辑或开关，`s` 保存；也可以点击字段编辑或开关，滚轮移动字段。TUI 进程内立即生效。Accounts 页的 `s` 仍是排序，`t` 只控制当前会话的自动刷新；预热用账号菜单 `w` 或一次性 CLI `warmup`。保存会重写整个配置文件，不保留注释。未保存的修改切走 Tab 仍会保留；正在编辑字段时 `Tab` 不会切页，`Esc` 取消当前编辑。详情以英文 [Configuration](Configuration) 为准。
 
 ### 提供方表单（新增 / 编辑）
 

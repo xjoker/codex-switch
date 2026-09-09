@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20260909.4.0 (candidate) — 2026-09-09
+
+- **Settings fields accept mouse input** — Click a Settings field to focus and edit or toggle it. The wheel moves among fields. Active field edits still absorb mouse so they do not click through.
+
 ## v20260909.3.0 (candidate) — 2026-09-09
 
 - **Warmup only opens 5h windows** — CLI `warmup` and TUI `w` skip accounts whose usage shows only a 7-day window (free plans). Paid accounts still open inactive 5h main and model-specific pools; confirmed 7d-only additional pools are left alone.

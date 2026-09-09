@@ -14,6 +14,10 @@ pub struct HitMap {
     pub account_list: Option<ListHit>,
     pub provider_list: Option<ListHit>,
     pub logs: Option<Rect>,
+    /// Settings field rows after auto-scroll (index into the settings focus order).
+    pub settings_fields: Vec<(Rect, usize)>,
+    /// Settings panel body, used for wheel focus movement.
+    pub settings_body: Option<Rect>,
     pub overlay: OverlayHit,
     /// Clickable actions rendered in the bottom status/help bar.
     pub footer_actions: Vec<(Rect, KeyCode)>,
@@ -81,6 +85,13 @@ impl HitMap {
             .iter()
             .find(|(area, _)| Self::contains(*area, column, row))
             .map(|(_, code)| *code)
+    }
+
+    pub fn settings_field_at(&self, column: u16, row: u16) -> Option<usize> {
+        self.settings_fields
+            .iter()
+            .find(|(area, _)| Self::contains(*area, column, row))
+            .map(|(_, index)| *index)
     }
 }
 

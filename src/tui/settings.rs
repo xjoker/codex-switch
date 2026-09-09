@@ -8,6 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+use super::hitmap::HitMap;
 use super::theme::{C_RED, C_YELLOW, base, dim, header, highlight};
 use crate::config::{AppConfig, save as save_config};
 
@@ -57,6 +58,33 @@ impl SettingsState {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    pub(crate) fn focused_index(&self) -> usize {
+        FOCUS_ORDER
+            .iter()
+            .position(|item| *item == self.focus)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn click_field(&mut self, index: usize) {
+        if self.editing {
+            return;
+        }
+        let Some(&focus) = FOCUS_ORDER.get(index) else {
+            return;
+        };
+        self.error = None;
+        self.notice = None;
+        self.focus = focus;
+        self.activate();
+    }
+
+    pub(crate) fn handle_wheel(&mut self, down: bool) {
+        if self.editing {
+            return;
+        }
+        self.focus_delta(if down { 1 } else { -1 });
     }
 
     pub fn from_config(config: AppConfig) -> Self {
@@ -331,6 +359,7 @@ fn push_field(
     name: &str,
     value: String,
     lines: &mut Vec<Line<'static>>,
+    line_focus: &mut Vec<Option<Focus>>,
     focused_line: &mut usize,
 ) {
     if settings.focus == focus {
@@ -345,9 +374,15 @@ fn push_field(
         Span::styled(format!("{name:<22}"), dim()),
         Span::styled(value, style),
     ]));
+    line_focus.push(Some(focus));
 }
 
-pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) {
+pub fn render_settings_tab(
+    f: &mut Frame,
+    settings: &SettingsState,
+    area: Rect,
+    hitmap: &mut HitMap,
+) {
     let title = if settings.dirty {
         " Settings * "
     } else {
@@ -360,9 +395,11 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
         .style(base());
     let inner = block.inner(area);
     f.render_widget(block, area);
+    hitmap.settings_body = Some(area);
 
     let mut focused_line = 0usize;
     let mut lines = vec![Line::from(Span::styled("Proxy / network / TUI", header()))];
+    let mut line_focus: Vec<Option<Focus>> = vec![None];
 
     push_field(
         settings,
@@ -374,6 +411,7 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
             settings.draft.proxy.url.as_deref().unwrap_or(""),
         ),
         &mut lines,
+        &mut line_focus,
         &mut focused_line,
     );
     push_field(
@@ -386,6 +424,7 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
             settings.draft.proxy.no_proxy.as_deref().unwrap_or(""),
         ),
         &mut lines,
+        &mut line_focus,
         &mut focused_line,
     );
     push_field(
@@ -398,6 +437,7 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
             &settings.draft.cache.ttl.to_string(),
         ),
         &mut lines,
+        &mut line_focus,
         &mut focused_line,
     );
     push_field(
@@ -410,6 +450,7 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
             &settings.draft.network.max_concurrent.to_string(),
         ),
         &mut lines,
+        &mut line_focus,
         &mut focused_line,
     );
     push_field(
@@ -422,10 +463,13 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
             &settings.draft.tui.auto_refresh_interval_secs.to_string(),
         ),
         &mut lines,
+        &mut line_focus,
         &mut focused_line,
     );
     lines.push(Line::from(""));
+    line_focus.push(None);
     lines.push(Line::from(Span::styled("Selection", header())));
+    line_focus.push(None);
     push_field(
         settings,
         Focus::SafetyMargin,
@@ -436,6 +480,7 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
             &format_num(settings.draft.use_cfg.safety_margin_7d),
         ),
         &mut lines,
+        &mut line_focus,
         &mut focused_line,
     );
     push_field(
@@ -444,10 +489,13 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
         "use.team_priority",
         bool_label(settings.draft.use_cfg.team_priority).to_string(),
         &mut lines,
+        &mut line_focus,
         &mut focused_line,
     );
     lines.push(Line::from(""));
+    line_focus.push(None);
     lines.push(Line::from(Span::styled("Launch", header())));
+    line_focus.push(None);
     push_field(
         settings,
         Focus::RestoreDelay,
@@ -458,25 +506,61 @@ pub fn render_settings_tab(f: &mut Frame, settings: &SettingsState, area: Rect) 
             &settings.draft.launch.restore_delay_secs.to_string(),
         ),
         &mut lines,
+        &mut line_focus,
         &mut focused_line,
     );
     lines.push(Line::from(""));
+    line_focus.push(None);
     if let Some(error) = &settings.error {
         lines.push(Line::from(Span::styled(error.clone(), base().fg(C_RED))));
+        line_focus.push(None);
     } else if let Some(notice) = &settings.notice {
         lines.push(Line::from(Span::styled(
             notice.clone(),
             base().fg(C_YELLOW),
         )));
+        line_focus.push(None);
     } else {
         lines.push(Line::from(Span::styled(
-            "j/k move  enter edit/toggle  s save  esc cancel edit",
+            "click field  j/k move  enter edit/toggle  s save  esc cancel edit",
             dim(),
         )));
+        line_focus.push(None);
     }
 
     let visible_height = inner.height as usize;
     let skip = focused_line.saturating_sub(visible_height.saturating_sub(1));
+    debug_assert_eq!(lines.len(), line_focus.len());
+    let mut fields = Vec::new();
+    for (index, focus) in line_focus.into_iter().enumerate() {
+        if index < skip {
+            continue;
+        }
+        let visible_row = index - skip;
+        if visible_row >= visible_height {
+            break;
+        }
+        let Some(focus) = focus else {
+            continue;
+        };
+        let field = FOCUS_ORDER
+            .iter()
+            .position(|item| *item == focus)
+            .expect("settings line maps to a known field");
+        let Ok(row) = u16::try_from(visible_row) else {
+            continue;
+        };
+        fields.push((
+            Rect {
+                x: inner.x,
+                y: inner.y.saturating_add(row),
+                width: inner.width,
+                height: 1,
+            },
+            field,
+        ));
+    }
+    hitmap.settings_fields = fields;
     let visible: Vec<Line<'static>> = lines.into_iter().skip(skip).collect();
     f.render_widget(Paragraph::new(visible).style(base()), inner);
 }
