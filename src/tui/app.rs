@@ -909,12 +909,10 @@ impl App {
                 }
                 None
             }
-            OverlayClick::LaunchModel(idx) => {
-                let Some(picker) = self.provider_launch.as_mut() else {
-                    return None;
-                };
-                picker.click_model(idx).then_some(KeyCode::Enter)
-            }
+            OverlayClick::LaunchModel(idx) => self
+                .provider_launch
+                .as_mut()
+                .and_then(|picker| picker.click_model(idx).then_some(KeyCode::Enter)),
             OverlayClick::LaunchReasoning => {
                 if let Some(picker) = self.provider_launch.as_mut() {
                     picker.click_reasoning();

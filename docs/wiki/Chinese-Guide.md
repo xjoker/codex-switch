@@ -2,7 +2,7 @@
 
 > 英文 Wiki 是 `codex-switch` 的主文档与行为依据。本页提供中文快速入口与常用操作摘要；细节、标志位与边界条件以英文页面为准（尤其 [Providers](Providers)、[Command reference](Command-Reference)）。
 
-`codex-switch` 用于管理本机多个 OpenAI Codex CLI 登录、查看额度，并在新会话前选择合适账号。它也会保存自定义 API 提供方（如 OpenRouter），通过 `launch` 把**模型和地址**交给 Codex。每次 launch 用独立运行目录（可同时开多个模型）；`prompts/`、`skills/`、`AGENTS.md` 链到原来的 `$CODEX_HOME`，MCP 等非模型配置在退出时合并回去。请勿分享 profile、`auth.json`、提供方 API 密钥、代理凭据或未脱敏的 debug 输出。
+`codex-switch` 用于管理本机多个 OpenAI Codex CLI 登录、查看额度，并在新会话前选择合适账号。它也会保存自定义 API 提供方（如 OpenRouter），通过 `launch` 把**模型和地址**交给 Codex。提供方沿用原来的 `$CODEX_HOME`，直接使用现有 MCP、skills、agents、插件和 hooks；每次启动选择独立的 Codex 原生 profile，模型与路由设置不会写入默认 `config.toml`。支持多个提供方同时运行，启动工具异常退出不需要恢复默认配置。请勿分享 profile、`auth.json`、提供方 API 密钥、代理凭据或未脱敏的 debug 输出。
 
 ## 快速开始
 
@@ -56,7 +56,8 @@ codex-switch import ~/auth-backups
 
 要点：
 
-- `use` 只切换 ChatGPT 的 `$CODEX_HOME/auth.json`；**不能**用于自定义提供方。
+- `use` 和 Accounts 页的 `u` 切换 ChatGPT 的 `$CODEX_HOME/auth.json`，并将用户 `config.toml` 顶层及其默认 `profile` 中已有的 `model_provider` 选择改回 `openai`；保留模型、提供方定义、MCP 和注释。**不能**用提供方别名执行 `use`。
+- 若另行启动仍请求第三方地址，检查启动参数、项目 `.codex/config.toml`、额外指定的 Codex profile，以及 `openai_base_url` / `OPENAI_BASE_URL` 地址覆盖；这些不由账号切换修改。
 - `use` 不会后台自动换号；已在跑的 Codex 进程不会读取新的 `auth.json`，需重启 Codex，或用 `launch` 开新进程。
 - Codex 参数写在 `--` 后面：`codex-switch launch work -- exec --json "…"`。`exec` / `resume` 等 Codex 子命令也可以直接跟在 `launch` 后面，不必再写 `--`。`--` 两侧的参数都会保留。prompt 看起来像别名时仍须 `--`。
 - 当前 Codex 没有 `--full-auto`；用 `-a never`、`--sandbox` 或 `--dangerously-bypass-approvals-and-sandbox`。
@@ -213,3 +214,11 @@ Codex 在前台运行；退出后回到 TUI。
 - 第一次使用：继续阅读[开始使用](Getting-Started)。
 - 日常操作与可选系统计划任务：查看[功能指南](Feature-Guide)。
 - 提供方与模型报错：先看英文 [Providers](Providers) 与 [故障排查](Troubleshooting)。
+
+### 提供方的原生 Codex 环境
+
+提供方启动按 Codex 0.154.0 验证。每次启动在 `$CODEX_HOME` 创建 `cs-*.config.toml`，只保存本次提供方的差异配置；密钥仅通过子进程环境变量传入。公共资源与周边服务认证继续由 Codex 原生机制管理。Codex 内保存的设置属于当前 profile，恢复该会话时继续使用；公共配置的后续更新仍会被继承，除非该 profile 已覆盖相同设置。不要另行传入 `--profile` / `-p`。
+
+运行元数据与模型目录保存在 `$CODEX_SWITCH_HOME/provider-runs/`，会话保存在默认 Codex home。提供方重命名不会改变历史归属，删除后同名重建不会接管旧会话。已有旧版隔离目录的历史仍按旧路径恢复，尚未迁移为共享资源环境。
+
+JSON 模式使用运行目录中的 `stdout.jsonl` 和 `stderr.txt` 承接子进程输出，正常完成后读取并清理；启动工具异常退出时保留输出和 profile。主动中断仍会终止子进程；关闭整个终端或操作系统杀掉进程树不属于仅启动工具崩溃。

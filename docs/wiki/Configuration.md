@@ -32,7 +32,8 @@ Accounts are added by logging in with `codex-switch login` or by importing an ex
 | `$CODEX_SWITCH_HOME/profiles/<alias>/auth.json` | Saved profile authentication. |
 | `$CODEX_SWITCH_HOME/providers/<alias>/provider.toml` | Custom API provider definition and key (directory `0700`, file `0600`). |
 | `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog passed at launch (`/model` list plus metadata). |
-| `$CODEX_SWITCH_HOME/provider-runs/<identity_id>/<run_id>/` | Persistent per-launch Codex homes keyed by stable provider identity. Concurrent runs never share provider sqlite/config state; history remains addressable after alias rename and is retained as a tombstone after removal. |
+| `$CODEX_SWITCH_HOME/provider-runs/<identity_id>/<run_id>/` | Persistent launch metadata and model catalogs keyed by stable provider identity. Native runs share the normal Codex home and use separate writable profiles; legacy isolated homes remain available for their existing history. Runs that never produced a session are swept on the next launch. |
+| `$CODEX_HOME/cs-*.config.toml` | Native per-run provider config overlays; shared MCP/skills/plugins remain in the normal home. No provider API key is stored here. Files for dead runs are reclaimed automatically, and `provider remove` deletes that provider's files. |
 | `$CODEX_SWITCH_HOME/deleted-profiles/` | Recoverable deleted profiles. |
 | `$CODEX_SWITCH_HOME/current` | Current alias marker. |
 | `$CODEX_SWITCH_HOME/cache.json` | Per-profile usage cache. |

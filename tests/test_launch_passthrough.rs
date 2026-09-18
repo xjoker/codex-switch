@@ -93,6 +93,9 @@ if session_id and sys.argv[1:] != ["--version"]:
     codex_home = os.environ["CODEX_HOME"]
     session_name = os.environ.get("CS_FAKE_CODEX_SESSION_NAME", session_id)
     provider = os.environ.get("CS_FAKE_CODEX_SESSION_PROVIDER", "openrouter")
+    for arg in sys.argv[1:]:
+        if arg.startswith("model_provider="):
+            provider = arg.split("=", 1)[1].strip('"')
     model = os.environ.get("CS_FAKE_CODEX_SESSION_MODEL", "openai/gpt-5.3-codex")
     updated_at = os.environ.get("CS_FAKE_CODEX_SESSION_UPDATED_AT", "2026-09-09T00:00:00Z")
     day = os.path.join(codex_home, "sessions", "2026", "09", "09")
@@ -128,6 +131,9 @@ else:
         time.sleep(delay)
     size = int(os.environ.get("CS_FAKE_CODEX_STDOUT_BYTES", "0"))
     sys.stdout.write("x" * size if size else "codex-ok\n")
+    sys.stdout.flush()
+    if os.environ.get("CS_FAKE_CODEX_DONE"):
+        open(os.environ["CS_FAKE_CODEX_DONE"], "w").write("completed")
 sys.exit(0)
 "#;
 
@@ -215,6 +221,14 @@ fn recorded_launches(log: &Path) -> Vec<FakeLaunch> {
             })
         })
         .collect()
+}
+
+fn native_profile_name(launch: &FakeLaunch) -> &str {
+    &launch
+        .argv
+        .windows(2)
+        .find(|pair| pair[0] == "--profile")
+        .expect("native profile")[1]
 }
 
 fn last_non_version_argv(log: &Path) -> Vec<String> {
@@ -572,10 +586,12 @@ fn launch_provider_puts_c_overrides_after_exec_and_keeps_json() {
         "-c model_provider must follow exec: {argv:?}"
     );
     assert!(
-        argv[exec_at + 1..]
-            .windows(2)
-            .any(|pair| pair[0] == "-c" && pair[1].starts_with("model=")),
-        "-c model must follow exec when the user did not pass --model: {argv:?}"
+        argv.windows(2).any(|pair| pair[0] == "--profile"),
+        "exec must receive a writable provider profile: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg.starts_with("model=")),
+        "model must stay editable inside Codex"
     );
     let json_at = argv.iter().position(|a| a == "--json").expect("--json");
     assert_eq!(
@@ -657,6 +673,17 @@ fn launch_provider_passthrough_model_drops_saved_model_overrides() {
     let model_at = argv.iter().position(|a| a == "-m").expect("-m");
     assert!(model_at > 0, "-m must follow exec: {argv:?}");
     assert_eq!(&argv[model_at..], ["-m", "one-shot", "hi"]);
+    let launched = recorded_launches(&log).pop().unwrap();
+    let path = launched
+        .codex_home
+        .join(format!("{}.config.toml", native_profile_name(&launched)));
+    let config: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_ne!(
+        config["model"].as_str(),
+        Some("one-shot"),
+        "one-shot model must not replace the persistent model"
+    );
+
     let _ = fs::remove_dir_all(home);
 }
 
@@ -853,7 +880,7 @@ fn provider_sync_is_persisted_and_launch_stays_offline() {
 }
 
 #[test]
-fn provider_launches_use_distinct_homes_per_run_and_provider() {
+fn provider_launches_share_user_resources_with_distinct_profiles() {
     let home = temp_home("provider-resume-一致性");
     let (fake_bin, log) = install_fake_codex(&home);
     setup_provider(&home);
@@ -883,27 +910,31 @@ fn provider_launches_use_distinct_homes_per_run_and_provider() {
 
     let launches = recorded_launches(&log);
     assert_eq!(launches.len(), 3);
-    assert_ne!(launches[0].codex_home, launches[1].codex_home);
-    assert_ne!(launches[0].codex_home, launches[2].codex_home);
-    assert_ne!(launches[1].codex_home, launches[2].codex_home);
-    assert!(launches[0].codex_home.to_string_lossy().contains("一致性"));
-    assert_eq!(
-        launches[0].codex_home.parent(),
-        launches[1].codex_home.parent()
-    );
-    assert_ne!(
-        launches[0].codex_home.parent(),
-        launches[2].codex_home.parent()
-    );
-    assert_eq!(
-        launches[0]
-            .codex_home
-            .parent()
-            .and_then(|path| path.parent())
-            .and_then(|path| path.file_name())
-            .and_then(|name| name.to_str()),
-        Some("provider-runs")
-    );
+    for launch in &launches {
+        assert_eq!(
+            launch.codex_home,
+            home.join(".codex"),
+            "provider must retain the native resource root"
+        );
+        assert!(
+            launch.argv.windows(2).any(|pair| pair[0] == "--profile"),
+            "provider must select an independent writable profile"
+        );
+    }
+    let profiles: Vec<_> = launches
+        .iter()
+        .map(|launch| {
+            launch
+                .argv
+                .windows(2)
+                .find(|pair| pair[0] == "--profile")
+                .unwrap()[1]
+                .clone()
+        })
+        .collect();
+    assert_ne!(profiles[0], profiles[1]);
+    assert_ne!(profiles[0], profiles[2]);
+    assert_ne!(profiles[1], profiles[2]);
     let _ = fs::remove_dir_all(home);
 }
 
@@ -1011,7 +1042,11 @@ fn provider_resume_uses_named_session_and_latest_run_of_that_provider() {
     );
     let last_run = &recorded_launches(&log)[4];
     assert_eq!(last_run.codex_home, latest_home);
-    assert_ne!(last_run.codex_home, second_home);
+    assert_eq!(last_run.codex_home, second_home);
+    assert_ne!(
+        native_profile_name(last_run),
+        native_profile_name(&recorded_launches(&log)[1])
+    );
     assert!(!last_run.argv.contains(&"--last".to_string()));
     assert_eq!(
         last_run.argv.last().map(String::as_str),
@@ -1307,9 +1342,17 @@ fn provider_resume_requires_original_model_unless_explicitly_changed() {
     );
     let argv = &recorded_launches(&log)[before].argv;
     assert_eq!(argv.first().map(String::as_str), Some("resume"));
-    assert!(argv.iter().any(|arg| {
-        arg == "model=deepseek/deepseek-r1-0528" || arg == "model=\"deepseek/deepseek-r1-0528\""
-    }));
+    let launch = recorded_launches(&log).last().unwrap().clone();
+    let saved: toml::Value = toml::from_str(
+        &fs::read_to_string(
+            launch
+                .codex_home
+                .join(format!("{}.config.toml", native_profile_name(&launch))),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["model"].as_str(), Some("deepseek/deepseek-r1-0528"));
     let _ = fs::remove_dir_all(home);
 }
 
@@ -1365,6 +1408,144 @@ fn provider_resume_serializes_same_run_but_allows_a_new_run() {
     let status = running.wait().unwrap();
     assert!(status.success());
     let launches = recorded_launches(&log);
-    assert_ne!(launches[1].codex_home, launches.last().unwrap().codex_home);
+    assert_eq!(launches[1].codex_home, launches.last().unwrap().codex_home);
+    assert_ne!(
+        native_profile_name(&launches[1]),
+        native_profile_name(launches.last().unwrap())
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_preserves_native_resources_and_default_identity() {
+    let home = temp_home("provider-native-resources");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let codex_home = home.join(".codex");
+    let fixtures = [
+        (
+            "config.toml",
+            "model_provider = \"openai\"\nmodel = \"default-model\"\n[mcp_servers.demo]\ncommand = \"demo\"\n",
+        ),
+        ("auth.json", "{\"fixture\":\"default-account\"}"),
+        (".credentials.json", "{\"fixture\":\"mcp-token\"}"),
+        ("skills/demo/SKILL.md", "fixture skill"),
+        ("agents/demo.toml", "fixture agent"),
+        ("hooks.json", "{}"),
+        ("plugins/fixture/data.json", "{}"),
+    ];
+    for (name, content) in fixtures {
+        let path = codex_home.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let launch = recorded_launches(&log).pop().unwrap();
+    assert_eq!(launch.codex_home, codex_home);
+    for (name, content) in fixtures {
+        assert_eq!(
+            fs::read_to_string(launch.codex_home.join(name)).unwrap(),
+            content,
+            "resource {name} must retain native contents"
+        );
+    }
+    let config: toml::Value = toml::from_str(
+        &fs::read_to_string(
+            codex_home.join(format!("{}.config.toml", native_profile_name(&launch))),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        config.get("mcp_servers").is_none(),
+        "inherit public config rather than snapshot it"
+    );
+    assert_ne!(config["model_provider"].as_str(), Some("openai"));
+    assert!(!config.to_string().contains("sk-test-passthrough"));
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_survives_launcher_crash_with_json_output() {
+    let home = temp_home("provider-crash");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let done = home.join("child-completed");
+    let mut launcher = command(&home, &fake_bin, &log, &["--json", "launch", "openrouter"])
+        .env("CS_FAKE_CODEX_SLEEP", "1")
+        .env("CS_FAKE_CODEX_STDOUT_BYTES", "200000")
+        .env("CS_FAKE_CODEX_DONE", &done)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if log.exists() && !recorded_launches(&log).is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Codex child did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let launched = recorded_launches(&log).pop().unwrap();
+    launcher.kill().unwrap();
+    launcher.wait().unwrap();
+    while !done.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        done.exists(),
+        "provider must survive parent death and keep writing output"
+    );
+    assert!(
+        launched
+            .codex_home
+            .join(format!("{}.config.toml", native_profile_name(&launched)))
+            .exists()
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_resume_keeps_model_selected_inside_codex() {
+    let home = temp_home("provider-model-persistence");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter"],
+        &[("CS_FAKE_CODEX_SESSION_ID", "model-edit")],
+    );
+    assert!(output.status.success());
+    let launched = recorded_launches(&log).pop().unwrap();
+    let path = launched
+        .codex_home
+        .join(format!("{}.config.toml", native_profile_name(&launched)));
+    let mut config: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    config["model"] = "deepseek/deepseek-r1-0528".into();
+    config
+        .as_table_mut()
+        .unwrap()
+        .insert("model_reasoning_effort".into(), "low".into());
+    fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+    let resumed = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter", "resume", "model-edit"],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let config: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(config["model"].as_str(), Some("deepseek/deepseek-r1-0528"));
+    assert_eq!(config["model_reasoning_effort"].as_str(), Some("low"));
     let _ = fs::remove_dir_all(home);
 }

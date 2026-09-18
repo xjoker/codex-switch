@@ -489,9 +489,24 @@ fn spawn_codex(
     json: bool,
     isolated_codex_home: Option<&std::path::Path>,
 ) -> std::io::Result<std::process::Child> {
+    spawn_codex_with_capture(command, args, extra_env, json, isolated_codex_home, None)
+}
+
+fn spawn_codex_with_capture(
+    command: &std::path::Path,
+    args: &[String],
+    extra_env: Option<(String, String)>,
+    json: bool,
+    codex_home: Option<&std::path::Path>,
+    capture: Option<&ProviderOutput>,
+) -> std::io::Result<std::process::Child> {
     let mut cmd = std::process::Command::new(command);
     cmd.args(args);
-    if json {
+    if let Some(capture) = capture {
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(capture.stdout.try_clone()?)
+            .stderr(capture.stderr.try_clone()?);
+    } else if json {
         // `--json launch` is non-interactive: inherited stdin is often a pipe
         // (not a TTY), and Codex exec then waits to append it as extra input.
         cmd.stdin(std::process::Stdio::null())
@@ -505,10 +520,63 @@ fn spawn_codex(
     if let Some((name, value)) = extra_env {
         cmd.env(name, value);
     }
-    if let Some(home) = isolated_codex_home {
+    if let Some(home) = codex_home {
         cmd.env("CODEX_HOME", home);
     }
     cmd.spawn()
+}
+
+/// Regular files keep the child writable after its launcher disappears.
+struct ProviderOutput {
+    stdout: std::fs::File,
+    stderr: std::fs::File,
+    stdout_path: std::path::PathBuf,
+    stderr_path: std::path::PathBuf,
+}
+
+impl ProviderOutput {
+    fn new(run_path: &std::path::Path) -> Result<Self> {
+        let stdout_path = run_path.join("stdout.jsonl");
+        let stderr_path = run_path.join("stderr.txt");
+        auth::atomic_write_private(&stdout_path, b"")?;
+        auth::atomic_write_private(&stderr_path, b"")?;
+        Ok(Self {
+            stdout: std::fs::OpenOptions::new().write(true).open(&stdout_path)?,
+            stderr: std::fs::OpenOptions::new().write(true).open(&stderr_path)?,
+            stdout_path,
+            stderr_path,
+        })
+    }
+
+    fn finish(self) -> Result<CapturedCodexIo> {
+        fn read(path: &std::path::Path) -> Result<(String, bool)> {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)?
+                .take((CODEX_CAPTURE_LIMIT + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            let truncated = bytes.len() > CODEX_CAPTURE_LIMIT;
+            bytes.truncate(CODEX_CAPTURE_LIMIT);
+            let mut text = String::from_utf8_lossy(&bytes).into_owned();
+            while text.len() > CODEX_CAPTURE_LIMIT {
+                text.pop();
+            }
+            Ok((text, truncated))
+        }
+        drop(self.stdout);
+        drop(self.stderr);
+        let (stdout, stdout_truncated) = read(&self.stdout_path)?;
+        let (stderr, stderr_truncated) = read(&self.stderr_path)?;
+        // Successful completion no longer needs durable output; crashes retain it.
+        std::fs::remove_file(&self.stdout_path)?;
+        std::fs::remove_file(&self.stderr_path)?;
+        Ok(CapturedCodexIo {
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+        })
+    }
 }
 
 struct CodexPipes {
@@ -648,15 +716,8 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 
 /// Launch Codex against a custom API provider profile.
 ///
-/// Unlike the ChatGPT path this stages nothing: the provider is applied as
-/// `codex -c …` overrides and the API key is injected into the child process
-/// environment under the profile's `env_key`. The saved model catalog is
-/// passed to Codex without gateway discovery on the launch path. Each launch
-/// gets its own Codex home under the provider directory so concurrent models
-/// do not share sqlite or rewrite
-/// the user's `config.toml` model keys. Prompts and skills are linked to the
-/// user's `$CODEX_HOME`. Model and endpoint come from `-c`. `auth.json` is not
-/// swapped.
+/// Provider launches keep the user's resource home and select a private native
+/// config profile. The parent never swaps default config or authentication.
 async fn launch_provider(
     profile: ProviderProfile,
     model: Option<&str>,
@@ -677,19 +738,51 @@ async fn launch_provider(
         }
     };
 
+    // Reclaim dead runs from crashed launches before touching this provider's.
+    // A sweep failure is housekeeping trouble, never a reason to block launch.
+    if let Err(error) = provider::sweep_dead_native_runs() {
+        user_println(&format!("Warning: provider run cleanup failed: {error:#}"));
+    }
+
     let resume = provider_resume_target(&args, &profile)?;
     let passthrough_model = passthrough_model_value(&args);
     // `--model` parsed by codex-switch selects a saved provider model. A model
     // forwarded after `--` belongs to Codex and intentionally keeps the
     // established one-shot behavior, including models outside the saved list.
+    let resumed_config = match resume.as_ref() {
+        Some((record, _)) if provider::ProviderLaunchProfile::is_native_run(&record.run_path)? => {
+            provider::ProviderLaunchProfile::open_existing(&profile, &record.run_path)?
+                .saved_config()?
+        }
+        _ => None,
+    };
     let explicit_model = model.map(str::to_string);
+    let resumed_model = resumed_config
+        .as_ref()
+        .and_then(|config| config.get("model"))
+        .and_then(toml::Value::as_str);
+    let reasoning = if model.is_none() && matches!(reasoning, ReasoningLaunch::Saved) {
+        match resumed_config
+            .as_ref()
+            .and_then(|config| config.get("model_reasoning_effort"))
+            .and_then(toml::Value::as_str)
+        {
+            Some("none") => ReasoningLaunch::Skip,
+            Some(effort) => ReasoningLaunch::Effort(effort.to_string()),
+            None => reasoning,
+        }
+    } else {
+        reasoning
+    };
     let selected_model = match (&resume, explicit_model.as_deref()) {
-        (Some((session, _)), None) => session.model.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "provider session '{}' has no saved model; resume it with an explicit --model",
-                session.session_id
-            )
-        })?,
+        (Some((session, _)), None) => {
+            resumed_model.or(session.model.as_deref()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provider session '{}' has no saved model; resume it with an explicit --model",
+                    session.session_id
+                )
+            })?
+        }
         (_, requested) => requested.unwrap_or(profile.default_model.as_str()),
     };
     let selected = profile.resolve_model(Some(selected_model))?.clone();
@@ -704,27 +797,94 @@ async fn launch_provider(
         );
     }
     let (env_name, env_value) = profile.launch_env();
-    let (mut session, _lease, codex_args) = if let Some((record, resume_args)) = resume {
-        let lease = provider::ProviderRunLease::acquire(&record.run_path)?;
-        let session = provider::ProviderCodexHome::open_existing(&profile, &record.run_path)?;
-        let overrides = profile.codex_config_args_from_saved_catalog_at(
-            Some(&selected.id),
-            reasoning.clone(),
-            &session.path,
-        )?;
-        let codex_args = provider_codex_argv(overrides, resume_args);
-        (session, Some(lease), codex_args)
-    } else {
-        let session = provider::ProviderCodexHome::begin(&profile)?;
-        session.write_model(&profile, &selected.id)?;
-        let overrides = profile.codex_config_args_from_saved_catalog_at(
-            model,
-            reasoning.clone(),
-            &session.path,
-        )?;
-        let codex_args = provider_codex_argv(overrides, args.clone());
-        (session, None, codex_args)
-    };
+    if args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| {
+            arg == "--profile"
+                || arg == "-p"
+                || arg.starts_with("--profile=")
+                || (arg.starts_with("-p") && arg.len() > 2)
+        })
+    {
+        anyhow::bail!(
+            "provider launch selects its own Codex profile; remove the forwarded --profile/-p option"
+        );
+    }
+    let (mut legacy_session, mut native_session, _lease, codex_args, codex_home, run_path) =
+        if let Some((record, resume_args)) = resume.as_ref()
+            && !provider::ProviderLaunchProfile::is_native_run(&record.run_path)?
+        {
+            let lease = provider::ProviderRunLease::acquire(&record.run_path)?;
+            let session = provider::ProviderCodexHome::open_existing(&profile, &record.run_path)?;
+            let overrides = profile.codex_config_args_from_saved_catalog_at(
+                Some(&selected.id),
+                reasoning.clone(),
+                &session.path,
+            )?;
+            let codex_home = session.path.clone();
+            (
+                Some(session),
+                None,
+                Some(lease),
+                provider_codex_argv(overrides, resume_args.clone()),
+                codex_home,
+                record.run_path.clone(),
+            )
+        } else {
+            let (session, lease, forwarded) = match resume {
+                Some((record, resume_args)) => {
+                    let lease = provider::ProviderRunLease::acquire(&record.run_path)?;
+                    let session =
+                        provider::ProviderLaunchProfile::open_existing(&profile, &record.run_path)?;
+                    // Codex itself also refuses a second writer, but fail here
+                    // with a clear message instead of letting it error later.
+                    if provider::native_session_writer_active(
+                        &session.codex_home,
+                        &record.session_id,
+                    ) {
+                        anyhow::bail!(
+                            "provider session '{}' is still owned by a live Codex; resume it after that Codex exits",
+                            record.session_id
+                        );
+                    }
+                    (session, Some(lease), resume_args)
+                }
+                None => (
+                    provider::ProviderLaunchProfile::begin(&profile)?,
+                    None,
+                    args.clone(),
+                ),
+            };
+            let mut runtime_profile = profile.clone();
+            runtime_profile.provider_id = session.runtime_provider_id.clone();
+            let mut overrides = runtime_profile.codex_config_args_from_saved_catalog_at(
+                Some(&selected.id),
+                reasoning.clone(),
+                &session.path,
+            )?;
+            if passthrough_sets_model(&forwarded) {
+                strip_c_pair(&mut overrides, is_per_model_override);
+            }
+            session.write_config(&profile, &overrides, &selected.id)?;
+            strip_c_pair(&mut overrides, is_per_model_override);
+            // Native --model wins over project defaults at startup; /model still
+            // updates the active thread and saves its next-launch choice.
+            if !passthrough_sets_model(&forwarded) {
+                overrides.extend(["--model".to_string(), selected.id.clone()]);
+            }
+            overrides.extend(["--profile".to_string(), session.profile_name.clone()]);
+            let codex_home = session.codex_home.clone();
+            let run_path = session.path.clone();
+            (
+                None,
+                Some(session),
+                lease,
+                provider_codex_argv(overrides, forwarded),
+                codex_home,
+                run_path,
+            )
+        };
 
     if !json {
         let reasoning_note = match &reasoning {
@@ -738,21 +898,38 @@ async fn launch_provider(
         ));
     }
 
-    let mut child = match spawn_codex(
+    let capture = if json {
+        Some(ProviderOutput::new(&run_path)?)
+    } else {
+        None
+    };
+    let mut child = match spawn_codex_with_capture(
         &codex_command,
         &codex_args,
         Some((env_name, env_value)),
         json,
-        Some(&session.path),
+        Some(&codex_home),
+        capture.as_ref(),
     ) {
         Ok(child) => child,
         Err(err) => {
-            session
-                .restore()
-                .context("merging Codex config after spawn failure")?;
+            if let Some(session) = legacy_session.as_mut() {
+                session
+                    .restore()
+                    .context("merging legacy Codex config after spawn failure")?;
+            }
+            // Fresh native runs self-clean on drop; resumed runs keep state.
             return Err(err).context("Failed to start Codex");
         }
     };
+    // The child owns its rollout now; record its pid so a crashed launcher's
+    // next resume attempt can refuse to double a still-running Codex.
+    if let Some(session) = native_session.as_mut() {
+        session.disarm();
+        session
+            .set_child_pid(&profile, &selected.id, child.id())
+            .context("recording provider run child pid")?;
+    }
     let pipes = take_codex_pipes(&mut child, json);
 
     let status = match wait_for_child_or_shutdown(&mut child, shutdown)
@@ -762,16 +939,29 @@ async fn launch_provider(
         Ok(status) => status,
         Err(signal) => {
             terminate_child(&mut child, pipes);
-            let cleanup = session
-                .restore()
-                .context("merging Codex config after provider shutdown");
+            let cleanup = match legacy_session.as_mut() {
+                Some(session) => session
+                    .restore()
+                    .context("merging legacy Codex config after provider shutdown"),
+                None => Ok(()),
+            };
             return Ok(shutdown_outcome(signal, cleanup));
         }
     };
-    session
-        .restore()
-        .context("merging Codex config after provider launch")?;
-    let captured = join_codex_pipes(pipes);
+    if let Some(session) = legacy_session.as_mut() {
+        session
+            .restore()
+            .context("merging legacy Codex config after provider launch")?;
+    }
+    if let Some(session) = native_session.as_mut() {
+        session
+            .clear_child_pid(&profile, &selected.id)
+            .context("clearing provider run child pid")?;
+    }
+    let captured = match capture {
+        Some(capture) => capture.finish()?,
+        None => join_codex_pipes(pipes),
+    };
     let exit_code = child_exit_code(&status);
 
     if json {

@@ -287,13 +287,117 @@ fn switch_live_auth(alias: &str) -> Result<()> {
 }
 
 fn switch_live_auth_locked(alias: &str, src: &Path) -> Result<()> {
+    switch_live_auth_locked_after_write(alias, src, |_| Ok(()))
+}
+
+fn switch_live_auth_locked_after_write(
+    alias: &str,
+    src: &Path,
+    after_write: impl Fn(&Path) -> Result<()>,
+) -> Result<()> {
     let val = read_auth(src)?;
     crate::auth::validate_managed_auth_value(&val)?;
     let dst = codex_auth_path()?;
+    let _config_lock = lock_codex_config_merge()?;
+    let config_path = dst.with_file_name("config.toml");
+    let config_change = chatgpt_provider_config(&config_path)?;
+    let current_path = current_file()?;
+    let mut originals = Vec::new();
+    for path in [&dst, &current_path] {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading {} before account switch", path.display()));
+            }
+        };
+        originals.push((path, bytes));
+    }
+    if let Some((original, _)) = &config_change {
+        originals.push((&config_path, Some(original.as_bytes().to_vec())));
+    }
     backup_auth(&dst)?;
-    write_auth(&dst, &val)?;
-    write_current(alias)?;
+    let result = (|| -> Result<()> {
+        if let Some((_, updated)) = &config_change {
+            atomic_write_private(&config_path, updated.as_bytes())
+                .context("selecting the OpenAI provider for the ChatGPT account")?;
+            after_write(&config_path)?;
+        }
+        write_auth(&dst, &val)?;
+        after_write(&dst)?;
+        write_current(alias)?;
+        after_write(&current_path)
+    })();
+    if let Err(error) = result {
+        // Windows 可能在文件替换成功后因 ACL 加固失败报错，须恢复所有原始状态。
+        let mut failures = Vec::new();
+        for (path, original) in originals {
+            let restored = match original {
+                Some(bytes) => atomic_write_private(path, &bytes),
+                None => match std::fs::remove_file(path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error.into()),
+                },
+            };
+            if let Err(error) = restored {
+                failures.push(format!("{}: {error:#}", path.display()));
+            }
+        }
+        if !failures.is_empty() {
+            return Err(error).context(format!(
+                "account switch rollback failed: {}",
+                failures.join("; ")
+            ));
+        }
+        return Err(error);
+    }
     Ok(())
+}
+
+fn chatgpt_provider_config(path: &Path) -> Result<Option<(String, String)>> {
+    #[derive(serde::Deserialize)]
+    struct ProviderSelection {
+        model_provider: Option<toml::Spanned<String>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RoutingConfig {
+        model_provider: Option<toml::Spanned<String>>,
+        profile: Option<String>,
+        #[serde(default)]
+        profiles: std::collections::BTreeMap<String, ProviderSelection>,
+    }
+
+    let original = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let config: RoutingConfig = toml::from_str(&original).map_err(|_| {
+        anyhow::anyhow!("invalid Codex provider configuration in {}", path.display())
+    })?;
+    let selected_profile = config
+        .profile
+        .as_ref()
+        .and_then(|name| config.profiles.get(name))
+        .and_then(|profile| profile.model_provider.as_ref());
+    let mut ranges: Vec<_> = [config.model_provider.as_ref(), selected_profile]
+        .into_iter()
+        .flatten()
+        .filter(|provider| provider.get_ref() != "openai")
+        .map(|provider| provider.span())
+        .collect();
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+    // 使用解析器的字节范围，只替换选择值，保留注释、换行和其他 provider 定义。
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.start));
+    let mut updated = original.clone();
+    for range in ranges {
+        updated.replace_range(range, "\"openai\"");
+    }
+    Ok(Some((original, updated)))
 }
 
 /// Compare-and-swap a refresh rotation while holding the auth transaction.
@@ -1539,6 +1643,148 @@ mod tests {
         }
 
         assert_invalid_alias(rename_profile("valid-alias", ""), "alias cannot be empty");
+    }
+
+    #[test]
+    fn switching_account_resets_provider_selection_and_preserves_other_config() {
+        let _env = TestEnv::new();
+        let live = crate::auth::codex_auth_path().unwrap();
+        let next = realistic_auth_json("next@example.com", "acct_next", "acc_new", "ref_new");
+        let saved = super::profile_auth_path("next").unwrap();
+        super::ensure_profile_parent(&saved).unwrap();
+        crate::auth::write_auth(&saved, &next).unwrap();
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        let path = live.with_file_name("config.toml");
+        let original = concat!(
+            "# 用户配置\r\n",
+            "model_provider = 'gateway' # 当前路由\r\n",
+            "model = 'gpt-5.4'\r\n",
+            "profile = 'daily'\r\n",
+            "[profiles.daily]\r\n",
+            "model_provider = \"gateway\"\r\n",
+            "model_reasoning_effort = 'high'\r\n",
+            "[profiles.other]\r\n",
+            "model_provider = 'other-gateway'\r\n",
+            "[model_providers.gateway]\r\n",
+            "name = 'Gateway'\r\n",
+            "base_url = 'https://gateway.example/v1'\r\n",
+            "[mcp_servers.demo]\r\n",
+            "command = 'demo'\r\n",
+        );
+        std::fs::write(&path, original).unwrap();
+
+        switch_profile("next").unwrap();
+
+        let expected = original
+            .replace("model_provider = 'gateway'", "model_provider = \"openai\"")
+            .replace(
+                "model_provider = \"gateway\"",
+                "model_provider = \"openai\"",
+            );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        assert_eq!(crate::auth::read_auth(&live).unwrap(), next);
+        assert_eq!(super::read_current(), "next");
+    }
+
+    #[test]
+    fn switching_account_rejects_unreadable_current_marker_before_changing_files() {
+        for had_original in [true, false] {
+            let _env = TestEnv::new();
+            let live = crate::auth::codex_auth_path().unwrap();
+            let next = realistic_auth_json("next@example.com", "acct_next", "acc_new", "ref_new");
+            let saved = super::profile_auth_path("next").unwrap();
+            super::ensure_profile_parent(&saved).unwrap();
+            crate::auth::write_auth(&saved, &next).unwrap();
+            std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+            let previous = realistic_auth_json("old@example.com", "acct_old", "acc_old", "ref_old");
+            if had_original {
+                crate::auth::write_auth(&live, &previous).unwrap();
+            }
+            let original_auth = std::fs::read(&live).ok();
+            let path = live.with_file_name("config.toml");
+            let original_config = "model_provider = 'gateway' # 保留\n";
+            std::fs::write(&path, original_config).unwrap();
+            let current = crate::auth::current_file().unwrap();
+            std::fs::create_dir(&current).unwrap();
+
+            assert!(switch_profile("next").is_err());
+
+            assert_eq!(std::fs::read(&live).ok(), original_auth);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original_config);
+            assert!(current.is_dir());
+        }
+    }
+
+    #[test]
+    fn switching_account_restores_all_files_after_a_post_write_error() {
+        for failed_file in ["config.toml", "auth.json", "current"] {
+            for had_original in [true, false] {
+                let _env = TestEnv::new();
+                let live = crate::auth::codex_auth_path().unwrap();
+                let saved = super::profile_auth_path("next").unwrap();
+                super::ensure_profile_parent(&saved).unwrap();
+                crate::auth::write_auth(
+                    &saved,
+                    &realistic_auth_json("next@example.com", "acct_next", "acc_new", "ref_new"),
+                )
+                .unwrap();
+                std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+                let current = crate::auth::current_file().unwrap();
+                if had_original {
+                    crate::auth::write_auth(
+                        &live,
+                        &realistic_auth_json("old@example.com", "acct_old", "acc_old", "ref_old"),
+                    )
+                    .unwrap();
+                    std::fs::write(&current, b"old").unwrap();
+                }
+                let config = live.with_file_name("config.toml");
+                std::fs::write(&config, "model_provider = 'gateway'\n").unwrap();
+                let paths = [&config, &live, &current];
+                let originals = paths.map(|path| std::fs::read(path).ok());
+                let _transaction = super::lock_auth_transaction().unwrap();
+                let error = super::switch_live_auth_locked_after_write("next", &saved, |path| {
+                    if path.file_name().unwrap() == failed_file {
+                        anyhow::bail!("injected error after file replacement");
+                    }
+                    Ok(())
+                })
+                .unwrap_err();
+                assert!(format!("{error:#}").contains("injected error"));
+                for (path, original) in paths.into_iter().zip(originals) {
+                    assert!(
+                        std::fs::read(path).ok() == original,
+                        "{} was not restored after {failed_file} failed (had_original={had_original})",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn switching_account_keeps_default_openai_config_unchanged() {
+        let _env = TestEnv::new();
+        let live = crate::auth::codex_auth_path().unwrap();
+        let saved = super::profile_auth_path("next").unwrap();
+        super::ensure_profile_parent(&saved).unwrap();
+        crate::auth::write_auth(
+            &saved,
+            &realistic_auth_json("next@example.com", "acct_next", "acc_new", "ref_new"),
+        )
+        .unwrap();
+        switch_profile("next").unwrap();
+        let path = live.with_file_name("config.toml");
+        assert!(!path.exists(), "default routing needs no config file");
+
+        for original in [
+            "# 官方默认\nmodel = 'gpt-5.4'\n",
+            "model_provider = 'openai' # 官方\nmodel = 'gpt-5.4'\n",
+        ] {
+            std::fs::write(&path, original).unwrap();
+            switch_profile("next").unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
     }
 
     #[test]

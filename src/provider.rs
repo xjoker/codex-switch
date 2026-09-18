@@ -9,17 +9,12 @@
 //! its own reasoning effort and `web_search` setting. The alias is the only
 //! user-facing name (Codex's required `model_providers.<id>.name` is the alias).
 //!
-//! Storage lives entirely under codex-switch's own home
-//! (`$CODEX_SWITCH_HOME/providers/<alias>/provider.toml`, mode `0600`). At
-//! launch the profile is translated into `codex -c …` overrides (model and
-//! endpoint) while the key is injected into the child process environment
-//! under `env_key` — never onto the command line. Each launch gets its own
-//! Codex home under `$CODEX_SWITCH_HOME/provider-runs/<alias>/` so concurrent
-//! models do not share sqlite or rewrite the user's `config.toml` model keys.
-//! `prompts/`, `skills/`, and `AGENTS.md` are linked to the user home; MCP and
-//! other non-model keys are copied into the run `config.toml` and three-way
-//! merged back on exit. `auth.json` is not swapped. Model and endpoint come
-//! from `-c`.
+//! Provider definitions and keys live under codex-switch's own home.
+//! New launches retain the user's CODEX_HOME and select a separate native
+//! config profile. Model routing is bound through process arguments; API keys
+//! are injected only into the child environment. Shared Codex resources remain
+//! available without copying or exit-time merging. Existing isolated histories
+//! are retained for recovery through their original homes.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -383,8 +378,12 @@ impl ProviderProfile {
                 self.default_model
             );
         }
-        if self.wire_api.trim().is_empty() {
+        let wire_api = self.wire_api.trim();
+        if wire_api.is_empty() {
             anyhow::bail!("wire_api cannot be empty");
+        }
+        if wire_api == "chat" {
+            anyhow::bail!("wire_api = \"chat\" was removed upstream; use wire_api = \"responses\"");
         }
         for entry in &self.codex_config {
             match entry.split_once('=') {
@@ -731,6 +730,9 @@ fn tailor_saved_catalog(
         let object = entry
             .as_object_mut()
             .context("saved provider catalog model is not an object")?;
+        object
+            .entry("supports_parallel_tool_calls")
+            .or_insert(false.into());
         object.insert(
             "priority".into(),
             serde_json::Value::from(i64::try_from(priority).unwrap_or(i64::MAX)),
@@ -1669,6 +1671,7 @@ fn catalog_entry(
         "base_instructions": "",
         "default_reasoning_summary": "none",
         "support_verbosity": false,
+        "supports_parallel_tool_calls": false,
         "apply_patch_tool_type": "freeform",
         "truncation_policy": {"mode": "bytes", "limit": 10000},
         "context_window": context_window,
@@ -1724,8 +1727,9 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Keys that provider `launch` supplies via `codex -c`. They stay in the user's
-/// `config.toml` (ChatGPT) and are omitted from the per-launch Codex home.
+/// Keys that provider `launch` supplies via `codex -c`. On legacy isolated
+/// runs they are stripped from the copied user config; on native-profile runs
+/// they are the only keys codex-switch owns in the run's `cs-*.config.toml`.
 const PROVIDER_SESSION_KEYS: [&str; 6] = [
     "model",
     "model_provider",
@@ -1737,12 +1741,13 @@ const PROVIDER_SESSION_KEYS: [&str; 6] = [
 
 const USER_PROMPT_LINKS: [&str; 3] = ["AGENTS.md", "prompts", "skills"];
 
-/// Per-launch Codex home for a custom provider.
+/// Legacy per-launch Codex home for a custom provider, kept to resume
+/// sessions recorded before the native-profile layout existed. New launches
+/// use [`ProviderLaunchProfile`], which shares the user's Codex home.
 ///
-/// Concurrent `launch` processes must not share sqlite or rewrite the user's
-/// `config.toml` model keys. Each run directory links `prompts/`, `skills/`,
-/// and `AGENTS.md` to the user home, copies non-model config (MCP, …), and
-/// three-way-merges those keys back on exit.
+/// Each run directory links `prompts/`, `skills/`, and `AGENTS.md` to the user
+/// home, copies non-model config (MCP, …), and three-way-merges those keys
+/// back on exit.
 pub(crate) struct ProviderCodexHome {
     pub path: PathBuf,
     user_config_path: PathBuf,
@@ -1792,6 +1797,10 @@ impl ProviderCodexHome {
                 model: None,
                 cwd: std::env::current_dir().ok(),
                 created_at: now_rfc3339(),
+                codex_home: None,
+                profile_name: None,
+                runtime_provider_id: None,
+                child_pid: None,
             },
         )?;
         Ok(Self {
@@ -1839,6 +1848,10 @@ impl ProviderCodexHome {
                 model: Some(model.to_string()),
                 cwd: std::env::current_dir().ok(),
                 created_at: now_rfc3339(),
+                codex_home: None,
+                profile_name: None,
+                runtime_provider_id: None,
+                child_pid: None,
             },
         )
     }
@@ -1901,6 +1914,312 @@ struct ProviderRunMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cwd: Option<PathBuf>,
     created_at: String,
+    /// Native-profile runs keep Codex in the user's home.  These fields are
+    /// optional so history made by the former isolated-home layout remains
+    /// readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_home: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_provider_id: Option<String>,
+    /// Pid of the Codex child launched for a native run.  The launcher writes
+    /// this after a successful spawn so a later resume can tell a still-alive
+    /// Codex (launcher crashed or was killed, child orphaned and healthy) from
+    /// a finished run.  A second Codex must never append to a live rollout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child_pid: Option<u32>,
+}
+
+/// A provider launch backed by Codex's native configuration profile.
+///
+/// `codex_home` deliberately remains the user's normal home: MCP, skills,
+/// plugins, hooks, auth and other Codex-owned resources are therefore loaded
+/// exactly as they are for an Accounts launch.  Only model routing is written
+/// to this launch's profile file.
+pub(crate) struct ProviderLaunchProfile {
+    pub path: PathBuf,
+    pub codex_home: PathBuf,
+    pub profile_name: String,
+    pub runtime_provider_id: String,
+    child_pid: Option<u32>,
+    /// Fresh runs clean up after themselves unless a Codex child took them
+    /// over; reopened runs never self-destruct.
+    abandon_on_drop: bool,
+    /// Fresh runs hold their resume lock for the launcher's whole lifetime so
+    /// a concurrent sweep can never see them as unclaimed dead state.
+    _lease: Option<ProviderRunLease>,
+}
+
+impl ProviderLaunchProfile {
+    pub(crate) fn begin(profile: &ProviderProfile) -> Result<Self> {
+        let path = unique_run_dir(&profile.identity_id)?;
+        ensure_private_dir(&path)?;
+        let codex_home = auth::user_codex_home()?;
+        let run_id = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("provider run has no valid directory name"))?;
+        let identity = sanitize_provider_id(&profile.identity_id);
+        let run = sanitize_provider_id(run_id);
+        let profile_name = format!("cs-{identity}-{run}");
+        let runtime_provider_id = format!("cs_{identity}_{run}");
+        let launch = Self {
+            _lease: Some(ProviderRunLease::acquire(&path)?),
+            path,
+            codex_home,
+            profile_name,
+            runtime_provider_id,
+            child_pid: None,
+            abandon_on_drop: true,
+        };
+        launch.write_meta(profile, None)?;
+        Ok(launch)
+    }
+
+    pub(crate) fn open_existing(profile: &ProviderProfile, path: &Path) -> Result<Self> {
+        validate_run_path(profile, path)?;
+        let meta = read_run_meta(path)?.ok_or_else(|| {
+            anyhow::anyhow!("provider session run {} has no metadata", path.display())
+        })?;
+        if meta.provider_identity_id != profile.identity_id {
+            anyhow::bail!(
+                "provider session run {} does not belong to provider '{}'",
+                path.display(),
+                profile.alias
+            );
+        }
+        let (Some(codex_home), Some(profile_name), Some(runtime_provider_id)) =
+            (meta.codex_home, meta.profile_name, meta.runtime_provider_id)
+        else {
+            anyhow::bail!(
+                "provider session run {} uses the legacy isolated home",
+                path.display()
+            );
+        };
+        if !profile_name.starts_with("cs-")
+            || !profile_name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
+            anyhow::bail!("invalid native provider profile name in {}", path.display());
+        }
+        if !runtime_provider_id.starts_with("cs_")
+            || !runtime_provider_id
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+        {
+            anyhow::bail!("invalid native provider id in {}", path.display());
+        }
+        if !codex_home.is_absolute() {
+            anyhow::bail!(
+                "provider session home must be absolute: {}",
+                codex_home.display()
+            );
+        }
+        if let Some(pid) = meta.child_pid
+            && pid_alive(pid)
+        {
+            anyhow::bail!(
+                "provider session run {} still has a live Codex process (pid {pid}); \
+                 resume it only after that Codex exits",
+                path.display()
+            );
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            codex_home,
+            profile_name,
+            runtime_provider_id,
+            // A live child was rejected above; a dead one is finished business.
+            child_pid: None,
+            abandon_on_drop: false,
+            // The caller holds the resume lease across this reopen.
+            _lease: None,
+        })
+    }
+
+    pub(crate) fn config_file_path(&self) -> PathBuf {
+        self.codex_home
+            .join(format!("{}.config.toml", self.profile_name))
+    }
+
+    pub(crate) fn saved_config(&self) -> Result<Option<toml::Value>> {
+        load_toml_if_present(&self.config_file_path())
+    }
+
+    /// Record the spawned Codex pid so a later resume can refuse to double a
+    /// rollout the orphaned child is still writing.
+    pub(crate) fn set_child_pid(
+        &mut self,
+        profile: &ProviderProfile,
+        model: &str,
+        pid: u32,
+    ) -> Result<()> {
+        self.child_pid = Some(pid);
+        self.write_meta(profile, Some(model))
+    }
+
+    /// The Codex child owns this run now: keep the profile file and run
+    /// directory for resume even if the launcher later fails or dies.
+    pub(crate) fn disarm(&mut self) {
+        self.abandon_on_drop = false;
+    }
+
+    /// The Codex child finished normally; clear its pid so a later pid reuse
+    /// cannot make this finished run look alive to a resume.
+    pub(crate) fn clear_child_pid(&mut self, profile: &ProviderProfile, model: &str) -> Result<()> {
+        self.child_pid = None;
+        self.write_meta(profile, Some(model))
+    }
+
+    pub(crate) fn is_native_run(path: &Path) -> Result<bool> {
+        Ok(read_run_meta(path)?.is_some_and(|meta| {
+            meta.codex_home.is_some()
+                && meta.profile_name.is_some()
+                && meta.runtime_provider_id.is_some()
+        }))
+    }
+
+    pub(crate) fn write_config(
+        &self,
+        profile: &ProviderProfile,
+        args: &[String],
+        model: &str,
+    ) -> Result<()> {
+        let config_path = self.config_file_path();
+        let mut value = load_toml_if_present(&config_path)?
+            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+        let table = value.as_table_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "provider profile config {} is not a TOML table",
+                config_path.display()
+            )
+        })?;
+
+        // These are the only keys codex-switch owns in a native profile.  A
+        // user can safely edit every other setting in this profile; resuming a
+        // run will not erase it.
+        for key in PROVIDER_SESSION_KEYS {
+            table.remove(key);
+        }
+
+        let mut overrides = provider_profile_overrides(args, profile, &self.runtime_provider_id)?;
+        overrides.insert("model".to_string(), toml::Value::String(model.to_string()));
+        for (key, value) in overrides {
+            insert_toml_override(table, &key, value)?;
+        }
+        write_codex_config(&config_path, &value)?;
+        self.write_meta(profile, Some(model))
+    }
+
+    fn write_meta(&self, profile: &ProviderProfile, model: Option<&str>) -> Result<()> {
+        write_run_meta(
+            &self.path,
+            &ProviderRunMeta {
+                provider_identity_id: profile.identity_id.clone(),
+                alias: profile.alias.clone(),
+                model: model.map(str::to_string),
+                cwd: std::env::current_dir().ok(),
+                created_at: now_rfc3339(),
+                codex_home: Some(self.codex_home.clone()),
+                profile_name: Some(self.profile_name.clone()),
+                runtime_provider_id: Some(self.runtime_provider_id.clone()),
+                child_pid: self.child_pid,
+            },
+        )
+    }
+}
+
+impl Drop for ProviderLaunchProfile {
+    fn drop(&mut self) {
+        if self.abandon_on_drop {
+            let _ = std::fs::remove_file(self.config_file_path());
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn validate_run_path(profile: &ProviderProfile, path: &Path) -> Result<()> {
+    let identity_root = auth::app_home()?
+        .join("provider-runs")
+        .join(&profile.identity_id);
+    if !path.starts_with(&identity_root) || !path.is_dir() {
+        anyhow::bail!(
+            "provider session run {} is not part of provider '{}'",
+            path.display(),
+            profile.alias
+        );
+    }
+    Ok(())
+}
+
+fn provider_profile_overrides(
+    args: &[String],
+    profile: &ProviderProfile,
+    runtime_provider_id: &str,
+) -> Result<BTreeMap<String, toml::Value>> {
+    let mut result = BTreeMap::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] != "-c" {
+            index += 1;
+            continue;
+        }
+        let pair = args
+            .get(index + 1)
+            .ok_or_else(|| anyhow::anyhow!("-c is missing its key=value value"))?;
+        index += 2;
+        let Some((key, raw_value)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = if key == "model_provider" {
+            "model_provider".to_string()
+        } else if let Some(suffix) = key
+            .strip_prefix(&format!("model_providers.{}.", profile.provider_id))
+            .or_else(|| key.strip_prefix(&format!("model_providers.{runtime_provider_id}.")))
+        {
+            format!("model_providers.{runtime_provider_id}.{suffix}")
+        } else if PROVIDER_SESSION_KEYS.contains(&key) {
+            key.to_string()
+        } else {
+            continue;
+        };
+        let raw_value = if key == "model_provider" {
+            toml_string(runtime_provider_id)
+        } else {
+            raw_value.to_string()
+        };
+        // Codex -c accepts bare strings as well as TOML literals.
+        let parsed = toml::from_str::<toml::Value>(&format!("value = {raw_value}"))
+            .ok()
+            .and_then(|value| value.get("value").cloned())
+            .unwrap_or(toml::Value::String(raw_value));
+        result.insert(key, parsed);
+    }
+    Ok(result)
+}
+
+fn insert_toml_override(
+    table: &mut toml::map::Map<String, toml::Value>,
+    dotted_key: &str,
+    value: toml::Value,
+) -> Result<()> {
+    let parts: Vec<_> = dotted_key.split('.').collect();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        anyhow::bail!("invalid empty provider config key '{dotted_key}'");
+    }
+    let mut current = table;
+    for part in &parts[..parts.len() - 1] {
+        let entry = current
+            .entry((*part).to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        current = entry.as_table_mut().ok_or_else(|| {
+            anyhow::anyhow!("provider config key '{dotted_key}' conflicts with a non-table value")
+        })?;
+    }
+    current.insert(parts[parts.len() - 1].to_string(), value);
+    Ok(())
 }
 
 fn now_rfc3339() -> String {
@@ -1980,6 +2299,31 @@ impl ProviderSessionIndex {
                 collect_run_sessions(&path, identity_id, &mut sessions)?;
             }
         }
+        let mut native_by_home = HashMap::<PathBuf, Vec<(PathBuf, ProviderRunMeta)>>::new();
+        for entry in std::fs::read_dir(&identity_root)
+            .with_context(|| format!("reading provider history {}", identity_root.display()))?
+        {
+            let entry = entry.with_context(|| format!("reading {}", identity_root.display()))?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(meta) = read_run_meta(&path)? else {
+                continue;
+            };
+            if meta.provider_identity_id != identity_id {
+                continue;
+            }
+            if let Some(home) = meta.codex_home.clone()
+                && meta.profile_name.is_some()
+                && meta.runtime_provider_id.is_some()
+            {
+                native_by_home.entry(home).or_default().push((path, meta));
+            }
+        }
+        for (home, runs) in native_by_home {
+            collect_native_home_sessions(&home, &runs, identity_id, &mut sessions)?;
+        }
         sessions.sort_by(|left, right| {
             left.updated_at
                 .cmp(&right.updated_at)
@@ -2041,6 +2385,140 @@ impl ProviderSessionIndex {
             .filter(|session| filter.include_noninteractive || session.interactive)
             .collect()
     }
+}
+
+fn collect_native_home_sessions(
+    codex_home: &Path,
+    runs: &[(PathBuf, ProviderRunMeta)],
+    identity_id: &str,
+    sessions: &mut Vec<ProviderSession>,
+) -> Result<()> {
+    let mut found = HashMap::<String, ProviderSession>::new();
+    let mut runtime_runs = HashMap::<&str, (&Path, &ProviderRunMeta)>::new();
+    for (path, meta) in runs {
+        if let Some(runtime_id) = meta.runtime_provider_id.as_deref() {
+            runtime_runs.insert(runtime_id, (path, meta));
+        }
+    }
+    let sessions_root = codex_home.join("sessions");
+    if sessions_root.exists() {
+        let mut pending = vec![sessions_root];
+        while let Some(path) = pending.pop() {
+            for entry in std::fs::read_dir(&path)
+                .with_context(|| format!("reading Codex sessions {}", path.display()))?
+            {
+                let entry = entry.with_context(|| format!("reading {}", path.display()))?;
+                let child = entry.path();
+                if child.is_dir() {
+                    pending.push(child);
+                    continue;
+                }
+                if !child
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+                {
+                    continue;
+                }
+                let file = File::open(&child)
+                    .with_context(|| format!("opening Codex rollout {}", child.display()))?;
+                let Some(Ok(line)) = BufReader::new(file).lines().next() else {
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                let Some(runtime_id) = session_model_provider(&value) else {
+                    continue;
+                };
+                let Some((run_path, meta)) = runtime_runs.get(runtime_id.as_str()) else {
+                    continue;
+                };
+                let run_id = run_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                merge_session_value(
+                    &mut found,
+                    &value,
+                    identity_id,
+                    run_path,
+                    run_id,
+                    Some(meta),
+                    SessionMetadataSource::Rollout,
+                );
+            }
+        }
+    }
+
+    // Codex's index files usually do not preserve the model provider.  Use
+    // them only to enrich a session already proven by its rollout record.
+    for value in native_index_values(codex_home)? {
+        let payload = value.get("payload").unwrap_or(&value);
+        let session_id = json_string(payload, "session_id")
+            .or_else(|| json_string(payload, "id"))
+            .or_else(|| json_string(&value, "session_id"))
+            .or_else(|| json_string(&value, "id"));
+        let Some(session_id) = session_id else {
+            continue;
+        };
+        let Some(existing) = found.get(&session_id) else {
+            continue;
+        };
+        let Some((run_path, meta)) = runs.iter().find(|(path, _)| path == &existing.run_path)
+        else {
+            continue;
+        };
+        let run_id = run_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        merge_session_value(
+            &mut found,
+            &value,
+            identity_id,
+            run_path,
+            run_id,
+            Some(meta),
+            SessionMetadataSource::Index,
+        );
+    }
+    sessions.extend(found.into_values());
+    Ok(())
+}
+
+fn session_model_provider(value: &serde_json::Value) -> Option<String> {
+    let payload = value.get("payload").unwrap_or(value);
+    json_string(payload, "model_provider")
+        .or_else(|| json_string(value, "model_provider"))
+        .or_else(|| json_string(payload, "provider"))
+        .or_else(|| json_string(value, "provider"))
+}
+
+fn native_index_values(codex_home: &Path) -> Result<Vec<serde_json::Value>> {
+    let mut values = Vec::new();
+    for name in ["session_meta.json", "session_index.json"] {
+        if let Some(value) = read_json_if_present(&codex_home.join(name))? {
+            if let Some(items) = value.get("sessions").and_then(serde_json::Value::as_array) {
+                values.extend(items.iter().cloned());
+            } else {
+                values.push(value);
+            }
+        }
+    }
+    let jsonl = codex_home.join("session_index.jsonl");
+    if jsonl.exists() {
+        let file = File::open(&jsonl)
+            .with_context(|| format!("opening Codex session index {}", jsonl.display()))?;
+        for line in BufReader::new(file).lines() {
+            let line =
+                line.with_context(|| format!("reading Codex session index {}", jsonl.display()))?;
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                values.push(value);
+            }
+        }
+    }
+    Ok(values)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -2362,6 +2840,15 @@ pub(crate) struct ProviderRunLease {
 
 impl ProviderRunLease {
     pub(crate) fn acquire(run_path: &Path) -> Result<Self> {
+        Self::try_acquire(run_path)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "provider session run {} is already being resumed",
+                run_path.display()
+            )
+        })
+    }
+
+    pub(crate) fn try_acquire(run_path: &Path) -> Result<Option<Self>> {
         let lock_path = run_path.join("resume.lock");
         ensure_private_dir(run_path)?;
         let file = std::fs::OpenOptions::new()
@@ -2372,11 +2859,8 @@ impl ProviderRunLease {
             .open(&lock_path)
             .with_context(|| format!("opening provider resume lock {}", lock_path.display()))?;
         match FileExt::try_lock(&file) {
-            Ok(()) => Ok(Self { file }),
-            Err(TryLockError::WouldBlock) => anyhow::bail!(
-                "provider session run {} is already being resumed",
-                run_path.display()
-            ),
+            Ok(()) => Ok(Some(Self { file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(err)) => Err(anyhow::Error::from(err))
                 .with_context(|| format!("locking provider resume run {}", run_path.display())),
         }
@@ -2387,6 +2871,285 @@ impl Drop for ProviderRunLease {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
     }
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 || *libc::__errno_location() == libc::EPERM }
+}
+
+/// The spawned command may be a `.cmd`/`.sh` wrapper that execs the real
+/// Codex as a grandchild; on Windows the recorded pid alone is not enough.
+#[cfg(windows)]
+fn process_tree_alive(root_pid: u32) -> bool {
+    use std::collections::VecDeque;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    fn pid_exists(pid: u32) -> bool {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        true
+    }
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return pid_exists(root_pid);
+    }
+    let mut children: Vec<(u32, u32)> = Vec::new();
+    let mut entry: PROCESSENTRY32 = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+    let mut ok = unsafe { Process32First(snapshot, &mut entry) } != 0;
+    while ok {
+        children.push((entry.th32ProcessID, entry.th32ParentProcessID));
+        ok = unsafe { Process32Next(snapshot, &mut entry) } != 0;
+    }
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
+    let mut queue: VecDeque<u32> = VecDeque::from([root_pid]);
+    while let Some(pid) = queue.pop_front() {
+        if pid_exists(pid) {
+            return true;
+        }
+        queue.extend(
+            children
+                .iter()
+                .filter(|(_, parent)| *parent == pid)
+                .map(|(child, _)| *child),
+        );
+    }
+    false
+}
+
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    process_tree_alive(pid)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn pid_alive(_pid: u32) -> bool {
+    // Unknown platform: assume dead so resume is never blocked by a guess.
+    false
+}
+
+/// Codex holds `$CODEX_HOME/thread-writer-locks/<thread_id>.lock` (fs lock)
+/// for a thread's whole writer lifetime.  A live writer means another Codex
+/// process still owns this session's rollout, regardless of how its launcher
+/// died.  The file may not exist on older Codex versions; its absence or a
+/// free lock only means no writer is active.
+fn codex_thread_writer_active(codex_home: &Path, session_id: &str) -> bool {
+    let path = codex_home
+        .join("thread-writer-locks")
+        .join(format!("{session_id}.lock"));
+    if !path.exists() {
+        return false;
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+    else {
+        return false;
+    };
+    matches!(FileExt::try_lock(&file), Err(TryLockError::WouldBlock))
+}
+
+/// Whether another Codex still owns a native run's session.  Call before
+/// resuming so a second process never appends to a live rollout.
+pub(crate) fn native_session_writer_active(codex_home: &Path, session_id: &str) -> bool {
+    codex_thread_writer_active(codex_home, session_id)
+}
+/// Runtime provider ids that still own a rollout under one Codex home, plus
+/// the newest mtime of any rollout we could not classify.  A run whose id is
+/// absent has no resumable session left; an unreadable recent rollout could
+/// hold anything and buys every run more time.
+struct LiveRuntimeScan {
+    ids: HashSet<String>,
+    unreadable_newest: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn scan_live_runtime_ids(codex_home: &Path) -> LiveRuntimeScan {
+    let mut scan = LiveRuntimeScan {
+        ids: HashSet::new(),
+        unreadable_newest: None,
+    };
+    let sessions_root = codex_home.join("sessions");
+    if !sessions_root.exists() {
+        return scan;
+    }
+    let mut pending = vec![sessions_root];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(path);
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with("rollout-") {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .map(chrono::DateTime::<chrono::Utc>::from);
+            if !name.ends_with(".jsonl") {
+                // Compressed/archived rollouts cannot be substring-checked;
+                // a recent one may hold any provider's only session record.
+                if let Some(mtime) = modified
+                    && scan.unreadable_newest.is_none_or(|newest| mtime > newest)
+                {
+                    scan.unreadable_newest = Some(mtime);
+                }
+                continue;
+            }
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            let mut head = [0u8; 8192];
+            use std::io::Read;
+            let mut reader = BufReader::new(file);
+            let Ok(len) = reader.read(&mut head) else {
+                continue;
+            };
+            let Ok(value) =
+                serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&head[..len]))
+            else {
+                continue;
+            };
+            if let Some(runtime_id) = session_model_provider(&value)
+                && runtime_id.starts_with("cs_")
+            {
+                scan.ids.insert(runtime_id);
+            }
+        }
+    }
+    scan
+}
+
+fn run_created_at(meta: &ProviderRunMeta) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(&meta.created_at)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// Whether a native run is junk rather than resume state: no launcher holds
+/// it, its Codex child is gone, and no surviving rollout references its
+/// runtime id (the session is gone or never existed).  An unreadable rollout
+/// newer than the run keeps it — a false keep costs kilobytes while a false
+/// delete loses the only handle back to a session.
+fn native_run_is_dead(
+    run_path: &Path,
+    meta: &ProviderRunMeta,
+    scan: &LiveRuntimeScan,
+) -> Result<bool> {
+    if meta.child_pid.is_some_and(pid_alive) {
+        return Ok(false);
+    }
+    let Some(runtime_id) = meta.runtime_provider_id.as_deref() else {
+        return Ok(false);
+    };
+    if scan.ids.contains(runtime_id) {
+        return Ok(false);
+    }
+    if let (Some(created), Some(newest)) = (run_created_at(meta), scan.unreadable_newest)
+        && newest >= created
+    {
+        return Ok(false);
+    }
+    Ok(ProviderRunLease::try_acquire(run_path)?.is_some())
+}
+
+fn delete_native_profile_file(meta: &ProviderRunMeta) {
+    if let (Some(codex_home), Some(profile_name)) = (&meta.codex_home, &meta.profile_name) {
+        let _ = std::fs::remove_file(codex_home.join(format!("{profile_name}.config.toml")));
+    }
+}
+
+/// Sweep dead native runs left behind by crashed launches, abandoned
+/// `codex exec` runs, or sessions the user deleted inside Codex: remove
+/// their `cs-*.config.toml` from the Codex home and their run directories
+/// from `provider-runs`.  Runs that still host a live Codex, are being
+/// launched or resumed right now, or still own a session keep everything.
+/// Each Codex home is scanned once per launch, not once per run.
+pub(crate) fn sweep_dead_native_runs() -> Result<()> {
+    let root = auth::app_home()?.join("provider-runs");
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut scans: HashMap<PathBuf, LiveRuntimeScan> = HashMap::new();
+    for identity in std::fs::read_dir(&root)
+        .with_context(|| format!("reading provider runs {}", root.display()))?
+    {
+        let identity = identity?;
+        if !identity.file_type()?.is_dir() {
+            continue;
+        }
+        for run in std::fs::read_dir(identity.path())
+            .with_context(|| format!("reading provider runs {}", identity.path().display()))?
+        {
+            let run = run?;
+            let run_path = run.path();
+            if !run.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(meta) = read_run_meta(&run_path)? else {
+                continue;
+            };
+            if !ProviderLaunchProfile::is_native_run(&run_path)? {
+                continue;
+            }
+            let Some(codex_home) = meta.codex_home.clone() else {
+                continue;
+            };
+            let scan = scans
+                .entry(codex_home)
+                .or_insert_with_key(|home| scan_live_runtime_ids(home));
+            if native_run_is_dead(&run_path, &meta, scan)? {
+                delete_native_profile_file(&meta);
+                let _ = std::fs::remove_dir_all(&run_path);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove this provider's per-run Codex profile files.  Called when the
+/// provider itself is removed: without its profile.toml the runs can never be
+/// resumed again, so the `cs-*.config.toml` files are pure junk.
+fn remove_native_profile_files(identity_id: &str) -> Result<()> {
+    let history_root = auth::app_home()?.join("provider-runs").join(identity_id);
+    if !history_root.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&history_root)
+        .with_context(|| format!("reading provider runs {}", history_root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if let Some(meta) = read_run_meta(&entry.path())? {
+            delete_native_profile_file(&meta);
+        }
+    }
+    Ok(())
 }
 
 fn load_toml_if_present(path: &Path) -> Result<Option<toml::Value>> {
@@ -2767,6 +3530,7 @@ pub fn remove(alias: &str) -> Result<()> {
         serde_json::to_vec_pretty(&tombstone).context("serializing provider tombstone")?;
     auth::atomic_write_private(&history_root.join("tombstone.json"), &tombstone)
         .with_context(|| format!("writing provider tombstone {}", history_root.display()))?;
+    remove_native_profile_files(&profile.identity_id)?;
     std::fs::remove_dir_all(&dir)
         .with_context(|| format!("removing provider profile {}", dir.display()))
 }
@@ -2999,6 +3763,233 @@ mod tests {
         assert_eq!(first.path.parent(), second.path.parent());
         first.restore().unwrap();
         second.restore().unwrap();
+    }
+
+    #[test]
+    fn native_provider_profile_uses_user_home_and_only_writes_its_profile() {
+        let _home = TestHome::new();
+        let user_home = auth::user_codex_home().unwrap();
+        let user_config = user_home.join("config.toml");
+        std::fs::write(
+            &user_config,
+            "model = \"chatgpt\"\n\n[mcp_servers.demo]\ncommand = \"demo\"\n",
+        )
+        .unwrap();
+        let profile = sample("profile-route");
+        let run = ProviderLaunchProfile::begin(&profile).unwrap();
+        let args = profile
+            .codex_config_args(Some("openai/gpt-5.3-codex"))
+            .unwrap();
+        run.write_config(&profile, &args, "openai/gpt-5.3-codex")
+            .unwrap();
+
+        assert_eq!(run.codex_home, user_home);
+        assert!(ProviderLaunchProfile::is_native_run(&run.path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&user_config).unwrap(),
+            "model = \"chatgpt\"\n\n[mcp_servers.demo]\ncommand = \"demo\"\n"
+        );
+        let profile_config =
+            std::fs::read_to_string(user_home.join(format!("{}.config.toml", run.profile_name)))
+                .unwrap();
+        assert!(
+            profile_config.contains(&format!("model_provider = \"{}\"", run.runtime_provider_id))
+        );
+        assert!(profile_config.contains(&format!("[model_providers.{}]", run.runtime_provider_id)));
+        assert!(!profile_config.contains("mcp_servers"));
+        let meta = read_run_meta(&run.path).unwrap().unwrap();
+        assert_eq!(
+            meta.runtime_provider_id.as_deref(),
+            Some(run.runtime_provider_id.as_str())
+        );
+    }
+
+    #[test]
+    fn native_provider_sessions_are_selected_only_by_runtime_provider_id() {
+        let _home = TestHome::new();
+        let profile = sample("native-history");
+        let run = ProviderLaunchProfile::begin(&profile).unwrap();
+        let args = profile
+            .codex_config_args(Some("openai/gpt-5.3-codex"))
+            .unwrap();
+        run.write_config(&profile, &args, "openai/gpt-5.3-codex")
+            .unwrap();
+        let session_dir = run.codex_home.join("sessions").join("2026");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("rollout-native.jsonl"),
+            format!(
+                "{{\"payload\":{{\"id\":\"provider-session\",\"model_provider\":\"{}\",\"timestamp\":\"2026-01-01T00:00:00Z\"}}}}\n",
+                run.runtime_provider_id
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            session_dir.join("rollout-account.jsonl"),
+            "{\"payload\":{\"id\":\"account-session\",\"model_provider\":\"openai\"}}\n",
+        )
+        .unwrap();
+
+        let index = ProviderSessionIndex::rebuild(
+            &auth::app_home().unwrap().join("provider-runs"),
+            &profile.identity_id,
+        )
+        .unwrap();
+        assert!(index.find_by_session_id("provider-session").is_ok());
+        assert!(index.find_by_session_id("account-session").is_err());
+    }
+
+    fn native_run_with_config(profile: &ProviderProfile) -> ProviderLaunchProfile {
+        let run = ProviderLaunchProfile::begin(profile).unwrap();
+        let args = profile
+            .codex_config_args(Some("openai/gpt-5.3-codex"))
+            .unwrap();
+        run.write_config(profile, &args, "openai/gpt-5.3-codex")
+            .unwrap();
+        run
+    }
+
+    #[test]
+    fn a_fresh_run_self_cleans_until_disarmed() {
+        let _home = TestHome::new();
+        let profile = sample("abandon");
+        let run = native_run_with_config(&profile);
+        let config_path = run.config_file_path();
+        let run_path = run.path.clone();
+        assert!(config_path.exists() && run_path.exists());
+        drop(run);
+        assert!(!config_path.exists());
+        assert!(!run_path.exists());
+
+        let mut run = native_run_with_config(&profile);
+        let config_path = run.config_file_path();
+        let run_path = run.path.clone();
+        run.disarm();
+        drop(run);
+        assert!(config_path.exists(), "a disarmed run keeps its profile");
+        assert!(run_path.exists(), "a disarmed run keeps its run dir");
+    }
+
+    #[test]
+    fn resume_rejects_a_run_whose_child_is_still_alive() {
+        let _home = TestHome::new();
+        let profile = sample("live-child");
+        let mut run = native_run_with_config(&profile);
+        run.set_child_pid(&profile, "openai/gpt-5.3-codex", std::process::id())
+            .unwrap();
+
+        let error = match ProviderLaunchProfile::open_existing(&profile, &run.path) {
+            Ok(_) => panic!("a live Codex child must block resume"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("still has a live Codex process"));
+    }
+
+    #[test]
+    fn resume_accepts_a_run_whose_child_is_dead() {
+        let _home = TestHome::new();
+        let profile = sample("dead-child");
+        let mut run = native_run_with_config(&profile);
+        // 2^22-1 is outside the pid space on every supported platform.
+        run.set_child_pid(&profile, "openai/gpt-5.3-codex", 4_000_000)
+            .unwrap();
+
+        ProviderLaunchProfile::open_existing(&profile, &run.path).unwrap();
+    }
+
+    #[test]
+    fn sweep_removes_dead_runs_and_keeps_sessions_and_live_children() {
+        let _home = TestHome::new();
+        let user_home = auth::user_codex_home().unwrap();
+        let profile = sample("sweep");
+
+        // Dead run: spawned (disarmed) but no rollout and a dead child ->
+        // swept once its launcher is gone.
+        let mut dead = native_run_with_config(&profile);
+        dead.disarm();
+        let dead_config = dead.config_file_path();
+        let dead_path = dead.path.clone();
+        // While the launcher still holds the run lease it cannot be swept:
+        // this is the concurrent-launch race guard.
+        sweep_dead_native_runs().unwrap();
+        assert!(dead_config.exists(), "a leased run must survive the sweep");
+        assert!(dead_path.exists());
+
+        // Run with a recorded rollout -> kept.
+        let mut with_session = native_run_with_config(&profile);
+        with_session.disarm();
+        let with_session_config = with_session.config_file_path();
+        let with_session_path = with_session.path.clone();
+        let today = chrono::Utc::now();
+        let session_dir = user_home
+            .join("sessions")
+            .join(today.format("%Y").to_string())
+            .join(today.format("%m").to_string())
+            .join(today.format("%d").to_string());
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("rollout-kept.jsonl"),
+            format!(
+                "{{\"payload\":{{\"id\":\"kept\",\"model_provider\":\"{}\",\"timestamp\":\"{}\"}}}}\n",
+                with_session.runtime_provider_id,
+                today.to_rfc3339()
+            ),
+        )
+        .unwrap();
+
+        // Run whose child is still alive -> kept even without a rollout.
+        let mut live = native_run_with_config(&profile);
+        live.disarm();
+        live.set_child_pid(&profile, "openai/gpt-5.3-codex", std::process::id())
+            .unwrap();
+
+        // A launcher that already exited releases its run lease; runs still
+        // held open (like `live` here) are protected from the sweep.
+        drop(dead);
+        drop(with_session);
+        sweep_dead_native_runs().unwrap();
+
+        assert!(!dead_config.exists(), "dead run profile must be removed");
+        assert!(!dead_path.exists(), "dead run dir must be removed");
+        assert!(with_session_config.exists());
+        assert!(with_session_path.exists());
+        assert!(live.config_file_path().exists());
+        assert!(live.path.exists());
+
+        // Once the user deletes that session inside Codex the run becomes
+        // orphaned state; the next sweep must reclaim it too.
+        std::fs::remove_file(session_dir.join("rollout-kept.jsonl")).unwrap();
+        sweep_dead_native_runs().unwrap();
+        assert!(
+            !with_session_config.exists(),
+            "a run whose session is gone must lose its profile file"
+        );
+        assert!(!with_session_path.exists());
+        assert!(live.config_file_path().exists());
+    }
+
+    #[test]
+    fn removing_a_provider_deletes_its_native_profile_files() {
+        let _home = TestHome::new();
+        let user_home = auth::user_codex_home().unwrap();
+        let profile = sample("remove-me");
+        save(&profile).unwrap();
+        let run = native_run_with_config(&profile);
+        let config_path = user_home.join(format!("{}.config.toml", run.profile_name));
+        assert!(config_path.exists());
+
+        remove(&profile.alias).unwrap();
+
+        assert!(!config_path.exists(), "orphaned cs profile must be deleted");
+        assert!(run.path.exists(), "run history stays as tombstoned state");
+    }
+
+    #[test]
+    fn wire_api_rejects_the_removed_chat_value() {
+        let mut profile = sample("wire");
+        profile.wire_api = "chat".to_string();
+        let error = profile.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("wire_api"));
     }
 
     #[test]
