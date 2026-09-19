@@ -3132,7 +3132,8 @@ pub(crate) fn sweep_dead_native_runs() -> Result<()> {
 
 /// Remove this provider's per-run Codex profile files.  Called when the
 /// provider itself is removed: without its profile.toml the runs can never be
-/// resumed again, so the `cs-*.config.toml` files are pure junk.
+/// resumed again, so the `cs-*.config.toml` files are pure junk even while a
+/// launched Codex is still running — it read its profile once at startup.
 fn remove_native_profile_files(identity_id: &str) -> Result<()> {
     let history_root = auth::app_home()?.join("provider-runs").join(identity_id);
     if !history_root.exists() {
@@ -3513,10 +3514,45 @@ fn write_profile(path: &Path, profile: &ProviderProfile) -> Result<()> {
         .with_context(|| format!("writing provider profile {}", path.display()))
 }
 
+/// Whether any of this provider's runs still has a live Codex child.
+/// Removing a provider while its Codex is running is legal (the process
+/// already read its config), but it is almost always a mistake and leaves
+/// the user staring at a session they can no longer resume.
+fn provider_has_live_runs(identity_id: &str) -> Result<bool> {
+    let history_root = auth::app_home()?.join("provider-runs").join(identity_id);
+    if !history_root.exists() {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(&history_root)
+        .with_context(|| format!("reading provider runs {}", history_root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if let Some(meta) = read_run_meta(&entry.path())?
+            && meta.child_pid.is_some_and(pid_alive)
+        {
+            return Ok(true);
+        }
+        // A launcher mid-flight (spawn not finished, no child_pid yet) holds
+        // the run lease; treat the run as live so removal cannot race it.
+        if ProviderRunLease::try_acquire(&entry.path())?.is_none() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Remove a provider profile and its stored key.
 pub fn remove(alias: &str) -> Result<()> {
     let profile = load(alias)?;
     let dir = existing_provider_dir(alias)?;
+    if provider_has_live_runs(&profile.identity_id)? {
+        anyhow::bail!(
+            "provider '{alias}' still has a running Codex session; remove it after that Codex exits"
+        );
+    }
     let history_root = auth::app_home()?
         .join("provider-runs")
         .join(&profile.identity_id);
@@ -3974,14 +4010,51 @@ mod tests {
         let user_home = auth::user_codex_home().unwrap();
         let profile = sample("remove-me");
         save(&profile).unwrap();
-        let run = native_run_with_config(&profile);
+        let mut run = native_run_with_config(&profile);
         let config_path = user_home.join(format!("{}.config.toml", run.profile_name));
+        let run_path = run.path.clone();
         assert!(config_path.exists());
+        // The launcher exited; the run keeps its state but no lease.
+        run.disarm();
+        drop(run);
 
         remove(&profile.alias).unwrap();
 
         assert!(!config_path.exists(), "orphaned cs profile must be deleted");
-        assert!(run.path.exists(), "run history stays as tombstoned state");
+        assert!(run_path.exists(), "run history stays as tombstoned state");
+    }
+
+    #[test]
+    fn removing_a_provider_with_a_live_run_is_rejected() {
+        let _home = TestHome::new();
+        let profile = sample("still-running");
+        save(&profile).unwrap();
+        let mut run = native_run_with_config(&profile);
+        run.set_child_pid(&profile, "openai/gpt-5.3-codex", std::process::id())
+            .unwrap();
+
+        let error = remove(&profile.alias).unwrap_err();
+        assert!(format!("{error:#}").contains("still has a running Codex session"));
+        assert!(
+            run.config_file_path().exists(),
+            "a refused removal must not touch live state"
+        );
+    }
+
+    #[test]
+    fn removing_a_provider_during_an_in_flight_launch_is_rejected() {
+        let _home = TestHome::new();
+        let profile = sample("mid-launch");
+        save(&profile).unwrap();
+        // begin() holds the lease before spawn writes child_pid; removal must
+        // see this run as live through the lease alone.
+        let run = ProviderLaunchProfile::begin(&profile).unwrap();
+
+        let error = remove(&profile.alias).unwrap_err();
+        assert!(format!("{error:#}").contains("still has a running Codex session"));
+
+        drop(run);
+        remove(&profile.alias).unwrap();
     }
 
     #[test]

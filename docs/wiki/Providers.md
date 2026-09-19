@@ -67,7 +67,7 @@ codex-switch provider rename openrouter orouter
 codex-switch provider remove openrouter
 ```
 
-`show` prints a redacted key (`…` plus the last four characters). Rename moves the on-disk directory and re-derives `provider_id` / `env_key` from the new alias. Removal deletes the stored key immediately; unlike ChatGPT profile deletion, it is not archived under `deleted-profiles/`. Non-interactive and `--json` runs require `--yes`.
+`show` prints a redacted key (`…` plus the last four characters). Rename moves the on-disk directory and re-derives `provider_id` / `env_key` from the new alias. Removal deletes the stored key immediately; unlike ChatGPT profile deletion, it is not archived under `deleted-profiles/`. Removal is refused while any of the provider's runs still has a live Codex (running child or an in-flight launch); it also deletes that provider's `cs-*.config.toml` files. Non-interactive and `--json` runs require `--yes`.
 
 `--json` is supported on `provider add`, `list`, `show`, `rename`, `remove`, `fetch-models`, and `probe`. JSON never includes the raw key.
 
