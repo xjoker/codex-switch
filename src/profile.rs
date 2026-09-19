@@ -170,10 +170,15 @@ fn acquire_file_lock(path: &Path, timeout: Duration, label: &str) -> Result<File
 
     let file = open_lock_file(path)?;
     let deadline = Instant::now() + timeout;
+    let waited = Instant::now();
+    let mut waited_ms: u64 = 0;
     loop {
         match FileExt::try_lock(&file) {
             Ok(()) => {
                 write_lock_holder(&file);
+                if waited_ms > 0 {
+                    tracing::info!(lock = label, waited_ms, "acquired contested file lock");
+                }
                 return Ok(file);
             }
             Err(TryLockError::WouldBlock) => {
@@ -189,6 +194,7 @@ fn acquire_file_lock(path: &Path, timeout: Duration, label: &str) -> Result<File
                     );
                 }
                 std::thread::sleep(LOCK_POLL_INTERVAL);
+                waited_ms = waited.elapsed().as_millis() as u64;
             }
             Err(TryLockError::Error(e)) => {
                 return Err(anyhow::Error::from(e))
@@ -295,10 +301,13 @@ fn switch_live_auth_locked_after_write(
     src: &Path,
     after_write: impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
+    let stage = Instant::now();
     let val = read_auth(src)?;
     crate::auth::validate_managed_auth_value(&val)?;
     let dst = codex_auth_path()?;
+    let config_lock_start = Instant::now();
     let _config_lock = lock_codex_config_merge()?;
+    let config_lock_ms = config_lock_start.elapsed().as_millis() as u64;
     let config_path = dst.with_file_name("config.toml");
     let config_change = chatgpt_provider_config(&config_path)?;
     let current_path = current_file()?;
@@ -317,7 +326,10 @@ fn switch_live_auth_locked_after_write(
     if let Some((original, _)) = &config_change {
         originals.push((&config_path, Some(original.as_bytes().to_vec())));
     }
+    let backup_start = Instant::now();
     backup_auth(&dst)?;
+    let backup_ms = backup_start.elapsed().as_millis() as u64;
+    let writes_start = Instant::now();
     let result = (|| -> Result<()> {
         if let Some((_, updated)) = &config_change {
             atomic_write_private(&config_path, updated.as_bytes())
@@ -329,6 +341,15 @@ fn switch_live_auth_locked_after_write(
         write_current(alias)?;
         after_write(&current_path)
     })();
+    tracing::info!(
+        alias,
+        config_lock_ms,
+        backup_ms,
+        writes_ms = writes_start.elapsed().as_millis() as u64,
+        total_ms = stage.elapsed().as_millis() as u64,
+        config_rewrite = config_change.is_some(),
+        "account switch stage timings"
+    );
     if let Err(error) = result {
         // Windows 可能在文件替换成功后因 ACL 加固失败报错，须恢复所有原始状态。
         let mut failures = Vec::new();
@@ -468,13 +489,23 @@ pub fn replace_profile_auth_and_live_if_current(
     Ok(())
 }
 
+/// A canonical (formatting-free) hash of an auth.json. `use` rewrites the
+/// live file with pretty-printing, so byte identity is not a stable match
+/// key: the same credentials must still resolve to their profile.
+fn canonical_auth_hash(path: &Path) -> Option<String> {
+    let val = crate::auth::read_auth(path).ok()?;
+    let canonical = serde_json::to_string(&val).ok()?;
+    use sha2::Digest;
+    Some(hex::encode(sha2::Sha256::digest(canonical.as_bytes())))
+}
+
 pub fn find_matching_profile(auth_path: &Path) -> Option<String> {
-    let hash = crate::auth::sha256_file(auth_path)?;
+    let hash = canonical_auth_hash(auth_path)?;
     let profiles = list_profiles().ok()?;
     profiles.into_iter().find(|alias| {
         profile_auth_path(alias)
             .ok()
-            .and_then(|p| crate::auth::sha256_file(&p))
+            .and_then(|p| canonical_auth_hash(&p))
             .map(|h| h == hash)
             .unwrap_or(false)
     })
@@ -751,10 +782,12 @@ pub fn detect_auth_change() -> AuthChange {
         Err(_) => return AuthChange::NoChange,
     };
 
+    tracing::debug!(path = %auth_path.display(), "detect_auth_change: probing profiles");
     // Exact file match — nothing changed
     if find_matching_profile(&auth_path).is_some() {
         return AuthChange::NoChange;
     }
+    tracing::debug!("detect_auth_change: no exact file match, scanning identities");
 
     let identity = extract_identity(&val);
     if identity.email.is_none() && identity.account_id.is_none() {
@@ -2709,6 +2742,34 @@ mod tests {
             },
             "last_refresh": "2026-07-20T00:00:00Z"
         })
+    }
+
+    #[test]
+    fn find_matching_profile_matches_semantically_not_byte_for_byte() {
+        let _env = TestEnv::new();
+        let val = stamped_auth_json(
+            "same@example.com",
+            "acct_same",
+            "acc_same",
+            "ref_same",
+            None,
+        );
+        seed_profile("same", &val);
+        // Simulate `use` having rewritten the live file with its own
+        // formatting: same JSON value, different byte layout.
+        let live = crate::auth::codex_auth_path().unwrap();
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(&live, serde_json::to_string(&val).unwrap()).unwrap();
+
+        assert_eq!(
+            super::find_matching_profile(&live).as_deref(),
+            Some("same"),
+            "pretty-vs-compact auth.json must still resolve to its profile"
+        );
+        assert!(matches!(
+            super::detect_auth_change(),
+            super::AuthChange::NoChange
+        ));
     }
 
     #[test]

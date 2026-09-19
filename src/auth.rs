@@ -298,6 +298,20 @@ fn harden_windows_acl(path: &Path, directory: bool) -> Result<()> {
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+    /// The process-token SID walk and the SDDL → security-descriptor
+    /// conversion are identical on every call: cache both.  Only the
+    /// `SetNamedSecurityInfoW` write must run per file, which is also the
+    /// call a slow filesystem or antivirus makes expensive.
+    struct AclParts {
+        dir_sd: PSECURITY_DESCRIPTOR,
+        file_sd: PSECURITY_DESCRIPTOR,
+    }
+
+    unsafe impl Send for AclParts {}
+    unsafe impl Sync for AclParts {}
+
+    static ACL_PARTS: std::sync::OnceLock<Result<AclParts, String>> = std::sync::OnceLock::new();
+
     struct OwnedHandle(HANDLE);
 
     impl Drop for OwnedHandle {
@@ -330,103 +344,126 @@ fn harden_windows_acl(path: &Path, directory: bool) -> Result<()> {
         )
     }
 
-    let mut token = null_mut();
-    // SAFETY: GetCurrentProcess returns a valid pseudo-handle, and `token`
-    // points to writable storage for the owned token handle.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return Err(last_error(path, "OpenProcessToken"));
-    }
-    let _token = OwnedHandle(token);
+    let parts = ACL_PARTS.get_or_init(|| -> Result<AclParts, String> {
+        (|| -> Result<AclParts> {
+            let mut token = null_mut();
+            // SAFETY: GetCurrentProcess returns a valid pseudo-handle, and
+            // `token` points to writable storage for the owned token handle.
+            if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+                return Err(last_error(path, "OpenProcessToken"));
+            }
+            let _token = OwnedHandle(token);
 
-    let mut token_user_bytes = 0;
-    // SAFETY: the null-buffer probe is the documented way to obtain the
-    // TOKEN_USER size; no output buffer is dereferenced.
-    let probe_ok =
-        unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut token_user_bytes) };
-    let probe_error = std::io::Error::last_os_error();
-    if probe_ok != 0
-        || token_user_bytes == 0
-        || probe_error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
-    {
-        return Err(anyhow::anyhow!(
-            "GetTokenInformation(TokenUser size) failed for {}: {probe_error}",
-            path.display()
-        ));
-    }
-
-    let words = (token_user_bytes as usize).div_ceil(std::mem::size_of::<usize>());
-    let mut token_user = vec![0usize; words];
-    // SAFETY: the usize-backed buffer is suitably aligned for TOKEN_USER and
-    // has the exact byte capacity requested by the preceding size probe.
-    if unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            token_user.as_mut_ptr().cast(),
-            token_user_bytes,
-            &mut token_user_bytes,
-        )
-    } == 0
-    {
-        return Err(last_error(path, "GetTokenInformation(TokenUser)"));
-    }
-    // SAFETY: GetTokenInformation initialized the aligned buffer as TOKEN_USER,
-    // and the SID remains valid while `token_user` is alive.
-    let user_sid = unsafe { (*(token_user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
-
-    let mut string_sid = null_mut();
-    // SAFETY: `user_sid` comes from the live TOKEN_USER buffer and the API
-    // writes one LocalAlloc-owned, NUL-terminated UTF-16 pointer.
-    if unsafe { ConvertSidToStringSidW(user_sid, &mut string_sid) } == 0 {
-        return Err(last_error(path, "ConvertSidToStringSidW"));
-    }
-    let _string_sid = LocalAllocation(string_sid.cast());
-    let mut sid_len = 0;
-    // SAFETY: ConvertSidToStringSidW guarantees a NUL-terminated UTF-16
-    // string, and `_string_sid` keeps that allocation alive for this scan.
-    while unsafe { *string_sid.add(sid_len) } != 0 {
-        sid_len += 1;
-    }
-    // SAFETY: `sid_len` was found within the API-provided NUL-terminated
-    // allocation and excludes the terminator.
-    let current_user_sid =
-        String::from_utf16(unsafe { std::slice::from_raw_parts(string_sid, sid_len) })
-            .with_context(|| {
-                format!(
-                    "decoding ConvertSidToStringSidW output for {}",
+            let mut token_user_bytes = 0;
+            // SAFETY: the null-buffer probe is the documented way to obtain
+            // the TOKEN_USER size; no output buffer is dereferenced.
+            let probe_ok = unsafe {
+                GetTokenInformation(token, TokenUser, null_mut(), 0, &mut token_user_bytes)
+            };
+            let probe_error = std::io::Error::last_os_error();
+            if probe_ok != 0
+                || token_user_bytes == 0
+                || probe_error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
+            {
+                return Err(anyhow::anyhow!(
+                    "GetTokenInformation(TokenUser size) failed for {}: {probe_error}",
                     path.display()
-                )
-            })?;
+                ));
+            }
 
-    let sddl = windows_private_acl_sddl(&current_user_sid, directory);
-    let sddl_wide: Vec<u16> = std::ffi::OsStr::new(&sddl)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut security_descriptor: PSECURITY_DESCRIPTOR = null_mut();
-    // SAFETY: `sddl_wide` is NUL-terminated and the output pointer is writable;
-    // the returned descriptor is owned by LocalFree.
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl_wide.as_ptr(),
-            SDDL_REVISION_1,
-            &mut security_descriptor,
-            null_mut(),
-        )
-    } == 0
-    {
-        return Err(last_error(
-            path,
-            "ConvertStringSecurityDescriptorToSecurityDescriptorW",
-        ));
-    }
-    let _security_descriptor = LocalAllocation(security_descriptor);
+            let words = (token_user_bytes as usize).div_ceil(std::mem::size_of::<usize>());
+            let mut token_user = vec![0usize; words];
+            // SAFETY: the usize-backed buffer is suitably aligned for
+            // TOKEN_USER and has the exact byte capacity from the size probe.
+            if unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    token_user.as_mut_ptr().cast(),
+                    token_user_bytes,
+                    &mut token_user_bytes,
+                )
+            } == 0
+            {
+                return Err(last_error(path, "GetTokenInformation(TokenUser)"));
+            }
+            // SAFETY: GetTokenInformation initialized the aligned buffer as
+            // TOKEN_USER, and the SID stays valid while `token_user` lives.
+            let user_sid = unsafe { (*(token_user.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+
+            let mut string_sid = null_mut();
+            // SAFETY: `user_sid` comes from the live TOKEN_USER buffer and the
+            // API writes a LocalAlloc-owned, NUL-terminated UTF-16 pointer.
+            if unsafe { ConvertSidToStringSidW(user_sid, &mut string_sid) } == 0 {
+                return Err(last_error(path, "ConvertSidToStringSidW"));
+            }
+            let _string_sid = LocalAllocation(string_sid.cast());
+            let mut sid_len = 0;
+            // SAFETY: ConvertSidToStringSidW guarantees a NUL-terminated UTF-16
+            // string, and `_string_sid` keeps that allocation alive.
+            while unsafe { *string_sid.add(sid_len) } != 0 {
+                sid_len += 1;
+            }
+            // SAFETY: `sid_len` was found within the API-provided allocation
+            // and excludes the terminator.
+            let current_user_sid =
+                String::from_utf16(unsafe { std::slice::from_raw_parts(string_sid, sid_len) })
+                    .with_context(|| {
+                        format!(
+                            "decoding ConvertSidToStringSidW output for {}",
+                            path.display()
+                        )
+                    })?;
+
+            let make_sd = |directory: bool| -> Result<PSECURITY_DESCRIPTOR> {
+                let sddl = windows_private_acl_sddl(&current_user_sid, directory);
+                let sddl_wide: Vec<u16> = std::ffi::OsStr::new(&sddl)
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+                // SAFETY: `sddl_wide` is NUL-terminated and `sd` is writable;
+                // the returned descriptor is intentionally leaked through
+                // ACL_PARTS so every call reuses the same read-only memory.
+                if unsafe {
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        sddl_wide.as_ptr(),
+                        SDDL_REVISION_1,
+                        &mut sd,
+                        null_mut(),
+                    )
+                } == 0
+                {
+                    return Err(last_error(
+                        path,
+                        "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+                    ));
+                }
+                Ok(sd)
+            };
+            Ok(AclParts {
+                dir_sd: make_sd(true)?,
+                file_sd: make_sd(false)?,
+            })
+        })()
+        .map_err(|error| format!("{error:#}"))
+    });
+    let security_descriptor = match parts {
+        Ok(parts) => {
+            if directory {
+                parts.dir_sd
+            } else {
+                parts.file_sd
+            }
+        }
+        Err(error) => return Err(anyhow::anyhow!("{error}")),
+    };
 
     let mut dacl_present = 0;
     let mut dacl: *mut ACL = null_mut();
     let mut dacl_defaulted = 0;
-    // SAFETY: `security_descriptor` is live and valid; all output pointers
-    // refer to initialized local variables.
+    // SAFETY: `security_descriptor` is the cached, immutable descriptor; all
+    // output pointers refer to initialized local variables.
     if unsafe {
         GetSecurityDescriptorDacl(
             security_descriptor,
@@ -450,6 +487,7 @@ fn harden_windows_acl(path: &Path, directory: bool) -> Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    let acl_write_start = std::time::Instant::now();
     // SAFETY: the path is NUL-terminated, `dacl` points inside the live
     // security descriptor, and null owner/group/SACL pointers are required
     // because only the exact protected DACL is being replaced.
@@ -464,6 +502,21 @@ fn harden_windows_acl(path: &Path, directory: bool) -> Result<()> {
             null(),
         )
     };
+    let acl_ms = acl_write_start.elapsed().as_millis() as u64;
+    if acl_ms >= 500 {
+        tracing::warn!(
+            path = %path.display(),
+            directory,
+            acl_ms,
+            "windows ACL write is unusually slow; check OneDrive/AV on the profile directory"
+        );
+    }
+    tracing::debug!(
+        path = %path.display(),
+        directory,
+        acl_ms,
+        "hardened windows ACL"
+    );
     if status != ERROR_SUCCESS {
         return Err(anyhow::anyhow!(
             "SetNamedSecurityInfoW failed for {}: {}",

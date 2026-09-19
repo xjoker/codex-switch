@@ -1266,6 +1266,12 @@ mod tests {
     fn replacement_preflight_rejects_a_read_only_install_directory() {
         use std::os::unix::fs::PermissionsExt;
 
+        // Root bypasses permission bits, so the read-only directory cannot
+        // demonstrate the rejection.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
         let temp = tempfile::tempdir().unwrap();
         let install_dir = temp.path().join("bin");
         fs::create_dir(&install_dir).unwrap();

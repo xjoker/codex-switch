@@ -139,11 +139,32 @@ pub async fn run_cli() {
     }
 }
 
+fn command_name(cmd: &Commands) -> &'static str {
+    match cmd {
+        Commands::Use { .. } => "use",
+        Commands::List { .. } => "list",
+        Commands::ResetCard { .. } => "reset-card",
+        Commands::Rename { .. } => "rename",
+        Commands::Delete { .. } => "delete",
+        Commands::Login { .. } => "login",
+        Commands::Import { .. } => "import",
+        Commands::SelfUpdate { .. } => "self-update",
+        Commands::Warmup { .. } => "warmup",
+        Commands::Launch { .. } => "launch",
+        Commands::Tui => "tui",
+        Commands::Open => "open",
+        Commands::Provider(_) => "provider",
+    }
+}
+
 async fn dispatch(
     cmd: Commands,
     json: bool,
     launch_passthrough: Option<Vec<String>>,
 ) -> Result<()> {
+    let command = command_name(&cmd);
+    let started = std::time::Instant::now();
+    tracing::debug!(command, "command started");
     // Startup auth change detection — skip for commands that manage auth themselves
     let auth_check = if !json {
         let should_check = !matches!(
@@ -221,6 +242,12 @@ async fn dispatch(
         }
     }
 
+    tracing::info!(
+        command,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "command completed"
+    );
+
     Ok(())
 }
 
@@ -236,7 +263,9 @@ enum AuthCheckResult {
 fn check_auth_change() -> AuthCheckResult {
     use std::io::{self, IsTerminal};
 
+    tracing::debug!("checking auth change");
     let change = profile::detect_auth_change();
+    tracing::debug!(?change, "auth change detection done");
     if matches!(change, profile::AuthChange::NoChange) {
         return AuthCheckResult::NoChange;
     }
