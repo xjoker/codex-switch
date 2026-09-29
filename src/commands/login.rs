@@ -25,10 +25,13 @@ pub(crate) async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> 
     let (auth_val, _info) = login::build_auth_from_tokens(&tokens);
     let workspace_auth = auth_val.clone();
 
+    let before = crate::app_server::snapshot_live_auth();
     let action = profile::save_auth_value(auth_val, alias)?;
     if let Err(err) = workspace::refresh_for_auth(&workspace_auth).await {
         tracing::debug!("workspace metadata unavailable after login: {err}");
     }
+    // Both outcomes activate the new credentials as the live auth.json.
+    let live_alias = action.alias().to_string();
     match action {
         profile::SaveAction::Created(a) => {
             tracing::info!(action = "login", alias = %a, outcome = "created", "profile login completed");
@@ -63,6 +66,7 @@ pub(crate) async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> 
             }
         }
     }
+    super::profile::report_daemon_restart(&live_alias, &before);
     Ok(())
 }
 
@@ -84,7 +88,8 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
         login::run_device_auth().await?
     };
     let (auth_val, new_info) = login::build_auth_from_tokens(&tokens);
-    profile::replace_profile_auth_and_live_if_current(alias, &auth_val)?;
+    let before = crate::app_server::snapshot_live_auth();
+    let live_replaced = profile::replace_profile_auth_and_live_if_current(alias, &auth_val)?;
     if let Err(err) = workspace::refresh_for_auth(&auth_val).await {
         tracing::debug!("workspace metadata unavailable after re-login: {err}");
     }
@@ -110,6 +115,9 @@ async fn reauth_profile(alias: &str, device: bool, json: bool) -> Result<()> {
                 new_info.email.as_deref().unwrap_or("unknown")
             ))
         );
+    }
+    if live_replaced {
+        super::profile::report_daemon_restart(alias, &before);
     }
     Ok(())
 }

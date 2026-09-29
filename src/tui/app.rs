@@ -10,6 +10,7 @@ use crossterm::event::{
 use ratatui::DefaultTerminal;
 use tokio::sync::Semaphore;
 
+use crate::app_server::{self, DaemonRestart};
 use crate::auth;
 use crate::cache;
 use crate::jwt::AccountInfo;
@@ -109,6 +110,7 @@ enum SwitchCompletion {
         alias: String,
         current: String,
         last_used_error: Option<String>,
+        daemon: DaemonRestart,
     },
     Failed {
         alias: String,
@@ -2073,15 +2075,18 @@ impl App {
             // Always report a completion so shutdown cannot wait forever if a
             // lower-level credential operation panics while holding a lock.
             let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let before = app_server::snapshot_live_auth();
                 match switch_profile(&alias) {
                     Ok(()) => {
                         let last_used_error = cache::set_last_used(&alias)
                             .err()
                             .map(|error| error.to_string());
+                        let daemon = app_server::restart_daemon_if_live_auth_changed(&before);
                         SwitchCompletion::Succeeded {
                             current: read_current(),
                             alias,
                             last_used_error,
+                            daemon,
                         }
                     }
                     Err(error) => SwitchCompletion::Failed {
@@ -2114,6 +2119,7 @@ impl App {
                 alias,
                 current,
                 last_used_error,
+                daemon,
             } => {
                 let current = if current.is_empty() {
                     alias.clone()
@@ -2124,6 +2130,8 @@ impl App {
                     account.is_current = account.alias == current;
                 }
                 self.update_view();
+                let mut status = format!("Switched to {alias}");
+                let mut seconds = 3;
                 if let Some(error) = last_used_error {
                     tracing::warn!(
                         action = "switch",
@@ -2132,10 +2140,8 @@ impl App {
                         error = %error,
                         "account switched but last-used cache update failed"
                     );
-                    self.set_status(
-                        format!("Switched to {alias}; last-used cache update failed: {error}"),
-                        8,
-                    );
+                    status.push_str(&format!("; last-used cache update failed: {error}"));
+                    seconds = 8;
                 } else {
                     tracing::info!(
                         action = "switch",
@@ -2143,7 +2149,28 @@ impl App {
                         outcome = "completed",
                         "account switched"
                     );
-                    self.set_status(format!("Switched to {alias}"), 3);
+                }
+                match daemon {
+                    DaemonRestart::NotRunning | DaemonRestart::Unchanged => {
+                        self.set_status(status, seconds)
+                    }
+                    DaemonRestart::Restarted => {
+                        status.push_str("; app-server daemon restarted");
+                        self.set_status(status, seconds.max(5));
+                    }
+                    DaemonRestart::Failed(detail) => {
+                        tracing::warn!(
+                            action = "switch",
+                            alias = %alias,
+                            outcome = "completed",
+                            error = %detail,
+                            "account switched but the Codex app-server daemon did not restart"
+                        );
+                        status.push_str(&format!(
+                            "; app-server daemon still holds the previous account ({detail}) -- run `codex app-server daemon restart`"
+                        ));
+                        self.set_status_error(status, 10);
+                    }
                 }
             }
             SwitchCompletion::Failed { alias, error } => {
@@ -3335,6 +3362,14 @@ where
     }
 }
 
+/// Login runs on the plain terminal (the TUI is suspended), so the daemon
+/// outcome is printed like the surrounding `[ok]` lines.
+fn print_daemon_restart(alias: &str, before: &app_server::LiveAuthSnapshot) {
+    if let Some(message) = app_server::restart_daemon_if_live_auth_changed(before).message(alias) {
+        println!("{message}");
+    }
+}
+
 async fn finish_refresh_then_commit<T, RefreshFuture, Commit>(
     refresh_future: RefreshFuture,
     commit: Commit,
@@ -3447,11 +3482,13 @@ async fn run_oauth_inner(mode: OAuthMode, device: bool) -> Result<String> {
                     }
                 },
                 || {
+                    let before = app_server::snapshot_live_auth();
                     let action = profile::save_auth_value(auth_val, None)?;
                     let alias = action.alias().to_string();
                     let verb = action.action(); // "created" / "updated"
                     let email_disp = info.email.as_deref().unwrap_or("unknown");
                     println!("[ok] Account {verb}: {alias} ({email_disp})");
+                    print_daemon_restart(&alias, &before);
                     Ok(format!("Account {verb}: {alias}"))
                 },
             )
@@ -3467,9 +3504,14 @@ async fn run_oauth_inner(mode: OAuthMode, device: bool) -> Result<String> {
                     }
                 },
                 || {
-                    profile::replace_profile_auth_and_live_if_current(&alias, &auth_val)?;
+                    let before = app_server::snapshot_live_auth();
+                    let live_replaced =
+                        profile::replace_profile_auth_and_live_if_current(&alias, &auth_val)?;
                     let email_disp = info.email.as_deref().unwrap_or("unknown");
                     println!("[ok] Re-logged in: {alias} ({email_disp})");
+                    if live_replaced {
+                        print_daemon_restart(&alias, &before);
+                    }
                     Ok(format!("Re-logged in: {alias}"))
                 },
             )

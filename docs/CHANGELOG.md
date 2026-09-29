@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Account switches reach the Codex app-server daemon** — Codex CLI 0.157 (2026-09-25) attaches interactive sessions to a shared local app-server daemon that loads `auth.json` once and re-reads it only for the account it already holds, so `use` and `login` replaced the file while every new `codex` session kept the previous account. Both now run `codex app-server daemon restart` when the file changed and that daemon is running, and report the outcome (re-selecting the profile that is already live leaves the daemon alone, so a scheduled `use` does not interrupt sessions on every run); a failed restart is a warning on stderr because the switch itself has happened, and a stopped daemon or an older Codex is left alone. `launch` keeps its temporary staging instead: a ChatGPT launch adds `--no-daemon` when the installed Codex lists it, so the launched session reads the staged file rather than joining the daemon; an argv that already picks `--no-daemon`, `--remote`, or `agents` is passed through unchanged.
 - **Modal TUI forms accept mouse input** — Provider add/edit fields, HTTPS toggle, model rows, launch-picker models/reasoning/args, confirmation `y`/`n`, and the remaining account menus now respond to clicks. The wheel moves modal lists. Clicks still do not pass through to the page behind a modal.
 
 ## v20260909.4.0 (candidate) — 2026-09-09

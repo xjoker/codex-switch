@@ -346,22 +346,24 @@ fn update_profile_tokens_if_refresh_matches_after_launch(
 
 /// Replace a saved profile and its live copy, when current, as one serialized
 /// transaction. Used by CLI/TUI re-login paths.
+/// Returns whether the live `auth.json` was replaced as well.
 pub fn replace_profile_auth_and_live_if_current(
     alias: &str,
     val: &serde_json::Value,
-) -> Result<()> {
+) -> Result<bool> {
     validate_alias(alias)?;
     let profile_path = profile_auth_path(alias)?;
     let _transaction = lock_auth_transaction()?;
     crate::auth::validate_managed_auth_value(val)?;
     ensure_same_account_identity(alias, &read_auth(&profile_path)?, val)?;
     write_auth(&profile_path, val)?;
-    if read_current() == alias {
-        let live = codex_auth_path()?;
-        backup_auth(&live)?;
-        write_auth(&live, val)?;
+    if read_current() != alias {
+        return Ok(false);
     }
-    Ok(())
+    let live = codex_auth_path()?;
+    backup_auth(&live)?;
+    write_auth(&live, val)?;
+    Ok(true)
 }
 
 pub fn find_matching_profile(auth_path: &Path) -> Option<String> {

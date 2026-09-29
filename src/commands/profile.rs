@@ -2,8 +2,20 @@ use super::render::{confirm_default_no, print_usage_line};
 use crate::output::{
     self, ProgressReporter, account_to_json, print_json, usage_to_json, user_println,
 };
-use crate::{auth, cache, color, config, jwt, profile, usage, workspace};
+use crate::{app_server, auth, cache, color, config, jwt, profile, usage, workspace};
 use anyhow::{Context, Result};
+
+/// Restart the shared Codex app-server daemon now that `alias` is live, and
+/// say what happened. A restart that fails is a warning on stderr: the live
+/// `auth.json` has already been switched, only the running daemon is stale.
+pub(crate) fn report_daemon_restart(alias: &str, before: &app_server::LiveAuthSnapshot) {
+    let restart = app_server::restart_daemon_if_live_auth_changed(before);
+    match restart.message(alias) {
+        Some(message) if restart.is_failure() => eprintln!("{}", color::error(&message)),
+        Some(message) => user_println(&message),
+        None => {}
+    }
+}
 
 /// Surface profiles whose rotated credentials could not be written.
 ///
@@ -26,6 +38,7 @@ pub(crate) async fn use_cmd(alias: Option<&str>, json: bool, consume_card: bool)
 
     match alias {
         Some(a) => {
+            let before = app_server::snapshot_live_auth();
             profile::cmd_use(a, !json && std::io::stdin().is_terminal())?;
             cache::set_last_used(a)?;
             tracing::info!(
@@ -34,6 +47,7 @@ pub(crate) async fn use_cmd(alias: Option<&str>, json: bool, consume_card: bool)
                 outcome = "completed",
                 "account switched"
             );
+            report_daemon_restart(a, &before);
             if json {
                 print_json(&output::JsonOk {
                     ok: true,
@@ -699,6 +713,7 @@ async fn best_cmd(json: bool, consume_card: bool) -> Result<()> {
         revival_hint,
     } = outcome;
 
+    let before = app_server::snapshot_live_auth();
     profile::switch_profile(&best_alias)?;
     cache::set_last_used(&best_alias)?;
     tracing::info!(
@@ -728,6 +743,7 @@ async fn best_cmd(json: bool, consume_card: bool) -> Result<()> {
             println!("  {}", color::dim(&revival_hint_message(hint)));
         }
     }
+    report_daemon_restart(&best_alias, &before);
 
     // Opportunistically refresh tokens about to expire (background, bounded)
     report_token_persist_failures(&usage::refresh_expiring_tokens().await);

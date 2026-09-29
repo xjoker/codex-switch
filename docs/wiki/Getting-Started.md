@@ -82,7 +82,7 @@ codex-switch use         # switch to the best eligible account
 codex-switch launch      # select, start Codex, restore auth afterwards
 ```
 
-`use` without an alias ranks all accounts with the adaptive scoring algorithm; `use <alias>` switches explicitly. Codex reads authentication at startup, so restart Codex after a manual switch — or use `launch`, which handles staging and restoration for you.
+`use` without an alias ranks all accounts with the adaptive scoring algorithm; `use <alias>` switches explicitly. A running Codex app-server daemon (Codex 0.157 and newer) is restarted so new sessions use the selected account; an older Codex reads authentication at startup, so restart it after a manual switch — or use `launch`, which handles staging and restoration for you.
 
 ## Where your data lives
 

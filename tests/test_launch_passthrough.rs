@@ -1,4 +1,5 @@
-//! End-to-end argv contract for `codex-switch launch -- …`.
+//! End-to-end argv contract for `codex-switch launch -- …` and for the Codex
+//! app-server daemon handling of `codex-switch use`.
 //!
 //! A fake `codex` on PATH records the exact argument vector it received, so
 //! these tests prove the composed command rather than only the clap parse.
@@ -85,11 +86,34 @@ data.append({
 })
 open(path, "w", encoding="utf-8").write(json.dumps(data))
 
+argv = sys.argv[1:]
+if argv == ["--version"]:
+    sys.stdout.write("codex-cli 0.0.0-test\n")
+    sys.exit(0)
+if argv == ["--help"]:
+    # Codex 0.156+ lists `--no-daemon` in its root help.
+    sys.stdout.write("Usage: codex [OPTIONS] [PROMPT]\n")
+    if os.environ.get("CS_FAKE_CODEX_NO_DAEMON") == "1":
+        sys.stdout.write("      --no-daemon\n")
+    sys.exit(0)
+if argv == ["app-server", "daemon", "version"]:
+    if os.environ.get("CS_FAKE_CODEX_DAEMON") == "running":
+        sys.stdout.write('{"status":"running","cliVersion":"0.0.0-test","appServerVersion":"0.0.0-test"}\n')
+        sys.exit(0)
+    sys.stderr.write("Error: failed to connect to app-server-control.sock\n")
+    sys.exit(1)
+if argv == ["app-server", "daemon", "restart"]:
+    if os.environ.get("CS_FAKE_CODEX_DAEMON_RESTART") == "fail":
+        sys.stderr.write("Error: app server is running but is not managed by codex app-server daemon\n")
+        sys.exit(1)
+    sys.stdout.write('{"status":"restarted"}\n')
+    sys.exit(0)
+
 # A real Codex invocation creates its session index and rollout under the
 # CODEX_HOME it received.  The fixture is opt-in so the older argv-only tests
 # keep exercising the same small fake.
 session_id = os.environ.get("CS_FAKE_CODEX_SESSION_ID")
-if session_id and sys.argv[1:] != ["--version"]:
+if session_id:
     codex_home = os.environ["CODEX_HOME"]
     session_name = os.environ.get("CS_FAKE_CODEX_SESSION_NAME", session_id)
     provider = os.environ.get("CS_FAKE_CODEX_SESSION_PROVIDER", "openrouter")
@@ -119,15 +143,12 @@ if session_id and sys.argv[1:] != ["--version"]:
             "updated_at": updated_at,
             "rollout_path": os.path.relpath(rollout, codex_home).replace(os.sep, "/"),
         }) + "\n")
-if sys.argv[1:] == ["--version"]:
-    sys.stdout.write("codex-cli 0.0.0-test\n")
-else:
-    delay = float(os.environ.get("CS_FAKE_CODEX_SLEEP", "0"))
-    if delay:
-        import time
-        time.sleep(delay)
-    size = int(os.environ.get("CS_FAKE_CODEX_STDOUT_BYTES", "0"))
-    sys.stdout.write("x" * size if size else "codex-ok\n")
+delay = float(os.environ.get("CS_FAKE_CODEX_SLEEP", "0"))
+if delay:
+    import time
+    time.sleep(delay)
+size = int(os.environ.get("CS_FAKE_CODEX_STDOUT_BYTES", "0"))
+sys.stdout.write("x" * size if size else "codex-ok\n")
 sys.exit(0)
 "#;
 
@@ -175,6 +196,13 @@ fn install_fake_codex(home: &Path) -> (PathBuf, PathBuf) {
     (bin_dir, log)
 }
 
+/// Argv of a codex-switch probe (`--version`, `--help`, `app-server daemon …`)
+/// rather than a launched Codex session.
+fn is_probe(argv: &[String]) -> bool {
+    matches!(argv, [flag] if flag == "--version" || flag == "--help")
+        || argv.first().is_some_and(|first| first == "app-server")
+}
+
 fn recorded_argv(log: &Path) -> Vec<Vec<String>> {
     let raw = fs::read_to_string(log).unwrap();
     let data: Vec<Value> = serde_json::from_str(&raw).unwrap();
@@ -206,7 +234,7 @@ fn recorded_launches(log: &Path) -> Vec<FakeLaunch> {
                 .iter()
                 .map(|v| v.as_str().unwrap().to_string())
                 .collect();
-            if argv.as_slice() == ["--version"] {
+            if is_probe(&argv) {
                 return None;
             }
             Some(FakeLaunch {
@@ -221,7 +249,7 @@ fn last_non_version_argv(log: &Path) -> Vec<String> {
     recorded_argv(log)
         .into_iter()
         .rev()
-        .find(|argv| argv.as_slice() != ["--version"])
+        .find(|argv| !is_probe(argv))
         .expect("fake codex must have been launched with real args")
 }
 
@@ -232,9 +260,13 @@ fn last_non_version_pid(log: &Path) -> Option<u32> {
     data.into_iter()
         .rev()
         .find(|entry| {
-            entry["argv"]
-                .as_array()
-                .is_some_and(|argv| argv.iter().any(|arg| arg.as_str() != Some("--version")))
+            entry["argv"].as_array().is_some_and(|argv| {
+                let argv: Vec<String> = argv
+                    .iter()
+                    .filter_map(|arg| arg.as_str().map(str::to_string))
+                    .collect();
+                !is_probe(&argv)
+            })
         })
         .and_then(|entry| entry["pid"].as_u64())
         .and_then(|pid| u32::try_from(pid).ok())
@@ -1366,5 +1398,245 @@ fn provider_resume_serializes_same_run_but_allows_a_new_run() {
     assert!(status.success());
     let launches = recorded_launches(&log);
     assert_ne!(launches[1].codex_home, launches.last().unwrap().codex_home);
+    let _ = fs::remove_dir_all(home);
+}
+
+// ── Codex app-server daemon ───────────────────────────────
+
+fn strings(argv: &[&str]) -> Vec<String> {
+    argv.iter().map(|arg| arg.to_string()).collect()
+}
+
+/// Every `codex app-server …` invocation the fake recorded, in order.
+fn daemon_argv(log: &Path) -> Vec<Vec<String>> {
+    recorded_argv(log)
+        .into_iter()
+        .filter(|argv| argv.first().is_some_and(|first| first == "app-server"))
+        .collect()
+}
+
+#[test]
+fn use_restarts_a_running_app_server_daemon() {
+    let home = temp_home("use-daemon-restart");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["use", "work"],
+        &[("CS_FAKE_CODEX_DAEMON", "running")],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        daemon_argv(&log),
+        vec![
+            strings(&["app-server", "daemon", "version"]),
+            strings(&["app-server", "daemon", "restart"]),
+        ]
+    );
+    assert!(stdout.contains("Switched to profile: work"), "{stdout}");
+    assert!(
+        stdout.contains("Restarted the Codex app-server daemon"),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn use_does_not_restart_the_daemon_when_the_live_auth_is_unchanged() {
+    let home = temp_home("use-daemon-unchanged");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+    let running = [("CS_FAKE_CODEX_DAEMON", "running")];
+
+    let first = run_env(&home, &fake_bin, &log, &["use", "work"], &running);
+    assert!(first.status.success());
+    assert_eq!(daemon_argv(&log).len(), 2, "the first switch restarts");
+
+    let second = run_env(&home, &fake_bin, &log, &["use", "work"], &running);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(second.status.success(), "{combined}");
+    assert_eq!(
+        daemon_argv(&log).len(),
+        2,
+        "re-selecting the live profile must not touch the daemon again"
+    );
+    assert!(combined.contains("Switched to profile: work"), "{combined}");
+    assert!(!combined.contains("app-server daemon"), "{combined}");
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn use_leaves_a_stopped_app_server_daemon_alone() {
+    let home = temp_home("use-daemon-stopped");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+
+    let output = run(&home, &fake_bin, &log, &["use", "work"]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{combined}");
+    assert_eq!(
+        daemon_argv(&log),
+        vec![strings(&["app-server", "daemon", "version"])],
+        "a stopped daemon must not be started by a switch"
+    );
+    assert!(combined.contains("Switched to profile: work"), "{combined}");
+    assert!(!combined.contains("app-server daemon"), "{combined}");
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn use_reports_a_failed_daemon_restart_without_failing_the_switch() {
+    let home = temp_home("use-daemon-restart-fails");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["use", "work"],
+        &[
+            ("CS_FAKE_CODEX_DAEMON", "running"),
+            ("CS_FAKE_CODEX_DAEMON_RESTART", "fail"),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(stdout.contains("Switched to profile: work"), "{stdout}");
+    assert!(
+        stderr.contains("still holds the previous account")
+            && stderr.contains("not managed by codex app-server daemon")
+            && stderr.contains("codex app-server daemon restart"),
+        "{stderr}"
+    );
+    assert!(
+        home.join(".codex/auth.json").is_file(),
+        "the switch itself must have happened"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn json_use_keeps_the_daemon_report_off_stdout() {
+    let home = temp_home("use-daemon-json");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["--json", "use", "work"],
+        &[("CS_FAKE_CODEX_DAEMON", "running")],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let json: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|err| panic!("stdout must stay one JSON document ({err}): {stdout}"));
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["alias"], "work");
+    assert_eq!(json["action"], "switched");
+    assert!(
+        stderr.contains("Restarted the Codex app-server daemon"),
+        "{stderr}"
+    );
+    assert_eq!(daemon_argv(&log).len(), 2);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_chatgpt_runs_codex_without_the_shared_daemon_when_supported() {
+    let home = temp_home("launch-no-daemon");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "work", "--", "exec", "--json", "review"],
+        &[("CS_FAKE_CODEX_NO_DAEMON", "1")],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        last_non_version_argv(&log),
+        ["--no-daemon", "exec", "--json", "review"]
+    );
+    assert!(
+        daemon_argv(&log).is_empty(),
+        "launch must not touch the shared daemon"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_chatgpt_keeps_argv_for_a_codex_without_no_daemon() {
+    let home = temp_home("launch-old-codex");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+
+    let output = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "work", "--", "exec", "--json", "review"],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(last_non_version_argv(&log), ["exec", "--json", "review"]);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_chatgpt_leaves_an_explicit_server_choice_alone() {
+    let home = temp_home("launch-explicit-server");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+
+    for passthrough in [
+        vec!["--remote", "ws://127.0.0.1:1"],
+        vec!["--no-daemon", "hello"],
+    ] {
+        let mut args = vec!["launch", "work", "--"];
+        args.extend(passthrough.iter().copied());
+        let output = run_env(
+            &home,
+            &fake_bin,
+            &log,
+            &args,
+            &[("CS_FAKE_CODEX_NO_DAEMON", "1")],
+        );
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(last_non_version_argv(&log), strings(&passthrough));
+    }
     let _ = fs::remove_dir_all(home);
 }
