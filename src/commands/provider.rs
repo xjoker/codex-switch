@@ -277,7 +277,9 @@ fn list(json: bool) -> Result<()> {
         return Ok(());
     }
     if aliases.is_empty() {
-        user_println("(no providers)");
+        user_println(
+            "(no providers; add one with `codex-switch provider add <alias> --base-url <URL> ...`)",
+        );
         return Ok(());
     }
     for alias in aliases {

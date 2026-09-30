@@ -775,7 +775,7 @@ fn validate_base_url(base_url: &str, allow_insecure_http: bool) -> Result<()> {
                 Ok(())
             } else {
                 anyhow::bail!(
-                    "base_url must use https; explicitly allow insecure HTTP for this provider to continue"
+                    "base_url must use https; to send the key over plain HTTP, pass --allow-insecure-http (CLI) or untick \"HTTPS only\" (TUI)"
                 )
             }
         }

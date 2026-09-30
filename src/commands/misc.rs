@@ -150,7 +150,9 @@ pub(crate) async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
         if json {
             print_json(&serde_json::json!({"results": []}));
         } else {
-            user_println("(no saved profiles)");
+            user_println(
+                "(no saved profiles; run `codex-switch login` or `codex-switch import <path>`)",
+            );
         }
         return Ok(());
     }

@@ -38,6 +38,11 @@ pub(crate) async fn use_cmd(alias: Option<&str>, json: bool, consume_card: bool)
 
     match alias {
         Some(a) => {
+            if crate::provider::exists(a) {
+                anyhow::bail!(
+                    "'{a}' is a custom API provider; `use` switches ChatGPT profiles only. Start it with `codex-switch launch {a}`"
+                );
+            }
             let before = app_server::snapshot_live_auth();
             profile::cmd_use(a, !json && std::io::stdin().is_terminal())?;
             cache::set_last_used(a)?;
@@ -73,7 +78,12 @@ pub(crate) async fn list_cmd(force: bool, json: bool, auth_already_handled: bool
         if json {
             print_json(&output::JsonUsageResult { profiles: vec![] });
         } else {
-            println!("{}", color::dim("(no saved profiles)"));
+            println!(
+                "{}",
+                color::dim(
+                    "(no saved profiles; run `codex-switch login` or `codex-switch import <path>`)"
+                )
+            );
         }
         return Ok(());
     }

@@ -834,7 +834,7 @@ pub fn detect_auth_change() -> AuthChange {
                 "auth.json carries no account id and its email matches {} profiles ({}) — \
                  refusing to guess which one to update. \
                  Run `codex-switch use <alias>` to restore a known profile, \
-                 or `codex-switch save <alias>` to store these credentials explicitly.",
+                 or `codex-switch import <path to auth.json> <alias>` to store these credentials explicitly.",
                 ambiguous.len(),
                 ambiguous.join(", ")
             ));
@@ -893,9 +893,10 @@ impl std::fmt::Display for StaleLiveAuth {
              (incoming: {}; profile: {}). Refresh tokens are single-use, so the older copy is \
              already revoked and overwriting would destroy the working one. Choose a side \
              explicitly: `codex-switch use {}` keeps the profile's credentials and pushes them \
-             back into ~/.codex/auth.json, after which the two agree again; \
-             `codex-switch delete {}` followed by a fresh save keeps the incoming ones.",
-            self.alias, self.live, self.profile, self.alias, self.alias
+             back into the live auth.json, after which the two agree again; \
+             `codex-switch delete {}` followed by `codex-switch import <path to auth.json> {}` \
+             keeps the incoming ones.",
+            self.alias, self.live, self.profile, self.alias, self.alias, self.alias
         )
     }
 }
@@ -982,7 +983,7 @@ fn resolve_identity_target(identity: &AccountIdentity) -> Result<Option<String>>
         _ => {
             email_only.sort();
             anyhow::bail!(
-                "Ambiguous account: {} profiles share email '{}' with different workspaces ({}) -- refusing to guess which one to update.\nRun `codex-switch save <alias>` with one of the profiles above, or a new alias, to choose explicitly.",
+                "Ambiguous account: {} profiles share email '{}' with different workspaces ({}) -- refusing to guess which one to update.\nRun `codex-switch import <path to auth.json> <alias>` with one of the profiles above, or a new alias, to choose explicitly.",
                 email_only.len(),
                 identity.email.as_deref().unwrap_or("unknown"),
                 email_only.join(", ")

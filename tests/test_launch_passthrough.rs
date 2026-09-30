@@ -619,7 +619,7 @@ fn launch_dash_dash_exec_json_is_not_an_alias_named_exec() {
         "launch -- exec must auto-select, not look up alias exec: {combined}"
     );
     assert!(
-        !combined.contains("Profile 'exec' not found"),
+        !combined.contains("profile 'exec' not found"),
         "launch -- exec must not treat exec as an alias: {combined}"
     );
     let _ = fs::remove_dir_all(home);
@@ -819,7 +819,7 @@ fn launch_exec_without_separator_is_not_an_alias() {
         combined.contains("no saved profiles"),
         "launch exec must auto-select, not look up alias exec: {combined}"
     );
-    assert!(!combined.contains("Profile 'exec' not found"), "{combined}");
+    assert!(!combined.contains("profile 'exec' not found"), "{combined}");
     let _ = fs::remove_dir_all(home);
 }
 

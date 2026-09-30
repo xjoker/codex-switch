@@ -157,7 +157,7 @@ async fn launch_interactive(
         Some(alias) => {
             let profiles = profile::list_profiles()?;
             if !profiles.iter().any(|profile| profile == alias) {
-                anyhow::bail!("Profile '{}' not found", alias);
+                anyhow::bail!("profile '{}' not found", alias);
             }
             alias.to_string()
         }
@@ -258,7 +258,7 @@ async fn launch_interactive(
     // writers out until the staged file is restored.
 
     if !json {
-        user_println(&format!("Launching codex with profile '{target_alias}'..."));
+        user_println(&format!("Launching Codex with profile '{target_alias}'..."));
     }
 
     let child_result = spawn_codex(&codex_command, &forwarded, None, json, None);

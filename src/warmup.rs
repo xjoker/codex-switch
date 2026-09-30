@@ -992,7 +992,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                 bail!("{alias}: HTTP {retry_status} after token refresh retry")
             }
             bail!(
-                "{alias}: authentication failed — token may be expired (run `codex-switch list` to refresh)"
+                "{alias}: authentication failed and this profile has no refresh token; run `codex-switch login {alias}` to sign in again"
             )
         }
         429 => bail!("{alias}: rate limited"),
