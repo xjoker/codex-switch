@@ -46,14 +46,14 @@ Independent review covered provider transport, OAuth rotation/routing, native pr
 
 ## Candidate validation
 
-Candidate base version: `20260930.3.0`. Local validation ran on Windows against the combined baseline and these repairs:
+Candidate base version: `20260930.3.0` (commit `7a1ec3c`). Local validation was re-run on Windows (rustc/cargo 1.98.0) against that commit, including the `thiserror` 2.0.21 and `rand` 0.10.3 dependency bumps:
 
-- `cargo test --all --offline`: 838 passed (678 unit and 160 integration tests), zero failed or ignored. Unix-only process/signal tests still require the Linux/macOS CI jobs.
-- `cargo fmt --check` and `cargo clippy --all-targets --offline -- -D warnings`: passed.
-- `cargo audit`: passed after refreshing 1,277 RustSec advisories and scanning 384 dependencies; the only dependency changes in this candidate are `thiserror` 2.0.21 and `rand` 0.10.3, which that audit run did not cover.
+- `cargo test --all`: 854 passed (687 unit and 167 integration tests across eight integration binaries), zero failed or ignored; doc-tests contain none. Unix-only process/signal tests still require the Linux/macOS CI jobs.
+- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`: passed.
+- `cargo audit`: passed with no advisories reported, scanning `Cargo.lock` (384 crate dependencies) against 1,277 RustSec advisories. This run covers `thiserror` 2.0.21 and `rand` 0.10.3, the only dependency changes in this candidate.
 - Bash and PowerShell installer syntax: passed.
 - Official Codex `0.159.2` executable: passed a local HTTP/SSE smoke covering model sync, probe, launch, a second launch that sweeps old runs, and exact-session resume. All five requests used the expected routing, headers and credentials; the model query used `client_version=0.159.2`. The catalog supplied nonempty instructions, resume reused its original native profile, and shared `auth.json`/`config.toml` were not created or replaced.
-- The smoke used temporary homes and a mock provider; it did not validate paid-account quota activation against the production ChatGPT backend.
+- The smoke used temporary homes and a mock provider; it did not validate paid-account quota activation against the production ChatGPT backend. It was not repeated for the later `20260930.3.0` changes (launch-time re-probe of a saved Responses denial, warmup retry and refresh recovery, non-ASCII provider headers), which are covered by the unit and integration tests counted above.
 
 Full logs from [baseline CI 36661218187](https://github.com/xjoker/codex-switch/actions/runs/36661218187) confirm that Unix tests incorrectly compiled references to Windows-only helpers. Logs from 36660817223 show that defect together with the macOS `libc::__errno_location` error and RUSTSEC-2026-0285. Runs 36659156361, 36657765597 and 36657253340 confirm the latter two failures. This candidate fixes the test compilation boundary and preserves Claude's portable errno and rustls 0.23.45 repairs. Older PR runs 36018117969, 36014601650 and 36557685054 return `log not found`; their public metadata and associated source changes were reviewed, but their full logs are unavailable.
 
