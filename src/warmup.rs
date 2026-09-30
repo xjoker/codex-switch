@@ -768,9 +768,6 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
     if profile_tokens.refresh_token.is_some()
         && crate::jwt::is_token_expiring(&profile_tokens.access_token, 60) == Some(true)
     {
-        // One refresh per warmup flow. A later 401 can only adopt credentials
-        // another process has already persisted for this same identity.
-        refresh_attempted = true;
         tracing::info!(
             action = "token_refresh",
             alias,
@@ -778,7 +775,12 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
             "token refresh started"
         );
         match crate::usage::refresh_profile_tokens(alias, profile_path, &profile_tokens).await {
-            Ok(refreshed) => profile_tokens = refreshed,
+            Ok(refreshed) => {
+                profile_tokens = refreshed;
+                // A later 401 can only adopt credentials another process has
+                // already persisted for this same identity.
+                refresh_attempted = true;
+            }
             Err(error) if crate::usage::is_refresh_safety_error(&error) => return Err(error),
             Err(e) => {
                 if let Some(terminal) = e.downcast_ref::<crate::usage::TerminalAuthError>() {
@@ -787,8 +789,11 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                         code = terminal.code,
                         "pre-warmup token refresh rejected permanently"
                     );
+                    refresh_attempted = true;
                     rejected_refresh = Some(e);
                 } else {
+                    // Nothing was rotated (e.g. a network error), so the single
+                    // recovery refresh after a 401 stays available.
                     warn!("[{alias}] pre-warmup token refresh failed");
                 }
             }
@@ -1004,9 +1009,11 @@ pub(crate) async fn fetch_models_for_profile(
     if profile_tokens.refresh_token.is_some()
         && crate::jwt::is_token_expiring(&profile_tokens.access_token, 60) == Some(true)
     {
-        refresh_attempted = true;
         match crate::usage::refresh_profile_tokens(alias, profile_path, &profile_tokens).await {
-            Ok(refreshed) => profile_tokens = refreshed,
+            Ok(refreshed) => {
+                profile_tokens = refreshed;
+                refresh_attempted = true;
+            }
             Err(error) if crate::usage::is_refresh_safety_error(&error) => return Err(error),
             // Deliberate degrade: fall through and try /models with the
             // existing (possibly expiring) token rather than failing here.
@@ -1020,7 +1027,10 @@ pub(crate) async fn fetch_models_for_profile(
                         code = terminal.code,
                         "proactive token refresh rejected, continuing with existing token"
                     );
+                    refresh_attempted = true;
                 } else {
+                    // Nothing was rotated, so the /models 401 recovery may
+                    // still spend its single refresh.
                     warn!(
                         "[{alias}] proactive token refresh failed, continuing with existing token"
                     );
@@ -2294,6 +2304,90 @@ mod tests {
                 1,
                 "a terminal refresh rejection must not be replayed a second time from the \
                  401 handler — it can only ever fail again and costs a full round trip"
+            );
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn transient_pre_refresh_failure_still_allows_the_401_recovery_refresh() {
+            let _lock = ENV_LOCK.lock().await;
+            let _profile_env_lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = tempfile::tempdir().unwrap();
+            let _codex_switch_home =
+                EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
+            let alias = "transient-pre-refresh-401";
+            crate::cache::put(alias, &crate::usage::UsageInfo::default());
+            let profile_path = stage_writable_profile(home.path(), alias, &expired_access_token());
+
+            let token_calls = Arc::new(AtomicUsize::new(0));
+            let token_counter = Arc::clone(&token_calls);
+            let responses_calls = Arc::new(AtomicUsize::new(0));
+            let responses_counter = Arc::clone(&responses_calls);
+            let app = Router::new()
+                .route(
+                    "/oauth/token",
+                    post(move || {
+                        let calls = Arc::clone(&token_counter);
+                        async move {
+                            // The first refresh (pre-warmup) fails without a
+                            // parseable body, which is a non-terminal error.
+                            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                                return (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+                                    .into_response();
+                            }
+                            Json(serde_json::json!({
+                                "id_token": make_jwt(&serde_json::json!({})),
+                                "access_token": live_access_token(),
+                                "refresh_token": "recovered-refresh-token",
+                            }))
+                            .into_response()
+                        }
+                    }),
+                )
+                .route(
+                    "/codex/models",
+                    get(|| async {
+                        Json(serde_json::json!({
+                            "models": [{"slug": "gpt-5-mini", "supported_in_api": true}]
+                        }))
+                    }),
+                )
+                .route(
+                    "/codex/responses",
+                    post(move || {
+                        let calls = Arc::clone(&responses_counter);
+                        async move {
+                            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                                (StatusCode::UNAUTHORIZED, "")
+                            } else {
+                                (StatusCode::OK, MOCK_COMPLETED_SSE)
+                            }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let _guards = [
+                EnvVarGuard::set("CS_TOKEN_URL", &format!("http://{addr}/oauth/token")),
+                EnvVarGuard::set("CS_MODELS_URL", &format!("http://{addr}/codex/models")),
+                EnvVarGuard::set(
+                    "CS_RESPONSES_URL",
+                    &format!("http://{addr}/codex/responses"),
+                ),
+            ];
+
+            warmup_account(alias, &profile_path)
+                .await
+                .expect("the 401 must be recovered by a refresh, since the first one failed");
+            assert_eq!(token_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(responses_calls.load(Ordering::SeqCst), 2);
+            let stored = crate::auth::read_auth(&profile_path).unwrap();
+            assert_eq!(
+                crate::auth::extract_tokens(&stored).1.as_deref(),
+                Some("recovered-refresh-token")
             );
         }
 
