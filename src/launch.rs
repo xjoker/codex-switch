@@ -425,10 +425,12 @@ fn codex_supports_no_daemon(command: &std::path::Path) -> Result<bool> {
         .arg("--help")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let output = crate::app_server::output_with_timeout(probe, std::time::Duration::from_secs(2))
+    // Cold-starting a CLI wrapper can exceed two seconds on a busy machine.
+    // This is a required routing decision, unlike the optional version probe.
+    let output = crate::app_server::output_with_timeout(probe, std::time::Duration::from_secs(10))
         .context(
-        "could not determine Codex account routing from --help; refusing to stage credentials",
-    )?;
+            "could not determine Codex account routing from --help; refusing to stage credentials",
+        )?;
     no_daemon_support_from_help(output.status.success(), &output.stdout)
 }
 

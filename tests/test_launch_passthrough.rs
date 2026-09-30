@@ -91,6 +91,11 @@ if argv == ["--version"]:
     sys.stdout.write("codex-cli 0.0.0-test\n")
     sys.exit(0)
 if argv == ["--help"]:
+    if os.environ.get("CS_FAKE_CODEX_HELP_DELAY"):
+        import time
+        time.sleep(float(os.environ["CS_FAKE_CODEX_HELP_DELAY"]))
+    if os.environ.get("CS_FAKE_CODEX_HELP_FAIL") == "1":
+        sys.exit(1)
     # Codex 0.156+ lists `--no-daemon` in its root help.
     sys.stdout.write("Usage: codex [OPTIONS] [PROMPT]\n")
     if os.environ.get("CS_FAKE_CODEX_NO_DAEMON") == "1":
@@ -1782,6 +1787,55 @@ fn launch_chatgpt_runs_codex_without_the_shared_daemon_when_supported() {
         daemon_argv(&log).is_empty(),
         "launch must not touch the shared daemon"
     );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_chatgpt_accepts_a_slow_valid_help_probe() {
+    let home = temp_home("launch-slow-help");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "work", "--", "exec", "review"],
+        &[
+            ("CS_FAKE_CODEX_HELP_DELAY", "3"),
+            ("CS_FAKE_CODEX_NO_DAEMON", "1"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        last_non_version_argv(&log),
+        ["--no-daemon", "exec", "review"]
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_chatgpt_rejects_failed_help_before_staging_credentials() {
+    let home = temp_home("launch-failed-help");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+    let live_auth = home.join(".codex/auth.json");
+    write_auth(&live_auth, "original@example.com", "acct_original");
+    let original = fs::read(&live_auth).unwrap();
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "work", "--", "exec", "review"],
+        &[("CS_FAKE_CODEX_HELP_FAIL", "1")],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("account routing is unknown"));
+    assert_eq!(fs::read(live_auth).unwrap(), original);
+    assert!(recorded_launches(&log).is_empty());
     let _ = fs::remove_dir_all(home);
 }
 
