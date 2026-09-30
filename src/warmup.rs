@@ -269,6 +269,7 @@ async fn fetch_warmup_models(
     profile_tokens: &mut crate::usage::ProfileTokens,
     refresh_attempted: &mut bool,
     additional_limits: &[crate::usage::AdditionalRateLimit],
+    rejected_main: Option<&str>,
 ) -> Result<Vec<String>> {
     let models = match fetch_models(
         client,
@@ -308,7 +309,7 @@ async fn fetch_warmup_models(
         }
         Err(error) => return Err(error),
     };
-    let selected = select_warmup_models(&models, additional_limits)?;
+    let selected = select_warmup_models_excluding(&models, additional_limits, rejected_main)?;
     if selected.is_empty() {
         return require_official_model(Err(anyhow::anyhow!(
             "official models endpoint returned no main-pool model"
@@ -378,9 +379,21 @@ fn is_model_quota_limit(limit: &crate::usage::AdditionalRateLimit) -> bool {
     crate::usage::is_five_hour_warmup_pool(limit)
 }
 
+#[cfg(test)]
 fn select_warmup_models(
     models: &[ModelEntry],
     additional_limits: &[crate::usage::AdditionalRateLimit],
+) -> Result<Vec<String>> {
+    select_warmup_models_excluding(models, additional_limits, None)
+}
+
+/// `rejected_main` is a model the backend just refused with HTTP 400 "not
+/// supported". The catalog can still list it (models are no longer filtered on
+/// `supported_in_api`), so the retry must not pick it again.
+fn select_warmup_models_excluding(
+    models: &[ModelEntry],
+    additional_limits: &[crate::usage::AdditionalRateLimit],
+    rejected_main: Option<&str>,
 ) -> Result<Vec<String>> {
     let visible: Vec<&ModelEntry> = models
         .iter()
@@ -449,6 +462,7 @@ fn select_warmup_models(
         .iter()
         .copied()
         .filter(|model| !additional_slugs.contains(model.slug.as_str()))
+        .filter(|model| rejected_main != Some(model.slug.as_str()))
         .collect();
 
     // Prefer Luna for minimal warmups, keep mini for older catalogs, then use
@@ -477,6 +491,7 @@ fn select_warmup_models(
     Ok(selected)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_warmup_models_for_profile(
     cache_key: &str,
     alias: &str,
@@ -485,6 +500,7 @@ async fn resolve_warmup_models_for_profile(
     profile_tokens: &mut crate::usage::ProfileTokens,
     refresh_attempted: &mut bool,
     additional_limits: &[crate::usage::AdditionalRateLimit],
+    rejected_main: Option<&str>,
 ) -> Result<Vec<String>> {
     if let Some(models) = model_cache_get(&*MODEL_CACHE.lock().await, cache_key) {
         return Ok(models);
@@ -509,6 +525,7 @@ async fn resolve_warmup_models_for_profile(
         profile_tokens,
         refresh_attempted,
         additional_limits,
+        rejected_main,
     )
     .await?;
     model_cache_set(&mut *MODEL_CACHE.lock().await, cache_key, models.clone());
@@ -541,6 +558,7 @@ async fn resolve_warmup_models(
         &mut profile_tokens,
         &mut refresh_attempted,
         additional_limits,
+        None,
     )
     .await
 }
@@ -817,6 +835,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
         &mut profile_tokens,
         &mut refresh_attempted,
         &additional_limits,
+        None,
     )
     .await
     .with_context(|| format!("{alias}: failed to select a supported warmup model"))?;
@@ -871,6 +890,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                     &mut profile_tokens,
                     &mut refresh_attempted,
                     &additional_limits,
+                    Some(model),
                 )
                 .await
                 .with_context(|| {
@@ -1392,6 +1412,38 @@ mod tests {
     #[test]
     fn test_sorted_models_for_display_empty_list() {
         assert!(sorted_models_for_display(&[]).is_empty());
+    }
+
+    #[test]
+    fn rejected_main_model_is_excluded_from_the_retry_selection() {
+        let entry = |slug: &str, priority: i64| ModelEntry {
+            slug: slug.to_string(),
+            priority: Some(priority),
+            supported_in_api: Some(false),
+            ..Default::default()
+        };
+        let models = vec![
+            entry("gpt-6-astra", 1),
+            entry("gpt-5.4-mini", 2),
+            entry("gpt-6-luna", 3),
+        ];
+
+        assert_eq!(
+            select_warmup_models_excluding(&models, &[], Some("gpt-6-luna")).unwrap(),
+            vec!["gpt-5.4-mini"]
+        );
+        assert_eq!(
+            select_warmup_models_excluding(&models, &[], Some("gpt-5.4-mini")).unwrap(),
+            vec!["gpt-6-luna"]
+        );
+        assert_eq!(
+            select_warmup_models_excluding(&models[..2], &[], Some("gpt-5.4-mini")).unwrap(),
+            vec!["gpt-6-astra"]
+        );
+        assert!(
+            select_warmup_models_excluding(&models[..1], &[], Some("gpt-6-astra")).is_err(),
+            "with nothing else to pick, the retry must fail instead of repeating the model"
+        );
     }
 
     #[test]
@@ -2388,6 +2440,74 @@ mod tests {
             assert_eq!(
                 crate::auth::extract_tokens(&stored).1.as_deref(),
                 Some("recovered-refresh-token")
+            );
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn model_not_supported_retry_picks_a_different_model() {
+            let _lock = ENV_LOCK.lock().await;
+            let _profile_env_lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = tempfile::tempdir().unwrap();
+            let _codex_switch_home =
+                EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
+            let alias = "model-not-supported-retry";
+            crate::cache::put(alias, &crate::usage::UsageInfo::default());
+            let profile_path = stage_writable_profile(home.path(), alias, &live_access_token());
+
+            let requested = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let requested_log = Arc::clone(&requested);
+            let app = Router::new()
+                .route(
+                    "/codex/models",
+                    get(|| async {
+                        Json(serde_json::json!({
+                            "models": [
+                                {"slug": "gpt-6-luna", "supported_in_api": false},
+                                {"slug": "gpt-5.4-mini", "supported_in_api": false}
+                            ]
+                        }))
+                    }),
+                )
+                .route(
+                    "/codex/responses",
+                    post(move |Json(body): Json<serde_json::Value>| {
+                        let requested = Arc::clone(&requested_log);
+                        async move {
+                            let model = body["model"].as_str().unwrap_or_default().to_string();
+                            let first = {
+                                let mut log = requested.lock().unwrap();
+                                log.push(model);
+                                log.len() == 1
+                            };
+                            if first {
+                                (StatusCode::BAD_REQUEST, "model is not supported")
+                            } else {
+                                (StatusCode::OK, MOCK_COMPLETED_SSE)
+                            }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let _guards = [
+                EnvVarGuard::set("CS_MODELS_URL", &format!("http://{addr}/codex/models")),
+                EnvVarGuard::set(
+                    "CS_RESPONSES_URL",
+                    &format!("http://{addr}/codex/responses"),
+                ),
+            ];
+
+            warmup_account(alias, &profile_path)
+                .await
+                .expect("the retry with another model should warm the account");
+            assert_eq!(
+                *requested.lock().unwrap(),
+                vec!["gpt-6-luna".to_string(), "gpt-5.4-mini".to_string()],
+                "the retry must not reselect the model the backend just rejected"
             );
         }
 
