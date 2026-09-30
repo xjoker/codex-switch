@@ -1300,6 +1300,62 @@ async fn refresh_rejected_by_a_concurrent_winner_recovers_from_the_stored_token(
     server.shutdown();
 }
 
+/// A successful refresh response that loses the profile CAS is not ours to
+/// use. Abort before replaying its access token or caching that request's
+/// usage; the concurrent winner remains authoritative on disk.
+#[tokio::test]
+async fn refresh_response_that_loses_profile_cas_is_never_used_or_cached() {
+    let _lock = ENV_LOCK.lock().await;
+    let server = MockServer::start(
+        vec![
+            (
+                "old_access".to_string(),
+                vec![reply(
+                    StatusCode::UNAUTHORIZED,
+                    json!({"detail": "expired"}),
+                )],
+            ),
+            ("access_1".to_string(), vec![usage_ok()]),
+            ("access_winner".to_string(), vec![usage_ok()]),
+        ],
+        vec![rotation(1)],
+    )
+    .await;
+    let fx = fixture(&server, "cas-loser", "old_access");
+    server.set_concurrent_winner(
+        "refresh_old",
+        ConcurrentWinner {
+            profile_path: fx.profile_path.clone(),
+            id_token: "id_winner".into(),
+            access_token: "access_winner".into(),
+            refresh_token: "refresh_winner".into(),
+        },
+    );
+
+    let error =
+        codex_switch::usage::fetch_usage_retried_force("cas-loser", &fx.profile_path, "cas-loser")
+            .await
+            .expect_err("a lost refresh CAS must abort this usage request");
+    assert!(error.summary.contains("superseded"), "{}", error.summary);
+    assert_eq!(stored_refresh_token(&fx.profile_path), "refresh_winner");
+    assert_eq!(
+        server.usage_calls(),
+        vec!["old_access".to_string()],
+        "the losing response's access token must not be sent"
+    );
+
+    // A normal cache-aware call must reach the winner's token, proving the
+    // abandoned request did not cache usage obtained with the losing response.
+    codex_switch::usage::fetch_usage_retried("cas-loser", &fx.profile_path, "cas-loser")
+        .await
+        .expect("the winning profile credentials remain usable");
+    assert_eq!(
+        server.usage_calls(),
+        vec!["old_access".to_string(), "access_winner".to_string()]
+    );
+    server.shutdown();
+}
+
 /// D10: the guard for D9 must not swallow real terminal failures. When the
 /// profile on disk still holds the very token the auth server just rejected,
 /// nobody rotated anything and the account genuinely needs a new login — that

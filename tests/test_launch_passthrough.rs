@@ -102,7 +102,12 @@ else:
 
 argv = sys.argv[1:]
 if argv == ["--version"]:
-    sys.stdout.write("codex-cli 0.0.0-test\n")
+    if os.environ.get("CS_FAKE_CODEX_VERSION_DELAY"):
+        import time
+        time.sleep(float(os.environ["CS_FAKE_CODEX_VERSION_DELAY"]))
+    if os.environ.get("CS_FAKE_CODEX_VERSION_FAIL") == "1":
+        sys.exit(7)
+    sys.stdout.write("codex-cli " + os.environ.get("CS_FAKE_CODEX_VERSION", "0.159.2") + "\n")
     sys.exit(0)
 if argv == ["--help"]:
     if os.environ.get("CS_FAKE_CODEX_HELP_DELAY"):
@@ -117,7 +122,7 @@ if argv == ["--help"]:
     sys.exit(0)
 if argv == ["app-server", "daemon", "version"]:
     if os.environ.get("CS_FAKE_CODEX_DAEMON") == "running":
-        sys.stdout.write('{"status":"running","cliVersion":"0.0.0-test","appServerVersion":"0.0.0-test"}\n')
+        sys.stdout.write('{"status":"running","cliVersion":"0.159.2","appServerVersion":"0.159.2"}\n')
         sys.exit(0)
     sys.stderr.write("Error: failed to connect to app-server-control.sock\n")
     sys.exit(1)
@@ -2067,6 +2072,197 @@ fn launch_chatgpt_runs_codex_without_the_shared_daemon_when_supported() {
         daemon_argv(&log).is_empty(),
         "launch must not touch the shared daemon"
     );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_rejects_old_codex_before_touching_live_auth_even_with_explicit_server() {
+    let home = temp_home("launch-minimum-version");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+    let live_auth = home.join(".codex/auth.json");
+    write_auth(&live_auth, "original@example.com", "acct_original");
+    let original = fs::read(&live_auth).unwrap();
+
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["--json", "launch", "work", "--", "--no-daemon", "hello"],
+        &[("CS_FAKE_CODEX_VERSION", "0.159.1")],
+    );
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("expected one JSON error envelope ({error}): {stdout}"));
+    assert_eq!(report["ok"], false);
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("requires Codex 0.159.2 or newer")
+    );
+    assert_eq!(fs::read(live_auth).unwrap(), original);
+    assert!(recorded_launches(&log).is_empty());
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn old_codex_is_rejected_before_provider_native_run_creation() {
+    let home = temp_home("provider-minimum-version");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let provider_before =
+        fs::read(home.join(".codex-switch/providers/openrouter/provider.toml")).unwrap();
+
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter"],
+        &[("CS_FAKE_CODEX_VERSION", "0.158.9")],
+    );
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires Codex 0.159.2 or newer"));
+    assert_eq!(
+        fs::read(home.join(".codex-switch/providers/openrouter/provider.toml")).unwrap(),
+        provider_before
+    );
+    assert!(
+        !home.join(".codex-switch/provider-runs").exists(),
+        "provider preflight must run before native run creation"
+    );
+    assert!(recorded_launches(&log).is_empty());
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn doctor_reports_path_and_explicit_desktop_engine_versions_as_json() {
+    let home = temp_home("doctor-codex-version");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let output = run(
+        &home,
+        &fake_bin,
+        &log,
+        &[
+            "--json",
+            "doctor",
+            "--desktop-codex",
+            fake_bin
+                .join(if cfg!(windows) { "codex.cmd" } else { "codex" })
+                .to_str()
+                .unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("expected one JSON report ({error}): {stdout}"));
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["minimum_version"], "0.159.2");
+    assert_eq!(report["path_cli"]["version"], "0.159.2");
+    assert_eq!(report["desktop_codex"]["version"], "0.159.2");
+    assert_eq!(report["versions_match"], true);
+    assert!(
+        report["path_cli"]["executable"]
+            .as_str()
+            .unwrap()
+            .contains("codex")
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn doctor_unknown_version_is_a_single_json_report_with_failure_exit() {
+    let home = temp_home("doctor-unknown-version");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["--json", "doctor"],
+        &[("CS_FAKE_CODEX_VERSION_FAIL", "1")],
+    );
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("expected one JSON report ({error}): {stdout}"));
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["path_cli"]["status"], "unknown");
+    assert_eq!(report["path_cli"]["version"], Value::Null);
+    assert!(
+        report["path_cli"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("exited with 7")
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn auto_launch_checks_version_before_reset_card_selection_or_auth_staging() {
+    let home = temp_home("launch-auto-version-gate");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["--json", "launch", "--consume-card"],
+        &[("CS_FAKE_CODEX_VERSION", "0.159.1")],
+    );
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("expected one JSON error envelope ({error}): {stdout}"));
+    assert_eq!(report["ok"], false);
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("requires Codex 0.159.2 or newer")
+    );
+    assert!(!home.join(".codex/auth.json").exists());
+    assert!(!home.join(".codex-switch/provider-runs").exists());
+    assert!(recorded_launches(&log).is_empty());
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_rejects_timed_out_version_probe_before_staging_or_child_spawn() {
+    let home = temp_home("launch-version-timeout");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+    let live_auth = home.join(".codex/auth.json");
+    write_auth(&live_auth, "original@example.com", "acct_original");
+    let original = fs::read(&live_auth).unwrap();
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["--json", "launch", "work"],
+        &[("CS_FAKE_CODEX_VERSION_DELAY", "6")],
+    );
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("expected one JSON error envelope ({error}): {stdout}"));
+    assert_eq!(report["ok"], false);
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("version probe timed out")
+    );
+    assert_eq!(fs::read(live_auth).unwrap(), original);
+    assert!(recorded_launches(&log).is_empty());
     let _ = fs::remove_dir_all(home);
 }
 

@@ -1,10 +1,11 @@
 use crate::output::{self, print_json};
-use crate::{color, login, profile, workspace};
+use crate::{auth, color, login, profile, workspace};
 use anyhow::Result;
 
 // ── login / reauth ────────────────────────────────────────
 
 pub(crate) async fn login_cmd(alias: Option<&str>, device: bool, json: bool) -> Result<()> {
+    auth::ensure_file_credentials_store()?;
     if let Some(a) = alias {
         profile::validate_alias(a)?;
         profile::reject_provider_alias(a)?;

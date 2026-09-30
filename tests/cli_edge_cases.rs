@@ -284,6 +284,40 @@ fn provider_add_with_http_opt_in_reaches_key_input() {
     );
 }
 
+#[test]
+fn provider_add_rejects_bare_auth_command_before_reading_key() {
+    for model_arg in ["--model", "--fetch-models"] {
+        let home = tempfile::tempdir().unwrap();
+        let mut args = vec![
+            "--json",
+            "provider",
+            "add",
+            "demo",
+            "--base-url",
+            "https://example.invalid/v1",
+            "--set",
+            "model_providers.demo.auth.command=token-helper",
+            model_arg,
+        ];
+        if model_arg == "--model" {
+            args.push("test-model");
+        }
+        args.push("--api-key-stdin");
+
+        let output = command(home.path(), &args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let error = report["error"].as_str().unwrap();
+        assert!(error.contains("auth.command"), "{error}");
+        assert!(error.contains("env_key"), "{error}");
+        assert!(!error.contains("stdin"), "{error}");
+        assert!(!home.path().join(".codex-switch/providers/demo").exists());
+    }
+}
+
 fn run_with_env(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
     let mut cmd = command(home, args);
     for (key, value) in envs {

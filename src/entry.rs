@@ -159,6 +159,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Login { .. } => "login",
         Commands::Import { .. } => "import",
         Commands::SelfUpdate { .. } => "self-update",
+        Commands::Doctor { .. } => "doctor",
         Commands::Warmup { .. } => "warmup",
         Commands::Launch { .. } => "launch",
         Commands::Tui => "tui",
@@ -182,6 +183,7 @@ async fn dispatch(
             Commands::Login { .. }
                 | Commands::Import { .. }
                 | Commands::SelfUpdate { .. }
+                | Commands::Doctor { .. }
                 | Commands::Open
                 | Commands::Launch { .. }
         );
@@ -216,6 +218,7 @@ async fn dispatch(
             dev,
             stable,
         } => commands::self_update_cmd(check, version.as_deref(), dev, stable, json).await?,
+        Commands::Doctor { desktop_codex } => commands::doctor_cmd(desktop_codex.as_deref(), json)?,
         Commands::Warmup { alias } => commands::warmup_cmd(alias.as_deref(), json).await?,
         Commands::Launch {
             alias,

@@ -39,6 +39,8 @@ codex-switch use          # switch to the best eligible account
 codex-switch launch       # start Codex with the best account
 ```
 
+`codex-switch launch` requires Codex CLI 0.159.2 or newer. Check the CLI found on `PATH` with `codex-switch doctor`; add `--desktop-codex <path>` to check a desktop app's bundled engine separately. This is codex-switch's support minimum, not a claim that older Codex versions cannot work on their own. Versions newer than the current 0.159.2 alignment baseline are accepted but not fully verified.
+
 ![TUI](docs/tui.png)
 
 ## What it does

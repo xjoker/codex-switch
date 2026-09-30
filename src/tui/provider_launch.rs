@@ -13,7 +13,7 @@ use ratatui::{
 use super::hitmap::{HitMap, OverlayClick, OverlayHit};
 use super::popup::{self, PopupState};
 use super::provider_form::{REASONING_CHOICES, reasoning_choice};
-use super::theme::{base, dim, header, key};
+use super::theme::{C_RED, base, dim, header, key};
 use crate::provider::{ProviderProfile, ReasoningLaunch};
 use crate::warmup::ModelEntry;
 
@@ -42,6 +42,7 @@ pub struct ProviderLaunchState {
     reasoning_idx: usize,
     custom_reasoning: Option<String>,
     extra_args: String,
+    extra_error: Option<String>,
     extra_editing: bool,
     extra_cursor: usize,
     last_model_click: Option<(usize, Instant)>,
@@ -88,6 +89,7 @@ impl ProviderLaunchState {
             reasoning_idx,
             custom_reasoning,
             extra_args: String::new(),
+            extra_error: None,
             extra_editing: false,
             extra_cursor: 0,
             last_model_click: None,
@@ -129,6 +131,7 @@ impl ProviderLaunchState {
             reasoning_idx: 0,
             custom_reasoning: None,
             extra_args: String::new(),
+            extra_error: None,
             extra_editing: false,
             extra_cursor: 0,
             last_model_click: None,
@@ -209,11 +212,31 @@ impl ProviderLaunchState {
         }
     }
 
-    fn extra_argv(&self) -> Vec<String> {
-        self.extra_args
-            .split_whitespace()
-            .map(str::to_string)
-            .collect()
+    fn extra_argv(&self) -> Result<Vec<String>, String> {
+        parse_extra_args(&self.extra_args)
+    }
+
+    fn launch_outcome(&mut self) -> LaunchPickerOutcome {
+        let Some(model) = self.models.get(self.selected) else {
+            return LaunchPickerOutcome::Continue;
+        };
+        let extra_args = match self.extra_argv() {
+            Ok(args) => args,
+            Err(error) => {
+                self.extra_error = Some(error);
+                self.extra_editing = true;
+                self.extra_cursor = self.extra_args.chars().count();
+                return LaunchPickerOutcome::Continue;
+            }
+        };
+        self.extra_error = None;
+        self.extra_editing = false;
+        LaunchPickerOutcome::Launch {
+            alias: self.alias.clone(),
+            model: model.id.clone(),
+            reasoning: self.reasoning_for_launch(),
+            extra_args,
+        }
     }
 
     fn reasoning_label(&self) -> &str {
@@ -233,17 +256,7 @@ impl ProviderLaunchState {
                 self.extra_cursor = self.extra_args.chars().count();
                 LaunchPickerOutcome::Continue
             }
-            KeyCode::Enter | KeyCode::Char('o') => {
-                let Some(model) = self.models.get(self.selected) else {
-                    return LaunchPickerOutcome::Continue;
-                };
-                LaunchPickerOutcome::Launch {
-                    alias: self.alias.clone(),
-                    model: model.id.clone(),
-                    reasoning: self.reasoning_for_launch(),
-                    extra_args: self.extra_argv(),
-                }
-            }
+            KeyCode::Enter | KeyCode::Char('o') => self.launch_outcome(),
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.selected + 1 < self.models.len() {
                     self.select(self.selected + 1);
@@ -294,23 +307,13 @@ impl ProviderLaunchState {
                 self.extra_editing = false;
                 LaunchPickerOutcome::Continue
             }
-            KeyCode::Enter => {
-                self.extra_editing = false;
-                let Some(model) = self.models.get(self.selected) else {
-                    return LaunchPickerOutcome::Continue;
-                };
-                LaunchPickerOutcome::Launch {
-                    alias: self.alias.clone(),
-                    model: model.id.clone(),
-                    reasoning: self.reasoning_for_launch(),
-                    extra_args: self.extra_argv(),
-                }
-            }
+            KeyCode::Enter => self.launch_outcome(),
             KeyCode::Backspace if self.extra_cursor > 0 => {
                 self.extra_cursor -= 1;
                 let mut chars: Vec<char> = self.extra_args.chars().collect();
                 chars.remove(self.extra_cursor);
                 self.extra_args = chars.into_iter().collect();
+                self.extra_error = None;
                 LaunchPickerOutcome::Continue
             }
             KeyCode::Delete => {
@@ -318,6 +321,7 @@ impl ProviderLaunchState {
                 if self.extra_cursor < chars.len() {
                     chars.remove(self.extra_cursor);
                     self.extra_args = chars.into_iter().collect();
+                    self.extra_error = None;
                 }
                 LaunchPickerOutcome::Continue
             }
@@ -335,12 +339,67 @@ impl ProviderLaunchState {
                 let mut chars: Vec<char> = self.extra_args.chars().collect();
                 chars.insert(self.extra_cursor, c);
                 self.extra_args = chars.into_iter().collect();
+                self.extra_error = None;
                 self.extra_cursor += 1;
                 LaunchPickerOutcome::Continue
             }
             _ => LaunchPickerOutcome::Continue,
         }
     }
+}
+
+/// Parse the TUI's portable argument syntax without applying shell expansion.
+/// Backslashes always remain literal; use JSON to include quote characters.
+fn parse_extra_args(input: &str) -> Result<Vec<String>, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    if input.starts_with('[') {
+        let args: Vec<String> = serde_json::from_str(input)
+            .map_err(|error| format!("invalid JSON argument array: {error}"))?;
+        if args.iter().any(|arg| arg.contains('\0')) {
+            return Err("arguments cannot contain NUL characters".into());
+        }
+        return Ok(args);
+    }
+
+    let mut args = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut started = false;
+    for ch in input.chars() {
+        if ch == '\0' {
+            return Err("arguments cannot contain NUL characters".into());
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+                started = true;
+            } else {
+                token.push(ch);
+                started = true;
+            }
+        } else if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            started = true;
+        } else if ch.is_whitespace() {
+            if started {
+                args.push(std::mem::take(&mut token));
+                started = false;
+            }
+        } else {
+            token.push(ch);
+            started = true;
+        }
+    }
+    if quote.is_some() {
+        return Err("unclosed quote in extra arguments".into());
+    }
+    if started {
+        args.push(token);
+    }
+    Ok(args)
 }
 
 pub fn render_provider_launch(
@@ -356,12 +415,12 @@ pub fn render_provider_launch(
         LaunchKind::Provider => (
             "Provider  ",
             "Launch provider",
-            "Pick a saved model. Reasoning applies to this launch only.",
+            "Reasoning is launch-only; args accept quotes or JSON (for literal quotes).",
         ),
         LaunchKind::Account => (
             "Account   ",
             "Launch account",
-            "Pick a Codex model, or the default. Reasoning and extra args apply to this launch only.",
+            "Pick a Codex model/default. Args accept quotes or JSON (for literal quotes).",
         ),
     };
     lines.push(Line::from(vec![
@@ -419,6 +478,10 @@ pub fn render_provider_launch(
         Span::styled("   (this session)", dim()),
     ]));
     hits.push(Some(OverlayClick::LaunchArgs));
+    if let Some(error) = &state.extra_error {
+        lines.push(Line::from(Span::styled(error.clone(), base().fg(C_RED))));
+        hits.push(None);
+    }
     lines.push(Line::from(""));
     hits.push(None);
     lines.push(Line::from(vec![
@@ -626,6 +689,89 @@ mod tests {
             panic!("enter should launch");
         };
         assert_eq!(extra_args, ["exec", "--json", "hi"]);
+    }
+
+    #[test]
+    fn picker_preserves_windows_paths_and_quoted_argument_boundaries() {
+        let mut picker = ProviderLaunchState::from_profile(&profile());
+        picker.extra_args = r#"--cd "D:\My Work" --network "\\server\share" --tail "C:\path with spaces\" --label 'two words'"#.into();
+        let LaunchPickerOutcome::Launch { extra_args, .. } = picker.handle_key(KeyCode::Enter)
+        else {
+            panic!("valid quoted args should launch");
+        };
+        assert_eq!(
+            extra_args,
+            [
+                "--cd",
+                r"D:\My Work",
+                "--network",
+                r"\\server\share",
+                "--tail",
+                r"C:\path with spaces\",
+                "--label",
+                "two words"
+            ]
+        );
+    }
+
+    #[test]
+    fn picker_accepts_json_array_and_refuses_invalid_input_without_losing_it() {
+        let mut picker = ProviderLaunchState::from_profile(&profile());
+        picker.extra_args = r#"["--cd","D:\\My Work","--label","a \"quoted\" value"]"#.into();
+        let LaunchPickerOutcome::Launch { extra_args, .. } = picker.handle_key(KeyCode::Enter)
+        else {
+            panic!("valid JSON args should launch");
+        };
+        assert_eq!(
+            extra_args,
+            ["--cd", r"D:\My Work", "--label", "a \"quoted\" value"]
+        );
+
+        picker.extra_args = "[\"unfinished\"] trailing".into();
+        assert!(matches!(
+            picker.handle_key(KeyCode::Enter),
+            LaunchPickerOutcome::Continue
+        ));
+        assert_eq!(picker.extra_args, "[\"unfinished\"] trailing");
+        assert!(
+            picker
+                .extra_error
+                .as_deref()
+                .is_some_and(|error| error.contains("JSON"))
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_provider_launch(
+                    frame,
+                    &mut picker,
+                    frame.area(),
+                    &mut crate::tui::hitmap::HitMap::default(),
+                )
+            })
+            .unwrap();
+        let joined = (0..20)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("invalid JSON argument array"), "{joined}");
+
+        picker.extra_args = r#"--cd "D:\My Work" --label 'unfinished"#.into();
+        assert!(matches!(
+            picker.handle_key(KeyCode::Enter),
+            LaunchPickerOutcome::Continue
+        ));
+        assert_eq!(
+            picker.extra_args,
+            r#"--cd "D:\My Work" --label 'unfinished"#
+        );
+        assert!(
+            picker
+                .extra_error
+                .as_deref()
+                .is_some_and(|error| error.contains("unclosed"))
+        );
+        assert!(picker.extra_editing);
     }
 
     #[test]

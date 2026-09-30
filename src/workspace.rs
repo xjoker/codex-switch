@@ -182,6 +182,7 @@ pub(crate) async fn refresh_for_auth_if_needed(
     else {
         return Ok(None);
     };
+    crate::auth::ensure_chatgpt_backend_supported("refresh ChatGPT workspace metadata")?;
     let client = crate::auth::build_http_client()?;
     remember_workspace_name(&client, access_token, Some(account_id), info.is_fedramp).await
 }

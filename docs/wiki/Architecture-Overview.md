@@ -36,6 +36,8 @@ Configuration is loaded once from `config.toml`. An existing unreadable or inval
 
 [`src/auth.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/auth.rs) resolves `CODEX_HOME`, validates the Codex credential-store contract, reads and atomically writes authentication JSON, rotates live-auth backups, and builds network clients. It does not own profile selection.
 
+[`src/auth_policy.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/auth_policy.rs) evaluates authentication constraints without editing their sources. Managed defaults and system/macOS MDM requirements are resolved separately so ordinary configuration cannot override requirements. File-backed ChatGPT login and backend requests check the relevant constraints before side effects. Token refresh checks before sending the one-time token; persistence of an already-issued replacement remains a recovery obligation.
+
 [`src/profile.rs`](https://github.com/xjoker/codex-switch/blob/dev/src/profile.rs) owns aliases, identity deduplication, imports, recoverable deletion, current-profile tracking, and switching. Two file locks protect distinct operations:
 
 - `auth.lock` serializes replacement or synchronization of the live `auth.json`.

@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ColorMode {
@@ -114,7 +115,7 @@ pub enum ProviderCommand {
     after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, launch, warmup, reset-card, rename, delete, login, import, self-update, provider add/list/show/rename/remove/fetch-models/probe)
+    /// Output as compact JSON (supported by list, use, launch, warmup, reset-card, rename, delete, login, import, self-update, doctor, provider add/list/show/rename/remove/fetch-models/probe)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -226,6 +227,15 @@ pub enum Commands {
         #[arg(long, conflicts_with = "dev")]
         stable: bool,
     },
+    /// Report Codex executable versions and minimum-version compatibility
+    #[command(
+        after_help = "`--desktop-codex` must point directly to the bundled Codex engine executable; the desktop app's marketing version is not an engine version. This command never searches private desktop application data. Versions newer than the aligned baseline pass the minimum check but are reported as unverified. Matching versions indicate an aligned core only; CLI and desktop capabilities and app-server/daemon behavior can differ."
+    )]
+    Doctor {
+        /// Explicit Codex engine executable bundled with a desktop installation
+        #[arg(long, value_name = "PATH")]
+        desktop_codex: Option<PathBuf>,
+    },
     /// Send a minimal request to activate the 5h quota window for one or all profiles
     ///
     /// Fresh paid accounts show no reset timer until their first real request.
@@ -239,7 +249,7 @@ pub enum Commands {
         /// Profile alias to warm up (omit to warm up all profiles)
         alias: Option<String>,
     },
-    /// Launch Codex CLI with the best (or specified) ChatGPT profile's auth, or with a custom API provider
+    /// Launch Codex CLI (requires a detected version of at least 0.159.2) with a ChatGPT profile or custom API provider
     #[command(
         after_help = "ChatGPT profile: its auth.json is staged for the session and restored after `[launch] restore_delay_secs`. When `codex --help` lists `--no-daemon` (Codex 0.156+), it is prepended so the session reads that file instead of joining the shared app-server daemon. That help probe is bounded to 10 seconds; if it fails, times out or returns no usable help, launch refuses before staging any credentials.\nCustom provider alias: auth.json is not swapped and config.toml is not rewritten. Codex starts in the normal CODEX_HOME with a native per-run `--profile cs-*` and the key in the child environment. A saved `provider probe` result that marks the model unsupported is re-checked live once before launch can refuse. Auto-select (no alias) is ChatGPT-only.\n\nCodex argv is everything after `--`, a known Codex subcommand (`exec`, `resume`, …), or a flag that is not a launch/codex-switch option (`-s`, `--sandbox`, …). Tokens on both sides of `--` are kept (so `launch work exec -- --json` still runs `exec`).\nUse `--` when the Codex argv starts with a prompt, or with a flag that also exists on codex-switch (`--json`, `--color`, `--model`).\n\nExamples:\n  codex-switch launch work -- exec --json \"review this\"\n  codex-switch launch work exec -- --json \"review this\"\n  codex-switch launch exec --json \"do the thing\"\n  codex-switch launch openrouter -- -s workspace-write -a never\n\n`--model` before `--` selects a saved provider model, or is forwarded as Codex `--model` for a ChatGPT profile. `--model` after `--` is Codex's own flag.\n`--json launch` prints one JSON envelope after Codex exits (Codex stdout/stderr are captured into that envelope, not mixed onto stdout)."
     )]

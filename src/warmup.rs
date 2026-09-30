@@ -754,6 +754,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
         debug!("[{alias}] no 5h window, skipping warmup");
         return Ok(WarmupOutcome::SkippedNoFiveHour);
     }
+    crate::auth::ensure_chatgpt_backend_supported(&format!("warm up ChatGPT profile '{alias}'"))?;
     let additional_limits = usage
         .map(|usage| usage.additional_limits)
         .unwrap_or_default();
@@ -1007,6 +1008,9 @@ pub(crate) async fn fetch_models_for_profile(
     alias: &str,
     profile_path: &Path,
 ) -> Result<Vec<ModelEntry>> {
+    crate::auth::ensure_chatgpt_backend_supported(&format!(
+        "fetch models for ChatGPT profile '{alias}'"
+    ))?;
     let val = crate::auth::read_auth(profile_path)
         .map_err(|e| anyhow::anyhow!("{alias}: cannot read auth: {e}"))?;
 

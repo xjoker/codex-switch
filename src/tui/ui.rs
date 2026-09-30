@@ -1334,7 +1334,25 @@ fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    if let Some(s) = &app.status_msg {
+    let load_warning = app
+        .profile_load_error
+        .as_deref()
+        .map(|error| format!("Account data stale/incomplete: {error}"))
+        .into_iter()
+        .chain(
+            app.provider_load_error
+                .as_deref()
+                .map(|error| format!("Provider data stale/incomplete: {error}")),
+        )
+        .collect::<Vec<_>>()
+        .join("; ");
+    if !load_warning.is_empty() {
+        let msg = Line::from(Span::styled(
+            load_warning,
+            base().fg(C_RED).add_modifier(Modifier::BOLD),
+        ));
+        f.render_widget(Paragraph::new(msg).style(base()), area);
+    } else if let Some(s) = &app.status_msg {
         let msg = Line::from(Span::styled(
             s.as_str(),
             base().fg(status_message_color(app.status_is_error)),
@@ -1819,6 +1837,8 @@ fn format_auto_refresh_remaining(secs: u64) -> String {
 
 fn status_bar_height(app: &App, width: u16) -> usize {
     if app.status_msg.is_some()
+        || app.profile_load_error.is_some()
+        || app.provider_load_error.is_some()
         || app.rename.is_some()
         || app.provider_form.is_some()
         || app.provider_launch.is_some()
@@ -1837,9 +1857,9 @@ fn status_bar_height(app: &App, width: u16) -> usize {
 mod tests {
     use super::{
         C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, DIM, credits_table_color,
-        credits_table_text, plan_color, render_account_table, render_usage_gauges,
-        reset_cards_color, reset_cards_table_state, status_message_color, table_text_widths,
-        usage_gauges_height, version_area,
+        credits_table_text, plan_color, render_account_table, render_status_bar,
+        render_usage_gauges, reset_cards_color, reset_cards_table_state, status_bar_height,
+        status_message_color, table_text_widths, usage_gauges_height, version_area,
     };
     use crate::jwt::AccountInfo;
     use crate::tui::app::{AccountEntry, App, Tab, UsageStatus};
@@ -1866,6 +1886,35 @@ mod tests {
     fn status_message_color_distinguishes_errors_from_information() {
         assert_eq!(status_message_color(false), C_CYAN);
         assert_eq!(status_message_color(true), C_RED);
+    }
+
+    #[test]
+    fn persistent_load_warning_overrides_transient_status_until_reload_succeeds() {
+        let mut app = App::new();
+        app.profile_load_error = Some("could not read profile directory".into());
+        app.status_msg = Some("A later informational message".into());
+        app.status_is_error = false;
+        assert_eq!(status_bar_height(&app, 100), 1);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
+            .unwrap();
+        let rendered = row_text(terminal.backend(), 0);
+        assert!(
+            rendered.contains("Account data stale/incomplete"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("A later informational message"),
+            "{rendered}"
+        );
+
+        app.profile_load_error = None;
+        terminal
+            .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
+            .unwrap();
+        assert!(row_text(terminal.backend(), 0).contains("A later informational message"));
     }
 
     #[test]

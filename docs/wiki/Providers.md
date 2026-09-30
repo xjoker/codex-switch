@@ -75,6 +75,8 @@ Older single-`model` files still load: the model becomes the only `[[models]]` e
 
 ## Launch Codex with a provider
 
+Providers use the saved API key through the generated `env_key`. Overrides adding `model_providers.<id>.auth`, including `auth.command`, conflict with this authentication mode and are rejected when saving, loading or launching. `provider add` checks this before reading a key or fetching models. Overrides for an unrelated provider are not treated as the active provider's authentication.
+
 Name the provider alias. Auto-select (`launch` with no alias) stays ChatGPT-only.
 
 ```bash
@@ -179,6 +181,10 @@ Add and edit use the same form. Add starts typing the alias immediately; Enter c
 The stored key is never rendered in the table. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, optional extra Codex argv (Tab), and a one-shot reasoning override, then Enter (or `o`) starts Codex. On the Providers list, Enter also opens that picker; `e` edits (including env key, wire API, and extra `-c` overrides). `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
 
 ## Storage and security
+
+The TUI launch picker's extra argv field accepts quoted arguments such as `--cd "D:\My Work"` or a JSON string array such as `["--cd","D:\\My Work"]`. Backslashes in quoted text remain literal, including UNC prefixes and trailing directory separators; use the JSON array to express an argument containing quote characters. No shell expansion is performed. Invalid input stays in the picker with an error and does not launch Codex.
+
+If reading saved account or provider data fails, the TUI keeps the last loaded rows and displays a stale or incomplete-list warning until a successful reload. A damaged provider file retains its previously loaded row when available. Refresh actions that depend on a successful reload are skipped after a failure.
 
 | Location | Purpose |
 |---|---|

@@ -10,10 +10,12 @@ pub use entry::run_cli;
 
 pub mod app_server;
 pub mod auth;
+pub mod auth_policy;
 #[allow(dead_code)]
 mod cache;
 #[allow(dead_code)]
 mod cli;
+pub mod codex_compat;
 #[allow(dead_code)]
 mod color;
 #[allow(dead_code)]

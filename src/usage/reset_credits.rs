@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rand::Rng;
 use serde_json::Value;
 use tracing::debug;
@@ -100,26 +100,69 @@ impl std::error::Error for ConsumeResetCreditError {
     }
 }
 
-fn reset_credits_url() -> String {
-    if let Ok(url) = std::env::var("CS_RESET_CREDITS_URL") {
-        return url;
-    }
-    if let Ok(url) = std::env::var("CS_USAGE_URL")
-        && let Some(base) = url.strip_suffix("/usage")
-    {
-        return format!("{base}/rate-limit-reset-credits");
-    }
-    RESET_CREDITS_URL.to_string()
+fn reset_credits_url() -> Result<String> {
+    let reset_override = std::env::var("CS_RESET_CREDITS_URL").ok();
+    let usage_override = std::env::var("CS_USAGE_URL").ok();
+    reset_url_from_overrides(reset_override.as_deref(), usage_override.as_deref())
 }
 
-fn reset_credits_consume_url() -> String {
-    if let Ok(url) = std::env::var("CS_RESET_CREDITS_CONSUME_URL") {
-        return url;
+fn reset_credits_consume_url() -> Result<String> {
+    let consume_override = std::env::var("CS_RESET_CREDITS_CONSUME_URL").ok();
+    let reset_override = std::env::var("CS_RESET_CREDITS_URL").ok();
+    let usage_override = std::env::var("CS_USAGE_URL").ok();
+    consume_url_from_overrides(
+        consume_override.as_deref(),
+        reset_override.as_deref(),
+        usage_override.as_deref(),
+    )
+}
+
+fn reset_url_from_overrides(reset_url: Option<&str>, usage_url: Option<&str>) -> Result<String> {
+    if let Some(url) = reset_url {
+        return Ok(url.to_string());
     }
-    if std::env::var("CS_RESET_CREDITS_URL").is_ok() {
-        return format!("{}/consume", reset_credits_url().trim_end_matches('/'));
+    let Some(url) = usage_url else {
+        return Ok(RESET_CREDITS_URL.to_string());
+    };
+    derive_url_with_suffix(url, "/usage", "/rate-limit-reset-credits")
+        .context("CS_USAGE_URL must be a valid URL ending in /usage to derive reset-credit URL")
+}
+
+fn consume_url_from_overrides(
+    consume_url: Option<&str>,
+    reset_url: Option<&str>,
+    usage_url: Option<&str>,
+) -> Result<String> {
+    if let Some(url) = consume_url {
+        return Ok(url.to_string());
     }
-    RESET_CREDITS_CONSUME_URL.to_string()
+    if let Some(url) = reset_url {
+        return derive_child_url(url, "consume")
+            .context("CS_RESET_CREDITS_URL must be a valid URL to derive consume URL");
+    }
+    if let Some(url) = usage_url {
+        let reset_url = derive_url_with_suffix(url, "/usage", "/rate-limit-reset-credits")
+            .context("CS_USAGE_URL must be a valid URL ending in /usage to derive consume URL")?;
+        return derive_child_url(&reset_url, "consume");
+    }
+    Ok(RESET_CREDITS_CONSUME_URL.to_string())
+}
+
+fn derive_url_with_suffix(url: &str, expected_suffix: &str, replacement: &str) -> Result<String> {
+    let mut parsed = reqwest::Url::parse(url)?;
+    let path = parsed.path().trim_end_matches('/');
+    let prefix = path
+        .strip_suffix(expected_suffix)
+        .context("URL path does not have the expected suffix")?;
+    parsed.set_path(&format!("{prefix}{replacement}"));
+    Ok(parsed.to_string())
+}
+
+fn derive_child_url(url: &str, child: &str) -> Result<String> {
+    let mut parsed = reqwest::Url::parse(url)?;
+    let path = parsed.path().trim_end_matches('/');
+    parsed.set_path(&format!("{path}/{child}"));
+    Ok(parsed.to_string())
 }
 
 pub(crate) fn should_fetch_reset_credit_details(usage: &UsageInfo) -> bool {
@@ -169,6 +212,7 @@ pub async fn refresh_reset_credits_for_profile(
     alias: &str,
     profile_path: &Path,
 ) -> Result<(Option<u64>, Vec<ResetCredit>)> {
+    auth::ensure_chatgpt_backend_supported("refresh reset credits")?;
     let val = auth::read_auth(profile_path)?;
     let (access_token, _) = auth::extract_tokens(&val);
     let access_token = access_token.ok_or_else(|| anyhow::anyhow!("{alias}: no access_token"))?;
@@ -288,7 +332,7 @@ async fn fetch_reset_credits_with_routing(
         access_token,
         account_id,
         is_fedramp,
-        &reset_credits_url(),
+        &reset_credits_url()?,
     )
     .await
 }
@@ -423,6 +467,7 @@ pub fn earliest_reset_credit(credits: &[ResetCredit]) -> Option<&ResetCredit> {
 }
 
 pub async fn fetch_earliest_reset_credit(alias: &str, profile_path: &Path) -> Result<ResetCredit> {
+    auth::ensure_chatgpt_backend_supported("fetch reset credit")?;
     let val = auth::read_auth(profile_path)?;
     let (access_token, _) = auth::extract_tokens(&val);
     let access_token = access_token
@@ -448,6 +493,8 @@ pub async fn consume_reset_credit_by_id(
     profile_path: &Path,
     credit_id: &str,
 ) -> std::result::Result<ConsumedResetCredit, ConsumeResetCreditError> {
+    auth::ensure_chatgpt_backend_supported("consume reset credit")
+        .map_err(ConsumeResetCreditError::not_consumed)?;
     consume_reset_credit_selected(alias, profile_path, credit_id).await
 }
 
@@ -508,13 +555,14 @@ async fn consume_reset_credit_with_routing(
     is_fedramp: bool,
     credit: ResetCredit,
 ) -> std::result::Result<ConsumedResetCredit, ConsumeResetCreditError> {
+    let consume_url = reset_credits_consume_url().map_err(ConsumeResetCreditError::not_consumed)?;
     consume_reset_credit_at_url_with_routing(
         client,
         access_token,
         account_id,
         is_fedramp,
         credit,
-        &reset_credits_consume_url(),
+        &consume_url,
     )
     .await
 }
@@ -697,6 +745,38 @@ pub(super) fn parse_reset_credits_summary(body: &Value) -> (Option<u64>, Vec<Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consume_url_derives_from_usage_override_without_falling_back_to_production() {
+        assert_eq!(
+            consume_url_from_overrides(
+                None,
+                None,
+                Some("https://test.invalid/backend-api/wham/usage?tenant=x"),
+            )
+            .unwrap(),
+            "https://test.invalid/backend-api/wham/rate-limit-reset-credits/consume?tenant=x"
+        );
+        assert!(consume_url_from_overrides(None, None, Some("not a URL")).is_err());
+    }
+
+    #[test]
+    fn explicit_consume_url_has_precedence_and_reset_url_derives_consume_path() {
+        assert_eq!(
+            consume_url_from_overrides(
+                Some("http://127.0.0.1:9/custom/consume"),
+                Some("not a URL"),
+                Some("not a URL"),
+            )
+            .unwrap(),
+            "http://127.0.0.1:9/custom/consume"
+        );
+        assert_eq!(
+            consume_url_from_overrides(None, Some("https://test.invalid/reset/?tenant=x"), None,)
+                .unwrap(),
+            "https://test.invalid/reset/consume?tenant=x"
+        );
+    }
 
     #[test]
     fn unknown_main_summary_preserves_only_unexpired_cached_cards() {

@@ -35,6 +35,10 @@ codex-switch tui
 
 无浏览器服务器使用 `codex-switch login --device`。
 
+ChatGPT 文件登录需要 `cli_auth_credentials_store = "file"`。登录、导入、切换及对应后端请求会预检有效的系统/MDM 认证策略；普通配置不能放宽管理员的登录方式、工作区或存储要求。存在 `OPENAI_FEDERATION_RULE_ID` 或 `OPENAI_IDENTITY_TOKEN_FILE`（即使为空）时，Codex 会优先选择工作负载身份联合认证，因此文件登录操作会被拒绝；工具不会删除这些变量或改写企业策略。不支持的自定义 `chatgpt_base_url` 会在请求前明确报错。API 提供方使用独立的密钥启动路径。
+
+`codex-switch launch` 的项目支持基线是 Codex CLI 0.159.2 或更新版本。先用 `codex-switch doctor` 检查 PATH 中实际解析到的 CLI；这是本项目的支持基线，不表示旧版 Codex 一定无法独立工作。桌面版可能使用另一个引擎，可用 `codex-switch doctor --desktop-codex <桌面版内置引擎路径>` 单独检查，不会自动搜索桌面安装。Windows 下 WSL 默认使用独立 Linux home，不会自动共享 Windows Codex app 的配置、认证和会话；参见 OpenAI 的 [Windows app 与 WSL 说明](https://learn.chatgpt.com/docs/windows/windows-app)。
+
 已有 `auth.json` 备份可导入：
 
 ```bash
@@ -59,6 +63,7 @@ codex-switch import ~/auth-backups
 - `use` 和 Accounts 页的 `u` 切换 ChatGPT 的 `$CODEX_HOME/auth.json`，并将用户 `config.toml` 顶层及其默认 `profile` 中已有的 `model_provider` 选择改回 `openai`；保留模型、提供方定义、MCP 和注释。**不能**用提供方别名执行 `use`。
 - 若另行启动仍请求第三方地址，检查启动参数、项目 `.codex/config.toml`、额外指定的 Codex profile，以及 `openai_base_url` / `OPENAI_BASE_URL` 地址覆盖；这些不由账号切换修改。
 - `use` 不会后台自动换号。Codex 0.157 起交互会话挂在共享的 app-server daemon 上，它只在启动时读一次 `auth.json`，所以 daemon 在运行时 `use` / `login` 会自动执行 `codex app-server daemon restart`（挂在上面的会话会重连到新账号，进行中的回合会被打断；每次 daemon 调用最多等 15 秒，超时按重启失败提示。不想被打断可在 `config.toml` 设 `[use] restart_app_server = false` 或在 TUI 设置页关闭，此时只提示手动命令）；`codex exec` 或 `--no-daemon` 的进程不会读取新的 `auth.json`，需重启 Codex，或用 `launch` 开新进程（Codex 的 `--help` 列出 `--no-daemon` 时，ChatGPT 的 launch 会自动加上；已带 `--no-daemon`、`--remote` 或 `agents` 的参数原样传递；这次 `--help` 探测最多等 10 秒，若无法判断路由，launch 会在写入任何凭据之前直接拒绝）。判断 `auth.json` 是否变化时比较的是规范化后的 JSON，仅格式变化（例如 Codex 自己刷新 Token 后重写文件）或重新选中已在用的账号都不会重启 daemon；Windows 上目录 ACL 已经是加固状态时不再重复写入，所以切换很快。
+- `launch` 会先对同一个已解析的 PATH Codex CLI 执行最低版本检查；低于 0.159.2、版本未知或探测失败都会在选择账号、消耗重置卡、创建 provider run 或写入凭据前拒绝启动。4 秒版本探测使用临时 `CODEX_HOME`；原有 `codex --help` 能力探测仍单独保留。版本 0.159.2 是本项目支持基线，不是断言更旧 Codex 无法独立工作。
 - Codex 参数写在 `--` 后面：`codex-switch launch work -- exec --json "…"`。`exec` / `resume` 等 Codex 子命令也可以直接跟在 `launch` 后面，不必再写 `--`。`--` 两侧的参数都会保留。prompt 看起来像别名时仍须 `--`。
 - 当前 Codex 没有 `--full-auto`；用 `-a never`、`--sandbox` 或 `--dangerously-bypass-approvals-and-sandbox`。
 - 池子耗尽时，交互式 `use` / `launch` 可提示消耗重置卡；脚本须显式加 `--consume-card`。
@@ -70,6 +75,15 @@ codex-switch import ~/auth-backups
 如果旧版本安装过 daemon，升级前必须用旧版本依次运行 `codex-switch daemon stop`、`codex-switch daemon status`、`codex-switch daemon uninstall`，并在系统计划任务中确认旧任务已删除。新版本没有兼容 daemon 命令，也不会自动清理系统任务；完整迁移说明见 [Updating](Updating#migrate-from-the-removed-daemon)。
 
 ## 自定义 API 提供方
+
+检查 PATH CLI 以及可选的桌面内置引擎：
+
+```bash
+codex-switch doctor
+codex-switch doctor --desktop-codex <桌面版内置引擎路径>
+```
+
+未提供桌面路径会报告 `not_checked`，不会失败。未知/低于最低版本会失败并输出诊断；两个引擎都达到最低版本但 core/prerelease 版本不同时，只报告差异，build metadata 差异不算版本不匹配。更高版本会标为 `above_baseline_unverified`。`doctor` 只检查可执行文件版本，不检查认证、系统/managed policy、桌面 UI 或 daemon 兼容性；版本差异不代表这些路径已验证。`--json doctor` 提供结构化结果；详见英文 [Command reference](Command-Reference)。
 
 一个提供方 = **一个端点 URL + 一把 API 密钥 + 多个模型**。别名（Alias）是唯一对用户可见的名称；思考等级（reasoning）与 `web_search` 按**模型**保存，不是按整个提供方。
 
@@ -118,11 +132,14 @@ codex-switch launch openrouter -- -s workspace-write -a never
 - Codex 目前只支持 `wire_api = "responses"`；DeepSeek 官方 Chat Completions API 不能直连，须走 OpenRouter 等网关。同一网关上 `/models` 有 slug 也不等于 `/responses` 能用。`provider probe` 只 POST `{"model":"..."}`（不带 `input`），不走补全。探测结果保存 7 天；`launch` 遇到已保存的“不支持”结论时不会直接拒绝，而是先做一次实时探测：仅在再次确认不支持时才拒绝，探测结果为支持则放行并更新记录，结果不确定或请求失败则放行并在 stderr 给出警告、清除该过期结论。
 - 提供方 `launch` 不再使用隔离的 Codex home，而是在共享的 `$CODEX_HOME` 中为每次运行生成 `cs-*.config.toml` 并用 `--profile` 选中，只保存本次的模型、提供方和目录；MCP、skills、插件、hooks、提示词和会话都直接用你现有的，不需要复制或退出时合并，也不会改写用户 `config.toml` 里的 ChatGPT 键。可同时开多个提供方。不能再另行传入 `--profile` / `-p`。
 - 提供方 `http_headers` / `env_http_headers` 中的非 ASCII 头值现在可以正常使用，不会再让模型拉取、探测和指纹计算失败。
+- 提供方保存的 API key 通过 `env_key` 使用，不能同时为当前提供方设置 `auth` / `auth.command`；添加时会在读取密钥或拉取模型前拒绝这类配置。
 - `use` 与无别名的 `launch` 自动选号**仅面向 ChatGPT**，不会自动选提供方。
 - 提供方别名不能与 ChatGPT profile、其他提供方或 Codex 保留 id（`openai` / `ollama` / `lmstudio`）冲突。
 - 删除提供方**不可恢复**（不像 ChatGPT profile 会进 `deleted-profiles/`）。
 
 完整说明见英文 [Custom API providers](Providers)。
+
+TUI 启动的额外 argv 支持带引号参数（如 `--cd "D:\My Work"`）或 JSON 字符串数组（如 `["--cd","D:\\My Work"]`）。引号中的反斜杠保持原样，包括 UNC 路径和末尾目录分隔符；参数本身含引号时使用 JSON 数组。无效输入保留在编辑框并显示错误，不会启动。读取账号/提供方目录失败时保留已有列表并持续提示旧数据或不完整状态，成功重载后再消除提示。
 
 ## TUI 操作说明
 

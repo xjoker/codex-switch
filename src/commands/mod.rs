@@ -1,5 +1,6 @@
 #![allow(unused_imports)]
 
+mod doctor;
 mod import;
 mod login;
 mod misc;
@@ -9,6 +10,7 @@ mod render;
 mod update;
 
 pub(crate) use crate::launch::{launch_cmd, launch_for_tui};
+pub(crate) use doctor::doctor_cmd;
 pub(crate) use import::import_cmd;
 pub(crate) use login::login_cmd;
 pub(crate) use misc::{format_resync_confirm_prompt, open_cmd, reset_card_cmd, warmup_cmd};

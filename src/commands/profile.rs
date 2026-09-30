@@ -36,6 +36,8 @@ fn report_token_persist_failures(failures: &[usage::TokenPersistFailure]) {
 pub(crate) async fn use_cmd(alias: Option<&str>, json: bool, consume_card: bool) -> Result<()> {
     use std::io::IsTerminal;
 
+    auth::ensure_file_credentials_store()?;
+
     match alias {
         Some(a) => {
             if crate::provider::exists(a) {

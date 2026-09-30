@@ -87,6 +87,7 @@ fn unsaveable_rotation_reason(save_error: &anyhow::Error) -> String {
 // ── import ───────────────────────────────────────────────
 
 pub(crate) async fn import_cmd(path: &str, alias: Option<&str>, json: bool) -> Result<()> {
+    auth::ensure_file_credentials_store()?;
     let input = std::path::PathBuf::from(path);
     let files = profile::collect_import_files(&input)?;
 

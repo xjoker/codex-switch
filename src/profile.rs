@@ -455,15 +455,53 @@ fn update_profile_tokens_if_refresh_matches_after_launch(
     if refresh_token(&profile) != Some(presented_refresh_token) {
         return Ok(false);
     }
+    let original = profile.clone();
     let mut updated = profile;
     crate::auth::apply_tokens(&mut updated, id_token, access_token, new_refresh_token)?;
-    crate::auth::validate_managed_auth_value(&updated)?;
-    crate::auth::update_tokens(&profile_path, id_token, access_token, new_refresh_token)?;
+    if !refresh_identity_compatible(&original, &updated) {
+        anyhow::bail!("authenticated account changed during token refresh for profile '{alias}'");
+    }
+    // The refresh endpoint has already rotated this single-use credential.
+    // Persist the profile before consulting mutable managed policy again so a
+    // policy update during the request cannot discard the only usable token.
+    write_auth(&profile_path, &updated)?;
     if read_current() == alias {
-        let live = codex_auth_path()?;
-        let live_auth = read_auth(&live)?;
-        if refresh_token(&live_auth) == Some(presented_refresh_token) {
-            crate::auth::update_tokens(&live, id_token, access_token, new_refresh_token)?;
+        if let Err(error) = crate::auth::ensure_chatgpt_backend_supported(&format!(
+            "update live auth for refreshed profile '{alias}'"
+        )) {
+            tracing::warn!(
+                alias,
+                "refreshed credentials were saved to the profile, but live auth was not updated because current authentication policy disallows it: {error:#}"
+            );
+            return Ok(true);
+        }
+        if let Err(error) = crate::auth::validate_managed_auth_value(&updated) {
+            tracing::warn!(
+                alias,
+                "refreshed credentials were saved to the profile, but live auth was not updated because current workspace policy disallows it: {error:#}"
+            );
+            return Ok(true);
+        }
+        let live = crate::auth::codex_auth_path_unchecked()
+            .context("resolving live auth path after saving rotated profile credentials")?;
+        let live_auth = read_auth(&live).with_context(|| {
+            format!(
+                "profile '{alias}' has the rotated credentials saved, but live auth {} could not be read",
+                live.display()
+            )
+        })?;
+        if refresh_token(&live_auth) == Some(presented_refresh_token)
+            && refresh_identity_compatible(&original, &live_auth)
+        {
+            let mut live_updated = live_auth;
+            crate::auth::apply_tokens(&mut live_updated, id_token, access_token, new_refresh_token)
+                .context("applying rotated credentials to live auth after profile save")?;
+            write_auth(&live, &live_updated).with_context(|| {
+                format!(
+                    "profile '{alias}' has the rotated credentials saved, but live auth {} could not be updated",
+                    live.display()
+                )
+            })?;
         }
     }
     Ok(true)
@@ -596,6 +634,23 @@ fn ensure_same_account_identity(
         return Ok(());
     }
     anyhow::bail!("authenticated account does not match profile '{alias}'")
+}
+
+/// Refresh can legitimately add/remove an email claim while the stable
+/// account identity remains unchanged. Keep this weaker refresh-only rule
+/// separate from strict import/re-auth replacement checks.
+fn refresh_identity_compatible(
+    existing: &serde_json::Value,
+    refreshed: &serde_json::Value,
+) -> bool {
+    let existing = extract_identity(existing);
+    let refreshed = extract_identity(refreshed);
+    identities_compatible(
+        existing.account_id.as_deref(),
+        existing.email.as_deref(),
+        refreshed.account_id.as_deref(),
+        refreshed.email.as_deref(),
+    )
 }
 
 /// Find a profile with a strict match: both account_id AND email must be present and equal.
@@ -1535,6 +1590,8 @@ mod tests {
         old_home: Option<OsString>,
         old_codex_home: Option<OsString>,
         old_app_home: Option<OsString>,
+        old_federation_rule_id: Option<OsString>,
+        old_identity_token_file: Option<OsString>,
     }
 
     struct ThreadCleanup<G> {
@@ -1593,11 +1650,15 @@ mod tests {
             let old_home = std::env::var_os("HOME");
             let old_codex_home = std::env::var_os("CODEX_HOME");
             let old_app_home = std::env::var_os("CODEX_SWITCH_HOME");
+            let old_federation_rule_id = std::env::var_os("OPENAI_FEDERATION_RULE_ID");
+            let old_identity_token_file = std::env::var_os("OPENAI_IDENTITY_TOKEN_FILE");
 
             unsafe {
                 std::env::set_var("HOME", home.path());
                 std::env::set_var("CODEX_HOME", &codex_home);
                 std::env::set_var("CODEX_SWITCH_HOME", &app_home);
+                std::env::remove_var("OPENAI_FEDERATION_RULE_ID");
+                std::env::remove_var("OPENAI_IDENTITY_TOKEN_FILE");
             }
 
             Self {
@@ -1606,6 +1667,8 @@ mod tests {
                 old_home,
                 old_codex_home,
                 old_app_home,
+                old_federation_rule_id,
+                old_identity_token_file,
             }
         }
     }
@@ -1624,6 +1687,14 @@ mod tests {
                 match &self.old_app_home {
                     Some(value) => std::env::set_var("CODEX_SWITCH_HOME", value),
                     None => std::env::remove_var("CODEX_SWITCH_HOME"),
+                }
+                match &self.old_federation_rule_id {
+                    Some(value) => std::env::set_var("OPENAI_FEDERATION_RULE_ID", value),
+                    None => std::env::remove_var("OPENAI_FEDERATION_RULE_ID"),
+                }
+                match &self.old_identity_token_file {
+                    Some(value) => std::env::set_var("OPENAI_IDENTITY_TOKEN_FILE", value),
+                    None => std::env::remove_var("OPENAI_IDENTITY_TOKEN_FILE"),
                 }
             }
         }
@@ -1739,6 +1810,28 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         assert_eq!(crate::auth::read_auth(&live).unwrap(), next);
         assert_eq!(super::read_current(), "next");
+    }
+
+    #[test]
+    fn profile_layer_refuses_live_switch_when_federated_identity_is_present() {
+        let _env = TestEnv::new();
+        let first = realistic_auth_json("first@example.com", "acct_first", "a1", "r1");
+        let second = realistic_auth_json("second@example.com", "acct_second", "a2", "r2");
+        for (alias, value) in [("first", first), ("second", second)] {
+            let path = super::profile_auth_path(alias).unwrap();
+            super::ensure_profile_parent(&path).unwrap();
+            crate::auth::write_auth(&path, &value).unwrap();
+        }
+        super::switch_profile("first").unwrap();
+        let live_path = crate::auth::codex_auth_path_unchecked().unwrap();
+        let before = crate::auth::read_auth(&live_path).unwrap();
+        unsafe { std::env::set_var("OPENAI_IDENTITY_TOKEN_FILE", "") };
+
+        let error = super::switch_profile("second").unwrap_err();
+
+        assert!(error.to_string().contains("OPENAI_IDENTITY_TOKEN_FILE"));
+        assert_eq!(super::read_current(), "first");
+        assert_eq!(crate::auth::read_auth(&live_path).unwrap(), before);
     }
 
     #[test]
@@ -2070,6 +2163,87 @@ mod tests {
                 .pointer("/tokens/access_token")
                 .and_then(|v| v.as_str()),
             Some("a-new")
+        );
+    }
+
+    #[test]
+    fn rotated_profile_credentials_survive_policy_change_before_live_auth_update() {
+        let env = TestEnv::new();
+        let original = realistic_auth_json("alice@example.com", "acct_a", "a-old", "a-ref");
+        let path = super::profile_auth_path("alice").unwrap();
+        super::ensure_profile_parent(&path).unwrap();
+        crate::auth::write_auth(&path, &original).unwrap();
+        super::switch_profile("alice").unwrap();
+        let live_path = crate::auth::codex_auth_path().unwrap();
+
+        // Simulate enterprise policy changing while the refresh request is in
+        // flight. The already-rotated token must still reach its profile, while
+        // the newly forbidden file-backed live auth is left untouched.
+        let codex_home = env._home.path().join(".codex");
+        std::fs::write(
+            codex_home.join("config.toml"),
+            "cli_auth_credentials_store = 'keyring'\n",
+        )
+        .unwrap();
+
+        assert!(
+            super::update_profile_tokens_if_refresh_matches(
+                "alice",
+                "a-ref",
+                &make_jwt("alice@example.com", "acct_a"),
+                "a-new",
+                "a-ref-new"
+            )
+            .unwrap()
+        );
+
+        let saved = crate::auth::read_auth(&path).unwrap();
+        assert_eq!(
+            crate::auth::extract_tokens(&saved).1.as_deref(),
+            Some("a-ref-new")
+        );
+        let live = crate::auth::read_auth(&live_path).unwrap();
+        assert_eq!(
+            crate::auth::extract_tokens(&live).1.as_deref(),
+            Some("a-ref")
+        );
+    }
+
+    #[test]
+    fn rotated_profile_credentials_survive_new_workspace_restriction() {
+        let env = TestEnv::new();
+        let original = realistic_auth_json("alice@example.com", "acct_a", "a-old", "a-ref");
+        let path = super::profile_auth_path("alice").unwrap();
+        super::ensure_profile_parent(&path).unwrap();
+        crate::auth::write_auth(&path, &original).unwrap();
+        super::switch_profile("alice").unwrap();
+        let live_path = crate::auth::codex_auth_path().unwrap();
+
+        std::fs::write(
+            env._home.path().join(".codex/config.toml"),
+            "forced_chatgpt_workspace_id = 'acct_other'\n",
+        )
+        .unwrap();
+
+        assert!(
+            super::update_profile_tokens_if_refresh_matches(
+                "alice",
+                "a-ref",
+                &make_jwt("alice@example.com", "acct_a"),
+                "a-new",
+                "a-ref-new",
+            )
+            .unwrap()
+        );
+        let saved = crate::auth::read_auth(&path).unwrap();
+        assert_eq!(
+            crate::auth::extract_tokens(&saved).1.as_deref(),
+            Some("a-ref-new")
+        );
+        let live = crate::auth::read_auth(&live_path).unwrap();
+        assert_eq!(
+            crate::auth::extract_tokens(&live).1.as_deref(),
+            Some("a-ref")
         );
     }
 

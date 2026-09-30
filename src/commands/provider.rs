@@ -74,6 +74,9 @@ async fn add(
     }
 
     provider::validate_base_url(&base_url, allow_insecure_http)?;
+    let provider_id =
+        ProviderProfile::build(&alias, &base_url, Vec::new(), "preflight").provider_id;
+    provider::validate_provider_auth_overrides(&provider_id, &set)?;
     let api_key = read_api_key(&alias, api_key_stdin)?;
 
     let mut fetched_default = None;

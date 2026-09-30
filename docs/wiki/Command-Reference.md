@@ -8,9 +8,10 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 |---|---|
 | `login [--device] [alias]` | Add or reauthorize a profile through browser PKCE or device-code login. If the alias already exists, it is reauthorized; otherwise a new profile is created. |
 | `import <path> [alias]` | Validate and import one `auth.json`, or recursively scan a directory for JSON files. The alias applies to single-file imports only; directories auto-assign aliases. An account that is already saved (same file, or same `account_id` and email) is skipped instead of duplicated, so its single-use refresh token is not spent. |
+| `doctor [--desktop-codex <path>]` | Check the Codex executable resolved from `PATH` and, optionally, a desktop app's explicitly supplied bundled engine. Prints compatibility details; exits nonzero if the PATH CLI or supplied desktop engine is missing, unknown, or below the supported minimum. |
 | `list [-f]` | Show profiles, usage, and availability; `-f` / `--force` bypasses the cache. |
 | `use [alias] [--consume-card]` | Switch explicitly, or omit the alias to auto-select with the unified scoring algorithm. When the pool is exhausted, `--consume-card` consumes the earliest-expiring reset card to revive an account (auto-select only; ignored when an alias is given). |
-| `launch [alias] [--consume-card] [--model <id>] [-- <codex-args>]` | Start Codex with the best (or specified) ChatGPT profile's auth, or with a custom API provider when `alias` names one. A ChatGPT launch adds `--no-daemon` when `codex --help` lists it (see [Automation contract](#automation-contract)); for a ChatGPT profile, `--model` is forwarded to Codex as `--model`. Provider runs retain the default `CODEX_HOME` and use a separate native Codex profile for each run (`--profile cs-*`; validated with Codex 0.159.2); `resume` resolves only that provider's sessions and passes an exact session ID. `--last` follows Codex cwd/visibility filters, and bare `resume` opens a provider-scoped picker. For a provider, `--model` before `--` selects a saved model; after `--` it is Codex's own `--model`. A known Codex subcommand (`exec`, `resume`, …) can start the argv without `--`. Tokens on both sides of `--` are kept. Auto-select (no alias) is ChatGPT-only. |
+| `launch [alias] [--consume-card] [--model <id>] [-- <codex-args>]` | Requires a PATH Codex CLI at or above the supported minimum `0.159.2`, checked before account selection, reset-card consumption, provider run creation, or credential staging. This is the project's support baseline, not a statement that older Codex releases cannot work independently. Start Codex with the best (or specified) ChatGPT profile's auth, or with a custom API provider when `alias` names one. A ChatGPT launch adds `--no-daemon` when `codex --help` lists it (see [Automation contract](#automation-contract)); for a ChatGPT profile, `--model` is forwarded to Codex as `--model`. Provider runs retain the default `CODEX_HOME` and use a separate native Codex profile for each run (`--profile cs-*`); `resume` resolves only that provider's sessions and passes an exact session ID. `--last` follows Codex cwd/visibility filters, and bare `resume` opens a provider-scoped picker. For a provider, `--model` before `--` selects a saved model; after `--` it is Codex's own `--model`. A known Codex subcommand (`exec`, `resume`, …) can start the argv without `--`. Tokens on both sides of `--` are kept. Auto-select (no alias) is ChatGPT-only. |
 | `provider add <alias> --base-url <URL> (--model <id> \| --fetch-models)` | Save a custom API provider. HTTPS is required unless `--allow-insecure-http` is explicitly passed; the URL is validated before the API key is requested. `--model` is repeatable; the first is the default. `--fetch-models` imports chat slugs from `GET {base_url}/models` (embedding/reranker omitted; catalogs larger than 48 must use `--model` or TUI `f`). The API key is read from a hidden prompt, or from stdin with `--api-key-stdin` — never from argv. |
 | `provider list` | List saved providers (no keys). |
 | `provider show <alias>` | Show one provider; the key is redacted. |
@@ -30,7 +31,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 | Option | Environment variable | Behavior |
 |---|---|---|
-| `--json` | — | Compact structured output (supported by `list`, `use`, `launch`, `warmup`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`, `provider fetch-models`, `provider probe`). `launch --json` prints one envelope after Codex exits; each captured Codex stream is limited to 1 MiB and has a `*_truncated` flag. |
+| `--json` | — | Compact structured output (supported by `list`, `use`, `launch`, `warmup`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `doctor`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`, `provider fetch-models`, `provider probe`). `doctor --json` reports `ok`, `minimum_version`, `aligned_version`, required `runtime_note`, `path_cli`, `desktop_codex`, and (when both versions parse) `versions_match` plus `version_relation`; each executable report has `executable`, `version`, `status`, and optional `note`. `launch --json` prints one envelope after Codex exits; each captured Codex stream is limited to 1 MiB and has a `*_truncated` flag. |
 | `--json-pretty` | — | Indented structured output. |
 | `--proxy <URL>` | `CS_PROXY` | Override proxy configuration for this process; supports `http(s)://`, `socks4://`, `socks5://`, and `socks5h://` (remote DNS). |
 | `--color <auto\|always\|never>` | `CS_COLOR` | Control CLI terminal color. `NO_COLOR` disables CLI color regardless of this option. The TUI still paints its designed palette. |
@@ -50,6 +51,9 @@ Examples:
 
 ```bash
 codex-switch --json list
+codex-switch doctor
+codex-switch doctor --desktop-codex <path-to-desktop-codex-engine>
+codex-switch --json doctor --desktop-codex <path-to-desktop-codex-engine>
 codex-switch --json use work
 codex-switch launch work -- exec --json "review this"
 codex-switch launch work exec -- --json "review this"
@@ -63,6 +67,10 @@ codex-switch provider probe AI-KR
 codex-switch provider probe AI-KR --model deepseek-v4-flash
 codex-switch self-update --check
 ```
+
+The supported minimum and current alignment baseline are both Codex 0.159.2. `doctor` checks the `codex` executable resolved from `PATH`; it does not search for desktop installations. Pass `--desktop-codex <path>` to check a specific bundled engine as a separate executable. Omitting that option reports `not_checked` and does not fail. Status values are `not_checked`, `not_found`, `unknown`, `below_minimum`, `aligned`, and `above_baseline_unverified`. If both versions meet the minimum but differ by core version or prerelease, `versions_match` is `false` and the command succeeds with a note; build metadata alone does not make versions different. `version_relation` is `same` when their version precedence matches, `desktop_engine_newer` when the selected desktop engine is newer than the PATH CLI, or `desktop_engine_older` when it is older. A version newer than the alignment baseline is accepted but not fully verified. The version probe is bounded to 4 seconds and runs with a temporary `CODEX_HOME` so it does not initialize the user's Codex home. A PATH CLI or explicitly supplied engine that cannot be found, returns no usable version, times out, exits unsuccessfully, or is below minimum makes the report fail; JSON still prints one report before returning nonzero. `runtime_note` explains that matching versions do not guarantee matching app capabilities or daemon behavior. `doctor` checks executable versions only; it does not validate authentication, managed/system policy, desktop UI behavior, or daemon compatibility.
+
+`launch` applies the same minimum-version check to the resolved PATH executable for ChatGPT and custom-provider launches. It runs before account selection, consuming a reset card, creating a provider run, or staging credentials. The existing bounded `codex --help` probe remains in place to determine `--no-daemon` routing for ChatGPT launches.
 
 ## Provider
 

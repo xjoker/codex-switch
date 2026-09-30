@@ -132,7 +132,7 @@ pub async fn run_device_auth() -> Result<LoginTokens> {
     // Windows environments where that port may be blocked.
     let (listener, actual_port) = bind_callback_listener().await?;
     let actual_redirect = redirect_uri(actual_port);
-    let forced_workspace_ids = crate::auth::configured_forced_workspace_ids();
+    let forced_workspace_ids = crate::auth::configured_forced_workspace_ids()?;
     let authorize_url = build_authorize_url(
         &pkce.code_challenge,
         &state,

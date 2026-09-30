@@ -277,15 +277,41 @@ fn persist_refreshed_tokens(
     presented_refresh_token: &str,
     new_tokens: &RefreshedTokens,
 ) -> std::result::Result<(), UsageError> {
-    crate::profile::update_profile_tokens_if_refresh_matches(
+    let persisted = crate::profile::update_profile_tokens_if_refresh_matches(
         alias,
         presented_refresh_token,
         &new_tokens.id_token,
         &new_tokens.access_token,
         &new_tokens.refresh_token,
     )
-    .map(|_| ())
-    .map_err(|err| UsageError::token_persist_failed(alias, &err))
+    .map_err(|err| UsageError::token_persist_failed(alias, &err))?;
+    if !persisted {
+        // The outer retry loop also owns persistence for the captured rotation,
+        // while the inner request may already have persisted before replaying
+        // the new access token. Treat that exact byte-for-byte credential set
+        // as an idempotent success; any different profile state belongs to a
+        // concurrent winner and must abort this response.
+        let already_persisted = crate::profile::profile_auth_path(alias)
+            .ok()
+            .and_then(|path| auth::read_auth(&path).ok())
+            .is_some_and(|stored| {
+                auth::extract_id_token(&stored).as_deref() == Some(new_tokens.id_token.as_str())
+                    && auth::extract_tokens(&stored).0.as_deref()
+                        == Some(new_tokens.access_token.as_str())
+                    && auth::extract_tokens(&stored).1.as_deref()
+                        == Some(new_tokens.refresh_token.as_str())
+            });
+        if already_persisted {
+            return Ok(());
+        }
+        return Err(UsageError {
+            summary: "refresh superseded by a concurrent profile update".into(),
+            detail: format!(
+                "[{alias}] token refresh completed, but the profile no longer contains that exact rotated credential set; the response will not be used for another API request"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn resolve_refreshed_tokens(
@@ -590,6 +616,12 @@ async fn fetch_usage_retried_inner(
     } else {
         debug!("{alias}: {refresh:?} refresh, bypassing the usage cache");
     }
+
+    auth::ensure_chatgpt_backend_supported(&format!("fetch ChatGPT usage for profile '{alias}'"))
+        .map_err(|error| UsageError {
+        summary: "managed authentication policy".into(),
+        detail: format!("[{alias}] {error:#}"),
+    })?;
 
     let val = auth::read_auth(profile_path).map_err(|e| {
         let detail = format!("failed to read auth file {}: {e}", profile_path.display());
@@ -1123,6 +1155,12 @@ pub(crate) async fn do_refresh_token(
     current_access_token: Option<&str>,
     refresh_token: &str,
 ) -> Result<RefreshedTokens> {
+    // Check before presenting a single-use refresh token to the auth server.
+    // Once a response rotates it, persistence must be allowed to rescue the
+    // replacement instead of rejecting it on a later policy check.
+    auth::ensure_chatgpt_backend_supported(&format!(
+        "refresh ChatGPT credentials for profile '{alias}'"
+    ))?;
     let token_url = auth::token_url();
     debug!("[{alias}] sending token refresh request");
 

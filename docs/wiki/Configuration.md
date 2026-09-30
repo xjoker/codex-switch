@@ -12,7 +12,11 @@ The live Codex credential store must be file-backed because switching replaces `
 cli_auth_credentials_store = "file"
 ```
 
-Explicit `keyring`, `auto`, and `ephemeral` modes are rejected. A managed configuration with `forced_login_method = "api"` is also incompatible with ChatGPT login profiles.
+Explicit `keyring`, `auto`, and `ephemeral` modes are rejected. ChatGPT operations also check effective authentication requirements from the user configuration, legacy managed defaults, system `requirements.toml`, and forced macOS MDM preferences. Requirements override ordinary defaults; a user setting cannot relax an administrator's store, login-method or workspace restriction. Windows system requirements are read from `%ProgramData%\OpenAI\Codex\requirements.toml`; Unix systems use `/etc/codex/requirements.toml`.
+
+ChatGPT file-login operations are refused when `OPENAI_FEDERATION_RULE_ID` or `OPENAI_IDENTITY_TOKEN_FILE` is present, including an empty value, because Codex selects workload identity federation ahead of stored OAuth credentials. codex-switch does not unset these variables or edit managed policy. API provider keys remain a separate launch path.
+
+A managed configuration with `forced_login_method = "api"`, an allowlist excluding ChatGPT, or no permitted ChatGPT workspace is incompatible with ChatGPT login profiles. Non-default `chatgpt_base_url` routing is not supported; relevant ChatGPT requests are refused before network access rather than sent to the default backend. Unreadable, oversized or invalid policy is reported explicitly.
 
 ### Why only the file store is supported
 

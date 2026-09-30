@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,14 +15,15 @@ const MAX_BACKUPS: usize = 3;
 
 pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Upstream Codex version this release is contract-aligned with.
-pub(crate) const ALIGNED_CODEX_VERSION: &str = "0.159.2";
+pub(crate) use crate::codex_compat::ALIGNED_CODEX_VERSION;
 
 const CODEX_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 static CODEX_CLI_VERSION: OnceLock<String> = OnceLock::new();
 
 /// Use the same bounded local Codex version probe for request query parameters
 /// and the HTTP User-Agent. A malformed, missing, or unresponsive CLI falls
-/// back to the release's upstream contract version.
+/// back to the release's upstream contract version. This transport fallback
+/// is not used by launch compatibility checks or the doctor report.
 pub(crate) fn codex_cli_version() -> &'static str {
     CODEX_CLI_VERSION
         .get_or_init(detect_codex_cli_version)
@@ -32,45 +34,10 @@ fn detect_codex_cli_version() -> String {
     let Some(path) = crate::launch::command_on_path("codex") else {
         return ALIGNED_CODEX_VERSION.to_string();
     };
-    let command = codex_version_command(&path);
-    crate::app_server::output_with_timeout(command, CODEX_VERSION_PROBE_TIMEOUT)
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            parse_codex_cli_version(&format!("{stdout}\n{stderr}"))
-        })
+    crate::codex_compat::probe_executable_with_timeout(&path, CODEX_VERSION_PROBE_TIMEOUT)
+        .version
+        .map(|version| format!("{}.{}.{}", version.major, version.minor, version.patch))
         .unwrap_or_else(|| ALIGNED_CODEX_VERSION.to_string())
-}
-
-fn codex_version_command(path: &Path) -> Command {
-    let mut command = Command::new(path);
-    command.arg("--version");
-    command
-}
-
-fn parse_codex_cli_version(output: &str) -> Option<String> {
-    output.split_whitespace().find_map(|token| {
-        let candidate = token
-            .trim_matches(|character: char| {
-                !character.is_ascii_alphanumeric() && !matches!(character, '.' | '-' | '+')
-            })
-            .strip_prefix('v')
-            .unwrap_or(token.trim_matches(|character: char| {
-                !character.is_ascii_alphanumeric() && !matches!(character, '.' | '-' | '+')
-            }));
-        if !candidate.starts_with(|character: char| character.is_ascii_digit()) {
-            return None;
-        }
-        let version = semver::Version::parse(candidate).ok()?;
-        // Codex's reported contract version is the complete numeric release;
-        // prerelease/build decorations are not part of API version headers.
-        Some(format!(
-            "{}.{}.{}",
-            version.major, version.minor, version.patch
-        ))
-    })
 }
 
 /// User-Agent in the upstream shape: `codex_cli_rs/<version> (<os>; <arch>)`.
@@ -111,9 +78,21 @@ pub fn codex_auth_path() -> Result<PathBuf> {
     Ok(codex_home.join("auth.json"))
 }
 
-pub(crate) fn ensure_file_credentials_store() -> Result<()> {
+/// Resolve the filesystem location without consulting managed policy. Callers
+/// may use this only after performing the operation-specific policy check.
+pub(crate) fn codex_auth_path_unchecked() -> Result<PathBuf> {
     let codex_home = user_codex_home()?;
-    validate_cli_auth_credentials_store(&codex_home)
+    Ok(codex_home.join("auth.json"))
+}
+
+pub(crate) fn ensure_file_credentials_store() -> Result<()> {
+    ensure_chatgpt_backend_supported("use ChatGPT OAuth")
+}
+
+pub(crate) fn ensure_chatgpt_backend_supported(operation: &str) -> Result<()> {
+    let codex_home = user_codex_home()?;
+    crate::auth_policy::ensure_file_oauth_environment(operation)?;
+    crate::auth_policy::load_auth_policy(&codex_home)?.validate_file_oauth(operation)
 }
 
 fn codex_home_from_values(
@@ -139,111 +118,33 @@ fn codex_home_from_values(
 }
 
 fn validate_cli_auth_credentials_store(codex_home: &Path) -> Result<()> {
-    let Some((config_path, config)) = load_codex_config(codex_home)? else {
-        return Ok(());
-    };
-
-    match config.get("cli_auth_credentials_store") {
-        None => {}
-        Some(toml::Value::String(mode)) if mode == "file" => {}
-        Some(_) => anyhow::bail!(
-            "codex-switch requires file-based Codex credentials; set \
-             cli_auth_credentials_store = \"file\" in {}",
-            config_path.display()
-        ),
-    }
-
-    if config.get("forced_login_method").and_then(|v| v.as_str()) == Some("api") {
-        anyhow::bail!(
-            "Codex managed policy requires API key login, but codex-switch requires ChatGPT OAuth"
-        );
-    }
-    Ok(())
+    crate::auth_policy::ensure_file_oauth_environment("access live ChatGPT credentials")?;
+    crate::auth_policy::load_auth_policy(codex_home)?.validate_file_oauth("use ChatGPT OAuth")
 }
 
-fn load_codex_config(codex_home: &Path) -> Result<Option<(PathBuf, toml::Value)>> {
-    let config_path = codex_home.join("config.toml");
-    if !config_path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("reading {}", config_path.display()))?;
-    let config =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?;
-    Ok(Some((config_path, config)))
-}
-
+#[cfg(test)]
 fn validate_managed_auth_config(config: &toml::Value, account_id: Option<&str>) -> Result<()> {
-    if config.get("forced_login_method").and_then(|v| v.as_str()) == Some("api") {
-        anyhow::bail!(
-            "Codex managed policy requires API key login, but codex-switch requires ChatGPT OAuth"
-        );
-    }
-
-    let workspace_ids = forced_chatgpt_workspace_ids(config)?;
-    if workspace_ids.is_empty() {
-        return Ok(());
-    }
-
-    let account_id = account_id.ok_or_else(|| {
-        anyhow::anyhow!("login token has no workspace id required by Codex managed policy")
-    })?;
-    if !workspace_ids.iter().any(|id| id == account_id) {
-        anyhow::bail!(
-            "workspace {account_id} is not allowed by Codex forced_chatgpt_workspace_id policy"
-        );
-    }
-    Ok(())
+    let text = toml::to_string(config)?;
+    let policy = crate::auth_policy::resolve_from_texts(None, Some(&text), None, None, None)?;
+    policy.validate_file_oauth("use ChatGPT OAuth")?;
+    policy.validate_workspace(account_id)
 }
 
-fn forced_chatgpt_workspace_ids(config: &toml::Value) -> Result<Vec<String>> {
-    let workspace_ids: Vec<&str> = match config.get("forced_chatgpt_workspace_id") {
-        None => Vec::new(),
-        Some(toml::Value::String(id)) => vec![id.trim()],
-        Some(toml::Value::Array(ids)) => ids
-            .iter()
-            .map(|value| {
-                value.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("forced_chatgpt_workspace_id must contain only strings")
-                })
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .map(str::trim)
-            .collect(),
-        Some(_) => {
-            anyhow::bail!("forced_chatgpt_workspace_id must be a string or a list of strings")
-        }
-    };
-    Ok(workspace_ids
-        .into_iter()
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
-/// Workspace ids forced by Codex managed config — best-effort, empty when
-/// unset or unreadable. Used to pre-restrict the OAuth authorize page the
-/// same way Codex does via `allowed_workspace_id`.
-pub(crate) fn configured_forced_workspace_ids() -> Vec<String> {
-    let Ok(codex_home) = codex_home_from_values(std::env::var_os("CODEX_HOME"), dirs::home_dir())
-    else {
-        return Vec::new();
-    };
-    let Ok(Some((_path, config))) = load_codex_config(&codex_home) else {
-        return Vec::new();
-    };
-    forced_chatgpt_workspace_ids(&config).unwrap_or_default()
+/// Effective workspace ids permitted by Codex managed policy. Invalid or
+/// unreadable policy is an error so the OAuth authorize page is never opened
+/// with a broader workspace selection than the policy allows.
+pub(crate) fn configured_forced_workspace_ids() -> Result<Vec<String>> {
+    let codex_home = codex_home_from_values(std::env::var_os("CODEX_HOME"), dirs::home_dir())?;
+    let policy = crate::auth_policy::load_auth_policy(&codex_home)?;
+    Ok(policy.workspace_allowlist())
 }
 
 pub(crate) fn validate_managed_chatgpt_account(id_token: &str) -> Result<()> {
     let codex_home = codex_home_from_values(std::env::var_os("CODEX_HOME"), dirs::home_dir())?;
-    let Some((_config_path, config)) = load_codex_config(&codex_home)? else {
-        return Ok(());
-    };
+    let policy = crate::auth_policy::load_auth_policy(&codex_home)?;
     let auth = serde_json::json!({"tokens": {"id_token": id_token}});
     let account_id = crate::jwt::parse_account_info(&auth).account_id;
-    validate_managed_auth_config(&config, account_id.as_deref())
+    policy.validate_workspace(account_id.as_deref())
 }
 
 /// Enforce the managed ChatGPT workspace policy for a complete auth value.
@@ -251,11 +152,9 @@ pub(crate) fn validate_managed_chatgpt_account(id_token: &str) -> Result<()> {
 /// hint until a caller has otherwise authenticated the credentials.
 pub(crate) fn validate_managed_auth_value(auth: &serde_json::Value) -> Result<()> {
     let codex_home = codex_home_from_values(std::env::var_os("CODEX_HOME"), dirs::home_dir())?;
-    let Some((_config_path, config)) = load_codex_config(&codex_home)? else {
-        return Ok(());
-    };
+    let policy = crate::auth_policy::load_auth_policy(&codex_home)?;
     let account_id = crate::jwt::parse_account_info(auth).account_id;
-    validate_managed_auth_config(&config, account_id.as_deref())
+    policy.validate_workspace(account_id.as_deref())
 }
 
 /// ~/.codex-switch/
@@ -1055,19 +954,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn codex_version_parser_uses_the_full_numeric_release() {
-        assert_eq!(
-            parse_codex_cli_version("codex-cli 0.159.2-rc.1+build.7 (local)\n"),
-            Some("0.159.2".to_string())
-        );
-        assert_eq!(
-            parse_codex_cli_version("v0.158.0\n"),
-            Some("0.158.0".to_string())
-        );
-        assert_eq!(parse_codex_cli_version("codex is unavailable\n"), None);
-    }
-
-    #[test]
     fn user_agent_uses_the_same_aligned_version_as_model_requests() {
         let version = codex_cli_version();
         assert!(codex_user_agent().starts_with(&format!("codex_cli_rs/{version} ")));
@@ -1132,29 +1018,6 @@ mod tests {
             );
         }
         assert!(formatted.contains("token refresh request failed"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn codex_version_command_runs_a_cmd_path_wrapper() {
-        let directory = tempfile::tempdir().unwrap();
-        let wrapper = directory.path().join("codex cli.cmd");
-        std::fs::write(
-            &wrapper,
-            "@echo off\r\necho codex-cli 0.159.2 (wrapper)\r\n",
-        )
-        .unwrap();
-
-        let output = crate::app_server::output_with_timeout(
-            codex_version_command(&wrapper),
-            CODEX_VERSION_PROBE_TIMEOUT,
-        )
-        .expect("cmd wrapper should run");
-        assert!(output.status.success());
-        assert_eq!(
-            parse_codex_cli_version(&String::from_utf8_lossy(&output.stdout)),
-            Some("0.159.2".to_string())
-        );
     }
 
     fn assert_recent_rfc3339(value: &serde_json::Value) {

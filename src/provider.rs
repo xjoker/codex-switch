@@ -375,6 +375,7 @@ impl ProviderProfile {
             anyhow::bail!("provider name must equal alias");
         }
         validate_base_url(&self.base_url, self.allow_insecure_http)?;
+        validate_provider_auth_overrides(&self.provider_id, &self.codex_config)?;
         if !is_valid_env_key(&self.env_key) {
             anyhow::bail!(
                 "env_key '{}' is not a valid environment variable name",
@@ -1131,6 +1132,34 @@ fn validate_provider_override_shape(provider_id: &str, raw_key: &str) -> Result<
     Ok(())
 }
 
+pub(crate) fn validate_provider_auth_overrides(
+    provider_id: &str,
+    overrides: &[String],
+) -> Result<()> {
+    for entry in overrides {
+        let Some((key, raw_value)) = entry.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let raw_value = raw_value.trim();
+        // Codex accepts bare or empty -c values as strings. Parse the actual
+        // value first (so inline tables are inspected), then fall back to an
+        // empty string while retaining the TOML-parsed dotted/quoted key path.
+        let parsed = toml::from_str::<toml::Value>(&format!("{key} = {raw_value}"))
+            .or_else(|_| toml::from_str::<toml::Value>(&format!("{key} = \"\"")));
+        let Ok(parsed) = parsed else { continue };
+        let provider = parsed
+            .get("model_providers")
+            .and_then(|value| value.get(provider_id));
+        if provider.is_some_and(|value| value.get("auth").is_some()) {
+            anyhow::bail!(
+                "provider model_providers.{provider_id}.auth (including auth.command) is not supported with codex-switch-managed env_key; remove this auth override"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn resolve_provider_connection(profile: &ProviderProfile) -> Result<ProviderHttpConfig> {
     resolve_provider_connection_from_parts(
         &profile.base_url,
@@ -1157,6 +1186,7 @@ fn resolve_provider_connection_from_parts(
     } else {
         provider_id
     };
+    validate_provider_auth_overrides(provider_id, codex_config)?;
     for entry in codex_config {
         if let Some((key, _)) = entry.split_once('=') {
             validate_provider_override_shape(provider_id, key)?;
@@ -7561,6 +7591,60 @@ api_key = "sk-legacy-key"
             .unwrap_err();
             assert!(error.to_string().contains("full-table provider overrides"));
         }
+    }
+
+    #[test]
+    fn provider_auth_command_conflicts_with_generated_env_key() {
+        for override_value in [
+            r#"model_providers.provider.auth.command="token-helper""#,
+            "model_providers.provider.auth.command=token-helper",
+            "model_providers.provider.auth.command=",
+            "model_providers.\"provider\".auth.command=token-helper",
+        ] {
+            let mut profile = sample("provider");
+            profile.codex_config = vec![override_value.into()];
+
+            let error = profile.validate().unwrap_err();
+            assert!(error.to_string().contains("auth.command"), "{error}");
+            assert!(error.to_string().contains("env_key"), "{error}");
+        }
+    }
+
+    #[test]
+    fn provider_auth_conflict_parses_quoted_and_table_keys_for_active_provider_only() {
+        for override_value in [
+            r#"model_providers."provider".auth = { args = ["token-helper"] }"#,
+            r#"model_providers.provider = { auth = { command = "token-helper" } }"#,
+        ] {
+            let mut profile = sample("provider");
+            profile.codex_config = vec![override_value.into()];
+            assert!(
+                profile
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("auth.command")
+            );
+        }
+
+        let mut profile = sample("provider");
+        profile.codex_config =
+            vec![r#"model_providers.other.auth.command="other-token-helper""#.into()];
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn provider_empty_env_key_still_conflicts_with_auth_command() {
+        let mut profile = sample("provider");
+        profile.env_key.clear();
+        profile.codex_config = vec![r#"model_providers.provider.auth={}"#.into()];
+        assert!(
+            profile
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("auth.command")
+        );
     }
 
     #[test]

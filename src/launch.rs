@@ -133,6 +133,11 @@ async fn launch_interactive(
     reasoning: ReasoningLaunch,
     tui_shutdown: Option<&mut ShutdownListener>,
 ) -> Result<TuiLaunchOutcome> {
+    // Resolve and validate the exact executable once, before profile selection
+    // can consume a reset card or provider launch can create a native run.
+    let codex_command = ensure_codex_available()?;
+    crate::codex_compat::ensure_launch_version(&codex_command)?;
+
     // A custom API provider profile takes a separate, simpler path: it has no
     // OAuth auth.json to stage, so it never touches ~/.codex/auth.json. It is
     // translated into `codex -c …` overrides with the key injected via the
@@ -141,14 +146,36 @@ async fn launch_interactive(
         && provider::exists(alias)
     {
         let profile = provider::load(alias)?;
-        return launch_provider(profile, model, reasoning, args, json, tui_shutdown).await;
+        return launch_provider(
+            profile,
+            codex_command,
+            model,
+            reasoning,
+            args,
+            json,
+            tui_shutdown,
+        )
+        .await;
     }
 
     if alias.is_none() && provider_resume_requested(&args) {
         let provider_alias = select_provider_for_resume(json)?;
         let profile = provider::load(&provider_alias)?;
-        return launch_provider(profile, model, reasoning, args, json, tui_shutdown).await;
+        return launch_provider(
+            profile,
+            codex_command,
+            model,
+            reasoning,
+            args,
+            json,
+            tui_shutdown,
+        )
+        .await;
     }
+
+    // Only the ChatGPT launch path stages file-backed OAuth credentials. Keep
+    // this after both provider branches so provider keys remain independent.
+    auth::ensure_file_credentials_store()?;
 
     let forwarded = chatgpt_codex_argv(model, reasoning, args);
 
@@ -180,7 +207,6 @@ async fn launch_interactive(
         user_println(&crate::commands::profile::revival_hint_message(hint));
     }
 
-    let codex_command = ensure_codex_available()?;
     let forwarded = if codex_argv_selects_server(&forwarded) {
         forwarded
     } else {
@@ -793,7 +819,11 @@ pub(crate) fn command_on_path(name: &str) -> Option<std::path::PathBuf> {
         for file in &candidates {
             let candidate = dir.join(file);
             if candidate.is_file() {
-                return Some(candidate);
+                return if candidate.is_absolute() {
+                    Some(candidate)
+                } else {
+                    std::env::current_dir().ok().map(|cwd| cwd.join(candidate))
+                };
             }
         }
     }
@@ -821,14 +851,13 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 /// config profile. The parent never swaps default config or authentication.
 async fn launch_provider(
     profile: ProviderProfile,
+    codex_command: std::path::PathBuf,
     model: Option<&str>,
     reasoning: ReasoningLaunch,
     args: Vec<String>,
     json: bool,
     shutdown: Option<&mut ShutdownListener>,
 ) -> Result<TuiLaunchOutcome> {
-    let codex_command = ensure_codex_available()?;
-
     let mut owned_shutdown;
     let shutdown = match shutdown {
         Some(shutdown) => shutdown,

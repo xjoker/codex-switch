@@ -42,6 +42,7 @@ pub enum UsageStatus {
     Error(UsageError),
 }
 
+#[cfg(test)]
 fn retained_usage_by_alias(accounts: Vec<AccountEntry>) -> HashMap<String, UsageStatus> {
     accounts
         .into_iter()
@@ -240,6 +241,9 @@ pub struct App {
     pub status_msg: Option<String>,
     pub status_is_error: bool,
     pub status_expiry: Option<Instant>,
+    /// Persistent load diagnostics remain visible until that data domain loads cleanly.
+    pub profile_load_error: Option<String>,
+    pub provider_load_error: Option<String>,
     pub refreshing_requests: HashMap<String, (u64, Refresh)>,
     pub pending_usage_refreshes: HashMap<String, Refresh>,
     pub usage_next_id: u64,
@@ -329,6 +333,8 @@ impl App {
             status_msg: None,
             status_is_error: false,
             status_expiry: None,
+            profile_load_error: None,
+            provider_load_error: None,
             refreshing_requests: HashMap::new(),
             pending_usage_refreshes: HashMap::new(),
             usage_next_id: 0,
@@ -1192,8 +1198,9 @@ impl App {
                 tracing::info!(action = "provider_save", alias = %profile.alias, outcome = "completed", "provider saved");
                 self.set_status(format!("{action} provider '{}'", profile.alias), 4);
                 self.active_tab = Tab::Providers;
-                self.load_profiles();
-                if let Some(idx) = self.providers.iter().position(|p| p.alias == profile.alias) {
+                if self.load_profiles()
+                    && let Some(idx) = self.providers.iter().position(|p| p.alias == profile.alias)
+                {
                     self.provider_selected = idx;
                 }
             }
@@ -1314,62 +1321,166 @@ impl App {
         });
     }
 
-    pub fn load_profiles(&mut self) {
-        let mut retained_usage = retained_usage_by_alias(std::mem::take(&mut self.accounts));
-        let profiles = list_profiles().unwrap_or_else(|e| {
-            tracing::warn!("failed to load profiles: {e}");
-            Vec::new()
-        });
-        let current = sync_current_from_live().unwrap_or_else(read_current);
-        self.accounts = profiles
-            .into_iter()
-            .filter_map(|alias| {
-                let path = match profile_auth_path(&alias) {
-                    Ok(p) => p,
-                    Err(_) => return None,
-                };
-                let info = auth::read_account_info(&path);
-                let is_current = alias == current;
-                Some(AccountEntry {
-                    usage: retained_usage.remove(&alias).unwrap_or(UsageStatus::Idle),
-                    alias,
-                    info,
-                    is_current,
+    pub fn load_profiles(&mut self) -> bool {
+        let mut account_problems = Vec::new();
+        let mut provider_problems = Vec::new();
+        let previous_selected_alias = self
+            .selected_account_idx()
+            .and_then(|idx| self.accounts.get(idx))
+            .map(|account| account.alias.clone());
+        let new_accounts = match list_profiles() {
+            Err(error) => {
+                account_problems.push(format!(
+                    "Could not load saved accounts; showing the stale account list: {error:#}"
+                ));
+                None
+            }
+            Ok(profiles) => {
+                let current = sync_current_from_live().unwrap_or_else(read_current);
+                let mut complete = true;
+                let mut retained_usage: HashMap<_, _> = self
+                    .accounts
+                    .iter()
+                    .map(|account| (account.alias.clone(), account.usage.clone()))
+                    .collect();
+                let mut accounts = Vec::with_capacity(profiles.len());
+                for alias in profiles {
+                    let path = match profile_auth_path(&alias) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            complete = false;
+                            account_problems.push(format!(
+                                "Could not load account '{}'; keeping its last loaded data: {error:#}",
+                                alias
+                            ));
+                            continue;
+                        }
+                    };
+                    accounts.push(AccountEntry {
+                        info: auth::read_account_info(&path),
+                        usage: retained_usage.remove(&alias).unwrap_or(UsageStatus::Idle),
+                        is_current: alias == current,
+                        alias,
+                    });
+                }
+                if complete { Some(accounts) } else { None }
+            }
+        };
+
+        let previous_provider_alias = self
+            .providers
+            .get(self.provider_selected)
+            .map(|provider| provider.alias.clone());
+        let new_providers = match crate::provider::list_providers() {
+            Err(error) => {
+                provider_problems.push(format!(
+                    "Could not load saved providers; showing the stale provider list: {error:#}"
+                ));
+                None
+            }
+            Ok(aliases) => {
+                let previous: HashMap<_, _> = self
+                    .providers
+                    .iter()
+                    .cloned()
+                    .map(|provider| (provider.alias.clone(), provider))
+                    .collect();
+                let mut providers = Vec::with_capacity(aliases.len());
+                for alias in aliases {
+                    match crate::provider::load(&alias) {
+                        Ok(provider) => providers.push(provider),
+                        Err(error) => {
+                            let fallback = if previous.contains_key(&alias) {
+                                "showing its last loaded version"
+                            } else {
+                                "omitting it from the incomplete list"
+                            };
+                            provider_problems.push(format!(
+                                "Could not load provider '{}'; {}: {error:#}",
+                                alias, fallback
+                            ));
+                            if let Some(previous) = previous.get(&alias) {
+                                providers.push(previous.clone());
+                            }
+                        }
+                    }
+                }
+                Some(providers)
+            }
+        };
+
+        if let Some(accounts) = new_accounts {
+            self.accounts = accounts;
+            self.marked
+                .retain(|alias| self.accounts.iter().any(|account| &account.alias == alias));
+            // A successful account-list read can follow credential replacement
+            // for an existing alias. Invalidate late results only after commit.
+            self.refreshing_requests.clear();
+            self.pending_usage_refreshes.clear();
+            self.selected = 0;
+            self.view_indices.clear();
+            self.update_view();
+            let selected_alias = if account_problems.is_empty() {
+                None
+            } else {
+                previous_selected_alias.as_deref()
+            };
+            let selected_idx = selected_alias
+                .and_then(|alias| {
+                    self.accounts
+                        .iter()
+                        .position(|account| account.alias == alias)
                 })
-            })
-            .collect();
-        self.providers = crate::provider::list_providers()
-            .unwrap_or_default()
+                .or_else(|| self.accounts.iter().position(|account| account.is_current));
+            if let Some(account_idx) = selected_idx
+                && let Some(view_idx) = self.view_indices.iter().position(|&idx| idx == account_idx)
+            {
+                self.selected = view_idx;
+            }
+        }
+        if let Some(providers) = new_providers {
+            self.providers = providers;
+            self.provider_selected = previous_provider_alias
+                .and_then(|alias| {
+                    self.providers
+                        .iter()
+                        .position(|provider| provider.alias == alias)
+                })
+                .unwrap_or_else(|| {
+                    self.provider_selected
+                        .min(self.providers.len().saturating_sub(1))
+                });
+        }
+
+        for problem in account_problems.iter().chain(&provider_problems) {
+            tracing::warn!("{problem}");
+        }
+        self.profile_load_error =
+            (!account_problems.is_empty()).then(|| account_problems.join("; "));
+        self.provider_load_error =
+            (!provider_problems.is_empty()).then(|| provider_problems.join("; "));
+        let all_ok = self.profile_load_error.is_none() && self.provider_load_error.is_none();
+        if !all_ok {
+            let summary = [
+                self.profile_load_error.as_deref(),
+                self.provider_load_error.as_deref(),
+            ]
             .into_iter()
-            .filter_map(|alias| crate::provider::load(&alias).ok())
-            .collect();
-        if self.provider_selected >= self.providers.len() {
-            self.provider_selected = self.providers.len().saturating_sub(1);
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
+            self.set_status_error(summary, 10);
         }
-        self.marked
-            .retain(|alias| self.accounts.iter().any(|account| &account.alias == alias));
-        // A reload can follow credential replacement for an existing alias.
-        // Invalidate old generations so their late results cannot bind to the
-        // newly loaded profile; the caller starts the replacement refresh.
-        self.refreshing_requests.clear();
-        self.pending_usage_refreshes.clear();
-        self.selected = 0;
-        self.view_indices.clear();
-        self.update_view();
-        if let Some(account_idx) = self.accounts.iter().position(|a| a.is_current)
-            && let Some(view_idx) = self.view_indices.iter().position(|&idx| idx == account_idx)
-        {
-            self.selected = view_idx;
-        }
+        all_ok
     }
 
-    pub fn load_profiles_preserving_selection(&mut self) {
+    pub fn load_profiles_preserving_selection(&mut self) -> bool {
         let selected_alias = self
             .selected_account_idx()
             .and_then(|idx| self.accounts.get(idx))
             .map(|entry| entry.alias.clone());
 
-        self.load_profiles();
+        let loaded = self.load_profiles();
 
         if let Some(alias) = selected_alias
             && let Some(account_idx) = self.accounts.iter().position(|a| a.alias == alias)
@@ -1377,6 +1488,7 @@ impl App {
         {
             self.selected = view_idx;
         }
+        loaded
     }
 
     /// Recompute `view_indices` based on the current search query.
@@ -2257,8 +2369,9 @@ impl App {
             ConfirmAction::Delete(alias) => match cmd_delete(&alias) {
                 Ok(()) => {
                     self.set_status(format!("Deleted {alias} (recoverable)"), 3);
-                    self.load_profiles();
-                    self.refresh(Refresh::Forced);
+                    if self.load_profiles_preserving_selection() {
+                        self.refresh(Refresh::Forced);
+                    }
                 }
                 Err(e) => self.set_status_error(format!("Delete failed: {e}"), 5),
             },
@@ -2283,9 +2396,10 @@ impl App {
                         Err(e) => errors.push(format!("{alias}: {e}")),
                     }
                 }
-                self.marked.clear();
-                self.load_profiles();
-                self.refresh(Refresh::Forced);
+                let loaded = self.load_profiles_preserving_selection();
+                if loaded {
+                    self.refresh(Refresh::Forced);
+                }
                 let msg = if errors.is_empty() {
                     format!("Deleted {ok} account(s) (recoverable)")
                 } else {
@@ -2456,8 +2570,10 @@ impl App {
                     Tab::Providers => match crate::provider::rename(&old, &new) {
                         Ok(()) => {
                             self.set_status(format!("Renamed provider {old} -> {new}"), 3);
-                            self.load_profiles();
-                            if let Some(idx) = self.providers.iter().position(|p| p.alias == new) {
+                            if self.load_profiles()
+                                && let Some(idx) =
+                                    self.providers.iter().position(|p| p.alias == new)
+                            {
                                 self.provider_selected = idx;
                             }
                         }
@@ -2470,15 +2586,18 @@ impl App {
                                 self.marked.insert(new.clone());
                             }
                             self.set_status(format!("Renamed {old} -> {new}"), 3);
-                            self.load_profiles();
-                            if let Some(account_idx) =
-                                self.accounts.iter().position(|a| a.alias == new)
+                            let loaded = self.load_profiles();
+                            if let Some(account_idx) = loaded
+                                .then(|| self.accounts.iter().position(|a| a.alias == new))
+                                .flatten()
                                 && let Some(view_idx) =
                                     self.view_indices.iter().position(|&idx| idx == account_idx)
                             {
                                 self.selected = view_idx;
                             }
-                            self.refresh(Refresh::Forced);
+                            if loaded {
+                                self.refresh(Refresh::Forced);
+                            }
                         }
                         Err(e) => self.set_status_error(format!("Rename failed: {e}"), 5),
                     },
@@ -2668,7 +2787,10 @@ impl App {
             return;
         }
 
-        self.load_profiles_preserving_selection();
+        if !self.load_profiles_preserving_selection() {
+            self.next_auto_refresh = Some(now + self.auto_refresh_interval);
+            return;
+        }
         let account_count = self.accounts.len();
         self.refresh_all(Refresh::Unattended);
         self.next_auto_refresh = Some(now + self.auto_refresh_interval);
@@ -2730,10 +2852,10 @@ async fn run_app(
     shutdown: &mut crate::signals::ShutdownListener,
 ) -> Result<Option<crate::signals::ShutdownSignal>> {
     let mut app = App::new();
-    app.load_profiles();
+    let profiles_loaded = app.load_profiles();
     app.update_view();
 
-    if !app.accounts.is_empty() {
+    if profiles_loaded && !app.accounts.is_empty() {
         app.refresh(Refresh::Cached);
     }
     app.start_update_check();
@@ -3259,8 +3381,9 @@ async fn perform_launch(
     match result {
         Ok(crate::launch::TuiLaunchOutcome::Exited(0)) => {
             app.set_status(format!("Codex session ended ({alias})"), 4);
-            app.load_profiles_preserving_selection();
-            app.refresh(Refresh::Cached);
+            if app.load_profiles_preserving_selection() {
+                app.refresh(Refresh::Cached);
+            }
             if app.auto_refresh_enabled {
                 app.next_auto_refresh = Some(Instant::now() + app.auto_refresh_interval);
             }
@@ -3334,8 +3457,9 @@ async fn perform_oauth(
         Ok(msg) => {
             tracing::info!(action = "oauth", outcome = "completed", "OAuth completed");
             app.set_status(msg, 5);
-            app.load_profiles_preserving_selection();
-            app.refresh(Refresh::Forced);
+            if app.load_profiles_preserving_selection() {
+                app.refresh(Refresh::Forced);
+            }
             // Reset auto-refresh timer so it doesn't fire immediately.
             if app.auto_refresh_enabled {
                 app.next_auto_refresh = Some(Instant::now() + app.auto_refresh_interval);
@@ -3471,8 +3595,9 @@ async fn perform_batch_relogin(terminal: &mut DefaultTerminal, app: &mut App, de
     } else {
         app.set_status_error(summary, 8);
     }
-    app.load_profiles_preserving_selection();
-    app.refresh(Refresh::Forced);
+    if app.load_profiles_preserving_selection() {
+        app.refresh(Refresh::Forced);
+    }
     if app.auto_refresh_enabled {
         app.next_auto_refresh = Some(Instant::now() + app.auto_refresh_interval);
     }
@@ -3580,6 +3705,8 @@ fn char_to_byte(s: &str, char_pos: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::{
         AccountEntry, App, ModelStatus, UsageStatus, batch_relogin_not_attempted,
         finish_login_or_cancel, finish_refresh_then_commit, refresh_fetches_loaded_usage,
@@ -4540,6 +4667,115 @@ mod tests {
             app.providers[0].models[1].reasoning.as_deref(),
             Some("high"),
             "picker must not persist a launch-only reasoning change"
+        );
+    }
+
+    #[test]
+    fn failed_profile_reads_keep_last_known_rows_selection_marks_and_usage() {
+        let _home = EnvHome::new();
+        let root = crate::auth::app_home().unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("profiles"), "not a directory").unwrap();
+        std::fs::write(root.join("providers"), "not a directory").unwrap();
+
+        let mut app = App::new();
+        app.accounts.push(AccountEntry {
+            alias: "known".into(),
+            info: AccountInfo::default(),
+            usage: UsageStatus::Loaded(Box::default()),
+            is_current: false,
+        });
+        app.view_indices = vec![0];
+        app.selected = 0;
+        app.marked.insert("known".into());
+        app.usage_generations.insert("known".into(), 17);
+        app.providers.push(crate::provider::ProviderProfile::build(
+            "known-provider",
+            "https://example.test/v1",
+            vec![crate::provider::ProviderModel::from_id("model")],
+            "test-key",
+        ));
+
+        assert!(!app.load_profiles());
+        assert_eq!(app.accounts.len(), 1);
+        assert_eq!(app.accounts[0].alias, "known");
+        assert!(matches!(app.accounts[0].usage, UsageStatus::Loaded(_)));
+        assert_eq!(app.view_indices, [0]);
+        assert_eq!(app.selected, 0);
+        assert!(app.marked.contains("known"));
+        assert_eq!(app.usage_generations.get("known"), Some(&17));
+        assert_eq!(app.providers[0].alias, "known-provider");
+        assert!(app.status_is_error);
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|message| message.contains("stale"))
+        );
+    }
+
+    #[test]
+    fn failed_initial_profile_read_is_visible_and_does_not_start_refresh() {
+        let _home = EnvHome::new();
+        let root = crate::auth::app_home().unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("profiles"), "not a directory").unwrap();
+
+        let mut app = App::new();
+        assert!(!app.load_profiles());
+        assert!(app.accounts.is_empty());
+        assert_eq!(app.loading_count(), 0);
+        assert!(app.status_is_error);
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|message| message.contains("Could not load"))
+        );
+        app.status_expiry = Some(Instant::now() - Duration::from_secs(1));
+        app.tick();
+        assert!(app.status_msg.is_none());
+        assert!(
+            app.profile_load_error
+                .as_deref()
+                .is_some_and(|message| message.contains("Could not load"))
+        );
+        app.set_status("A later informational message".into(), 5);
+        assert!(app.profile_load_error.is_some());
+        app.auto_refresh_enabled = true;
+        app.next_auto_refresh = Some(Instant::now() - Duration::from_secs(1));
+        app.run_due_auto_refresh();
+        assert_eq!(app.loading_count(), 0);
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|message| message.contains("Could not load"))
+        );
+    }
+
+    #[test]
+    fn damaged_provider_keeps_its_last_known_row_and_reports_partial_load() {
+        let _home = EnvHome::new();
+        let profile = crate::provider::ProviderProfile::build(
+            "broken-later",
+            "https://example.test/v1",
+            vec![crate::provider::ProviderModel::from_id("model")],
+            "test-key",
+        );
+        crate::provider::save(&profile).unwrap();
+        let mut app = App::new();
+        assert!(app.load_profiles());
+        let path = crate::auth::app_home()
+            .unwrap()
+            .join("providers/broken-later/provider.toml");
+        std::fs::write(path, "invalid = [toml").unwrap();
+
+        assert!(!app.load_profiles());
+        assert_eq!(app.providers.len(), 1);
+        assert_eq!(app.providers[0].alias, "broken-later");
+        assert!(app.status_is_error);
+        assert!(
+            app.status_msg
+                .as_deref()
+                .is_some_and(|message| message.contains("broken-later"))
         );
     }
 
