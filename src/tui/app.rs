@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,14 @@ use crate::usage::{
     fetch_usage_retried_force, fetch_usage_retried_unattended,
 };
 use crate::warmup::ModelEntry;
+
+async fn with_usage_limiter<T>(limiter: &Semaphore, operation: impl Future<Output = T>) -> T {
+    let _permit = limiter
+        .acquire()
+        .await
+        .expect("TUI usage limiter remains open for the app lifetime");
+    operation.await
+}
 
 #[derive(Debug, Clone)]
 pub struct AccountEntry {
@@ -383,7 +392,9 @@ impl App {
     /// and it has no fresh result or pending request. Both successes and errors
     /// expire, without retrying a failure on every rendered frame.
     pub fn ensure_models_loaded(&mut self, alias: &str) {
-        if matches!(self.model_cache.get(alias), Some(ModelStatus::Loading)) {
+        if self.model_requests.contains_key(alias)
+            || matches!(self.model_cache.get(alias), Some(ModelStatus::Loading))
+        {
             return;
         }
         if self.model_cache.contains_key(alias) {
@@ -399,8 +410,10 @@ impl App {
             Ok(p) => p,
             Err(_) => return,
         };
-        self.model_cache
-            .insert(alias.to_string(), ModelStatus::Loading);
+        if !self.model_cache.contains_key(alias) {
+            self.model_cache
+                .insert(alias.to_string(), ModelStatus::Loading);
+        }
         let request_id = self.model_next_id;
         self.model_next_id = self.model_next_id.wrapping_add(1);
         self.model_requests.insert(alias.to_string(), request_id);
@@ -443,13 +456,23 @@ impl App {
                 self.menu.as_ref(),
                 Some(super::menu::MenuState::Account { info, .. }) if info.alias == alias
             );
-            self.model_cache.insert(
-                alias,
-                match result {
-                    Ok(models) => ModelStatus::Loaded(models),
-                    Err(e) => ModelStatus::Error(e),
-                },
-            );
+            let (picker_models, picker_status) = match result {
+                Ok(models) => {
+                    self.model_cache
+                        .insert(alias.clone(), ModelStatus::Loaded(models.clone()));
+                    (Some(models), None)
+                }
+                Err(e) => {
+                    let status =
+                        format!("Model catalog unavailable: {e}. Codex default remains available.");
+                    self.model_cache
+                        .insert(alias.clone(), ModelStatus::Error(e));
+                    (None, Some(status))
+                }
+            };
+            if let Some(picker) = self.provider_launch.as_mut() {
+                picker.update_chatgpt_catalog(&alias, picker_models.as_deref(), picker_status);
+            }
         }
         if refresh_open_account {
             self.rebuild_open_account_menu();
@@ -1027,13 +1050,37 @@ impl App {
     /// Codex default row immediately.
     pub fn open_account_launch_for(&mut self, alias: &str) {
         self.ensure_models_loaded(alias);
-        let models = match self.model_cache.get(alias) {
-            Some(ModelStatus::Loaded(models)) => models.clone(),
-            _ => Vec::new(),
+        let (models, status) = match self.model_cache.get(alias) {
+            Some(ModelStatus::Loaded(models)) => (
+                models.clone(),
+                if self.model_requests.contains_key(alias) {
+                    Some("Refreshing model catalog…".to_string())
+                } else {
+                    None
+                },
+            ),
+            Some(ModelStatus::Error(_error)) if self.model_requests.contains_key(alias) => (
+                Vec::new(),
+                Some("Refreshing model catalog… Codex default remains available.".to_string()),
+            ),
+            Some(ModelStatus::Error(error)) => (
+                Vec::new(),
+                Some(format!(
+                    "Model catalog unavailable: {error}. Codex default remains available."
+                )),
+            ),
+            Some(ModelStatus::Loading) => (
+                Vec::new(),
+                Some("Loading model catalog… Codex default remains available.".to_string()),
+            ),
+            None => (
+                Vec::new(),
+                Some("Model catalog unavailable; Codex default remains available.".to_string()),
+            ),
         };
-        self.provider_launch = Some(super::provider_launch::ProviderLaunchState::from_chatgpt(
-            alias, &models,
-        ));
+        let mut picker = super::provider_launch::ProviderLaunchState::from_chatgpt(alias, &models);
+        picker.update_chatgpt_catalog(alias, None, status);
+        self.provider_launch = Some(picker);
     }
 
     pub fn handle_settings_key(&mut self, code: KeyCode) {
@@ -2033,29 +2080,36 @@ impl App {
             request_id
         });
         tokio::spawn(async move {
-            let _permit = limiter.acquire().await;
             if needs_usage {
-                let result = match refresh {
-                    Refresh::Cached => fetch_usage_retried(&alias, &path, &current).await,
-                    Refresh::Unattended => {
-                        fetch_usage_retried_unattended(&alias, &path, &current).await
+                let result = with_usage_limiter(&limiter, async {
+                    match refresh {
+                        Refresh::Cached => fetch_usage_retried(&alias, &path, &current).await,
+                        Refresh::Unattended => {
+                            fetch_usage_retried_unattended(&alias, &path, &current).await
+                        }
+                        Refresh::Forced => fetch_usage_retried_force(&alias, &path, &current).await,
                     }
-                    Refresh::Forced => fetch_usage_retried_force(&alias, &path, &current).await,
-                };
+                })
+                .await;
                 // Usage is independent of best-effort workspace metadata.
                 let _ = usage_tx
                     .send((alias.clone(), request_id.expect("usage request id"), result))
                     .await;
             }
             if needs_workspace {
-                // Read auth after usage because that path may have refreshed the token.
-                if let Ok(auth) = crate::auth::read_auth(&path)
-                    && let Err(err) =
-                        crate::workspace::refresh_for_auth_if_needed(&auth, force_negative_caches)
-                            .await
-                {
-                    tracing::debug!("[{alias}] workspace metadata unavailable: {err}");
-                }
+                with_usage_limiter(&limiter, async {
+                    // Read auth after usage because that path may have refreshed the token.
+                    if let Ok(auth) = crate::auth::read_auth(&path)
+                        && let Err(err) = crate::workspace::refresh_for_auth_if_needed(
+                            &auth,
+                            force_negative_caches,
+                        )
+                        .await
+                    {
+                        tracing::debug!("[{alias}] workspace metadata unavailable: {err}");
+                    }
+                })
+                .await;
                 let _ = workspace_tx.send(alias).await;
             }
         });
@@ -3711,6 +3765,7 @@ mod tests {
         AccountEntry, App, ModelStatus, UsageStatus, batch_relogin_not_attempted,
         finish_login_or_cancel, finish_refresh_then_commit, refresh_fetches_loaded_usage,
         refresh_forces_negative_caches, reset_card_failure_from_outcome, retained_usage_by_alias,
+        with_usage_limiter,
     };
     use super::{ConfirmAction, Tab};
     use crate::{
@@ -3730,6 +3785,59 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    #[tokio::test]
+    async fn queued_usage_fetch_runs_before_workspace_followup() {
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let (release_first, wait_first) = tokio::sync::oneshot::channel();
+        let (release_second, wait_second) = tokio::sync::oneshot::channel();
+        let (second_queued, second_queued_rx) = tokio::sync::oneshot::channel();
+        let (second_started, second_started_rx) = tokio::sync::oneshot::channel();
+        let (workspace_started, mut workspace_started_rx) = tokio::sync::oneshot::channel();
+
+        let first_limiter = limiter.clone();
+        let first = tokio::spawn(async move {
+            with_usage_limiter(&first_limiter, async {
+                wait_first.await.expect("release first usage phase");
+            })
+            .await;
+            with_usage_limiter(&first_limiter, async {
+                let _ = workspace_started.send(());
+            })
+            .await;
+        });
+
+        let second_limiter = limiter.clone();
+        let second = tokio::spawn(async move {
+            let _ = second_queued.send(());
+            with_usage_limiter(&second_limiter, async {
+                let _ = second_started.send(());
+                wait_second.await.expect("release second usage phase");
+            })
+            .await;
+        });
+
+        second_queued_rx.await.expect("second fetch queued");
+        tokio::task::yield_now().await;
+        let _ = release_first.send(());
+        tokio::time::timeout(Duration::from_secs(1), second_started_rx)
+            .await
+            .expect("queued usage fetch should acquire the released permit")
+            .expect("second usage phase started");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut workspace_started_rx)
+                .await
+                .is_err(),
+            "the first account's workspace lookup must not delay queued usage"
+        );
+        let _ = release_second.send(());
+        tokio::time::timeout(Duration::from_secs(1), &mut workspace_started_rx)
+            .await
+            .expect("workspace followup should run after usage completes")
+            .expect("workspace followup started");
+        first.await.expect("first task completes");
+        second.await.expect("second task completes");
     }
 
     fn scroll(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -4868,6 +4976,37 @@ mod tests {
     }
 
     #[test]
+    fn late_model_catalog_updates_open_account_picker_and_keeps_default() {
+        let mut app = App::new();
+        app.model_requests.insert("work".into(), 17);
+        app.provider_launch =
+            Some(crate::tui::provider_launch::ProviderLaunchState::from_chatgpt("work", &[]));
+        app.model_sender
+            .try_send((
+                "work".into(),
+                17,
+                Ok(vec![ModelEntry {
+                    slug: "gpt-6.1-sol".into(),
+                    display_name: Some("GPT-6.1 Sol".into()),
+                    ..ModelEntry::default()
+                }]),
+            ))
+            .expect("inject completed model request");
+
+        app.poll_model_results();
+        assert!(matches!(
+            app.model_cache.get("work"),
+            Some(ModelStatus::Loaded(models)) if models.iter().any(|model| model.slug == "gpt-6.1-sol")
+        ));
+        assert!(app.handle_provider_launch_key(KeyCode::Down).is_none());
+        let (alias, model, _, _) = app
+            .handle_provider_launch_key(KeyCode::Enter)
+            .expect("late model should be selectable");
+        assert_eq!(alias, "work");
+        assert_eq!(model, "gpt-6.1-sol");
+    }
+
+    #[test]
     fn provider_rename_from_the_list() {
         let _home = EnvHome::new();
         crate::provider::save(&crate::provider::ProviderProfile::build(
@@ -5109,9 +5248,9 @@ mod tests {
         let path = crate::profile::profile_auth_path("account").unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{}").unwrap();
-        for previous in [
-            ModelStatus::Loaded(vec![]),
-            ModelStatus::Error("temporary failure".into()),
+        for (previous, expected_loaded) in [
+            (ModelStatus::Loaded(vec![]), true),
+            (ModelStatus::Error("temporary failure".into()), false),
         ] {
             let mut app = App::new();
             // Prevent this state-machine check from making a network request.
@@ -5123,10 +5262,18 @@ mod tests {
             );
             app.ensure_models_loaded("account");
             let request = app.model_requests["account"];
-            assert!(matches!(
-                app.model_cache.get("account"),
-                Some(ModelStatus::Loading)
-            ));
+            assert!(app.model_requests.contains_key("account"));
+            if expected_loaded {
+                assert!(matches!(
+                    app.model_cache.get("account"),
+                    Some(ModelStatus::Loaded(models)) if models.is_empty()
+                ));
+            } else {
+                assert!(matches!(
+                    app.model_cache.get("account"),
+                    Some(ModelStatus::Error(error)) if error == "temporary failure"
+                ));
+            }
             app.ensure_models_loaded("account");
             assert_eq!(app.model_requests["account"], request);
             app.model_sender

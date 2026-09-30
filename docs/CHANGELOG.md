@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v20261001.1.0 (candidate) — 2026-10-01
+
+- **Credits stay in their native units** — CLI and TUI display raw balances as credits, preserve fractional precision, and keep positive balances neutral; JSON `credits_balance` remains unchanged. No general USD conversion is inferred.
+- **Late model catalogs update the open picker** — If an authenticated `/models` response arrives after an account launch picker opens, the picker now receives it without losing selection or edited launch arguments. Loading, refresh, empty-catalog, and fetch errors are visible while Codex's default model remains available; no models are synthesized beyond the account's server response.
+- **Usage and catalog work expose timing stages** — Logs record safe phase timing, status, outcome, and counts, and TUI usage/workspace tasks release the shared request permit between phases so queued usage refreshes can proceed.
+- **Shared Codex auth writes avoid directory-tree ACL propagation** — Existing shared `CODEX_HOME` directory ACLs are left intact during atomic auth writes, preventing inheritable ACL updates from walking sessions and caches. Temporary and final credential files retain the exact protected ACL, and app-owned directories remain hardened.
+
 ## v20260930.4.0 (candidate) — 2026-09-30
 
 - **Authentication preflight follows managed requirements** — ChatGPT file-login operations reject workload identity federation variables before switching, importing or starting OAuth. The shared resolver checks system requirements, legacy managed defaults and forced macOS MDM preferences, with requirements taking precedence over ordinary configuration. Windows system policy uses the OS ProgramData known folder. Unsupported `chatgpt_base_url` routing is refused before ChatGPT backend requests; provider-key launches stay independent.

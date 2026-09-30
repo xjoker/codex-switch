@@ -42,6 +42,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 - Structured data is written to stdout; progress and diagnostics are written to stderr.
 - JSON and other non-interactive execution never consumes a reset card or deletes a profile without an explicit opt-in flag.
+- Usage output labels `credits_balance` as credits, not dollars. The JSON field remains the raw numeric balance for compatibility; do not infer a universal USD conversion because credit pricing depends on model, speed, plan, and agreement. See [Codex pricing](https://learn.chatgpt.com/docs/pricing).
 - `launch` treats a known Codex subcommand (`exec`, `resume`, …) or a non-launch flag as the start of Codex argv, even without `--`. Tokens on both sides of `--` are kept, so `launch work exec -- --json` still runs `exec`. A prompt that looks like an alias still needs `--`. When `alias` names a custom provider, Codex is started with `-c` overrides (including the saved model catalog, after `exec` / `resume` / … so Codex 0.149 applies them; user flags that preceded the subcommand move with them), `--profile` selecting the run's native `cs-*.config.toml` in the normal `$CODEX_HOME`, and the key in the child environment; `auth.json` is not swapped and the user's `config.toml` is not rewritten. For a ChatGPT profile, `--no-daemon` is prepended (before any subcommand) when `codex --help` lists it, so the session reads the staged `auth.json` rather than the shared app-server daemon. The help probe is bounded to 10 seconds; if it fails, times out, or returns no usable help, launch refuses before staging any credentials because the routing is unknown. An argv that already contains `--no-daemon`, `--remote`, or the daemon-only `agents` command is passed through unchanged. `--json launch` captures Codex stdout/stderr into the JSON envelope instead of mixing them onto stdout.
 - A manual `use` affects the next Codex process and accepts ChatGPT profile aliases only. It updates `auth.json` and resets existing `model_provider` selections in the user `config.toml` and its default inline profile to `openai`, preserving models, provider definitions, MCP settings, and comments. When the live `auth.json` changes (compared as canonical JSON, so formatting-only rewrites do not count) and the Codex app-server daemon (Codex 0.157+) is running, `use` (explicit or auto-selecting), the TUI `u` switch, and a `login` that activates credentials restart it with `codex app-server daemon restart` and report the outcome as a diagnostic; each daemon call is bounded to 15 seconds, and a failed or timed-out restart is a warning, not a failed switch. Set `[use] restart_app_server = false` (or toggle it in TUI Settings) to leave the daemon alone; the outcome then names the manual command. Restart an already-running `codex exec` or `codex --no-daemon` process yourself; `use` without an alias selects the best eligible profile once. Launch flags, project configuration, separately selected Codex profiles, and `openai_base_url` / `OPENAI_BASE_URL` overrides remain unchanged.
 - Update checks are manual except for the one check performed when the TUI starts.
@@ -105,6 +106,7 @@ Mouse input is available alongside the keyboard: click a tab to switch pages, cl
 | `u` (Accounts page when no accounts are marked, or account menu) | Switch to the selected account; the status line shows `Switching to …` while it is in progress |
 | `o` | Open the selected account's launch picker (also `o` in the account menu): use Codex's default, or choose a cached model, one-shot reasoning, and extra Codex arguments |
 | `c` (account menu) | Confirm and consume the earliest-expiring reset card |
+| `r` (account menu) | Refresh usage and the account's authenticated model catalog |
 | `w` (account menu) | Warm up the selected account |
 | `l` (account menu) | Re-login the selected account |
 | `n` (account menu) | Rename the selected account |
@@ -113,6 +115,8 @@ Mouse input is available alongside the keyboard: click a tab to switch pages, cl
 | `h` | Show the complete shortcut list (main view) |
 | `Esc` | Clear filter/marks or close the current popup |
 | `q` | Quit (main view) |
+
+The ChatGPT model list comes from the selected profile's authenticated `/models` response, using the Codex CLI version detected on `PATH`; it is account- and route-specific and is cached in the TUI for five minutes. Use `Enter` then `r` in the account menu to refresh that account's usage and model catalog. The app does not add models that the service did not return. Model request errors report the `client_version` used.
 
 ### Providers tab
 

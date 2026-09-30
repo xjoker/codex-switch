@@ -46,6 +46,7 @@ pub struct ProviderLaunchState {
     extra_editing: bool,
     extra_cursor: usize,
     last_model_click: Option<(usize, Instant)>,
+    catalog_status: Option<String>,
 }
 
 pub enum LaunchPickerOutcome {
@@ -93,6 +94,7 @@ impl ProviderLaunchState {
             extra_editing: false,
             extra_cursor: 0,
             last_model_click: None,
+            catalog_status: None,
         }
     }
 
@@ -135,7 +137,41 @@ impl ProviderLaunchState {
             extra_editing: false,
             extra_cursor: 0,
             last_model_click: None,
+            catalog_status: None,
         }
+    }
+
+    pub(crate) fn update_chatgpt_catalog(
+        &mut self,
+        alias: &str,
+        models: Option<&[ModelEntry]>,
+        status: Option<String>,
+    ) {
+        if self.kind != LaunchKind::Account || self.alias != alias {
+            return;
+        }
+        if let Some(models) = models {
+            let selected_id = self.models.get(self.selected).map(|model| model.id.clone());
+            let previous_reasoning = (self.reasoning_idx, self.custom_reasoning.clone());
+            let mut replacement = Self::from_chatgpt(alias, models);
+            if let Some(index) = selected_id
+                .and_then(|id| replacement.models.iter().position(|model| model.id == id))
+            {
+                replacement.selected = index;
+                replacement.reasoning_idx = previous_reasoning.0;
+                replacement.custom_reasoning = previous_reasoning.1;
+            }
+            replacement.extra_args = std::mem::take(&mut self.extra_args);
+            replacement.extra_error = self.extra_error.take();
+            replacement.extra_editing = self.extra_editing;
+            replacement.extra_cursor = self.extra_cursor;
+            replacement.popup.scroll = self.popup.scroll;
+            // A prior row index may refer to a different model after a refreshed
+            // catalog is sorted or replaced, so it cannot safely complete a double-click.
+            replacement.last_model_click = None;
+            *self = replacement;
+        }
+        self.catalog_status = status;
     }
 
     pub(crate) fn selected_index(&self) -> usize {
@@ -433,6 +469,11 @@ pub fn render_provider_launch(
     lines.push(Line::from(""));
     hits.push(None);
 
+    if let Some(status) = &state.catalog_status {
+        lines.push(Line::from(Span::styled(status.clone(), dim())));
+        hits.push(None);
+    }
+
     for (idx, model) in state.models.iter().enumerate() {
         let selected = idx == state.selected;
         let marker = if selected { "▶ " } else { "  " };
@@ -558,6 +599,106 @@ mod tests {
         // saved high (index of "high") then one Right → xhigh
         assert_eq!(reasoning, ReasoningLaunch::Effort("xhigh".into()));
         assert!(extra_args.is_empty());
+    }
+
+    #[test]
+    fn late_catalog_update_preserves_account_picker_input_and_selection() {
+        let initial = [ModelEntry {
+            slug: "existing-model".into(),
+            default_reasoning_effort: Some("high".into()),
+            ..ModelEntry::default()
+        }];
+        let mut picker = ProviderLaunchState::from_chatgpt("work", &initial);
+        picker.handle_key(KeyCode::Down);
+        picker.handle_key(KeyCode::Right);
+        picker.extra_args = "--cd D:\\My Work".into();
+        picker.extra_editing = true;
+        picker.extra_cursor = 6;
+        picker.extra_error = Some("keep editing".into());
+        picker.popup.scroll = 3;
+
+        let updated = [
+            initial[0].clone(),
+            ModelEntry {
+                slug: "gpt-6.1-sol".into(),
+                ..ModelEntry::default()
+            },
+        ];
+        picker.update_chatgpt_catalog("work", Some(&updated), None);
+
+        assert_eq!(picker.models[picker.selected].id, "existing-model");
+        assert_eq!(picker.reasoning_label(), "xhigh");
+        assert_eq!(picker.extra_args, "--cd D:\\My Work");
+        assert!(picker.extra_editing);
+        assert_eq!(picker.extra_cursor, 6);
+        assert_eq!(picker.extra_error.as_deref(), Some("keep editing"));
+        assert_eq!(picker.popup.scroll, 3);
+        assert!(picker.models.iter().any(|model| model.id == "gpt-6.1-sol"));
+    }
+
+    #[test]
+    fn account_catalog_error_is_visible_and_alias_guard_preserves_provider_picker() {
+        let mut account = ProviderLaunchState::from_chatgpt("work", &[]);
+        account.update_chatgpt_catalog("other", None, Some("wrong account".into()));
+        assert!(account.catalog_status.is_none());
+        account.update_chatgpt_catalog(
+            "work",
+            None,
+            Some("Loading model catalog… Codex default remains available.".into()),
+        );
+        let backend = TestBackend::new(90, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_provider_launch(
+                    frame,
+                    &mut account,
+                    frame.area(),
+                    &mut crate::tui::hitmap::HitMap::default(),
+                )
+            })
+            .unwrap();
+        let joined = (0..20)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Loading model catalog"));
+        assert!(joined.contains("(Codex default)"));
+
+        account.update_chatgpt_catalog(
+            "work",
+            None,
+            Some("Model catalog unavailable: offline. Codex default remains available.".into()),
+        );
+
+        terminal
+            .draw(|frame| {
+                super::render_provider_launch(
+                    frame,
+                    &mut account,
+                    frame.area(),
+                    &mut crate::tui::hitmap::HitMap::default(),
+                )
+            })
+            .unwrap();
+        let joined = (0..20)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Model catalog unavailable: offline"));
+        assert!(joined.contains("(Codex default)"));
+        assert!(
+            matches!(account.handle_key(KeyCode::Enter), LaunchPickerOutcome::Launch { model, .. } if model.is_empty())
+        );
+
+        let mut provider = ProviderLaunchState::from_profile(&profile());
+        provider.update_chatgpt_catalog(
+            "or",
+            None,
+            Some("should not affect provider picker".into()),
+        );
+        assert!(provider.catalog_status.is_none());
+        assert_eq!(provider.models.len(), 2);
     }
 
     use ratatui::{Terminal, backend::TestBackend};

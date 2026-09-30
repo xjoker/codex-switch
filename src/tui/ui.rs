@@ -18,7 +18,7 @@ use crate::jwt::PlanKind;
 use crate::output::{
     format_local_time, format_reset_short, format_reset_time, reset_credits_count,
 };
-use crate::usage::{UsageInfo, is_available};
+use crate::usage::{UsageInfo, format_credits_balance, is_available};
 
 fn status_message_color(is_error: bool) -> Color {
     if is_error { C_RED } else { C_CYAN }
@@ -237,7 +237,7 @@ fn table_text_widths(
     emails: &[&str],
     plans: &[&str],
     show_5h: bool,
-    show_credits: bool,
+    credits_width: Option<u16>,
 ) -> TableTextWidths {
     let desired = |header: &str, values: &[&str]| {
         values
@@ -257,7 +257,7 @@ fn table_text_widths(
 
     // Base borders, spacing, marker and fixed columns consume 44 cells. The
     // optional 5h pair and Credits column add their widths plus spacing.
-    let fixed_width = 44 + u16::from(show_5h) * 20 + u16::from(show_credits) * 11;
+    let fixed_width = 44 + u16::from(show_5h) * 20 + credits_width.unwrap_or(0);
     let budget = total_width.saturating_sub(fixed_width).max(14);
     let total = u32::from(widths.alias) + u32::from(widths.email) + u32::from(widths.plan);
     let mut excess = total.saturating_sub(u32::from(budget));
@@ -304,6 +304,22 @@ fn render_account_table(f: &mut Frame, app: &mut App, area: Rect) {
         .accounts
         .iter()
         .any(|entry| matches!(&entry.usage, UsageStatus::Loaded(usage) if usage.primary.is_some()));
+    let credits_width = show_credits.then(|| {
+        app.accounts
+            .iter()
+            .filter_map(|entry| match &entry.usage {
+                UsageStatus::Loaded(usage) if usage.unlimited_credits == Some(true) => {
+                    Some("unlimited".to_string())
+                }
+                UsageStatus::Loaded(usage) => usage.credits_balance.map(format_credits_balance),
+                _ => None,
+            })
+            .map(|text| u16::try_from(display_width(&text)).unwrap_or(u16::MAX))
+            .max()
+            .unwrap_or(0)
+            .max(u16::try_from(display_width("Credits")).unwrap_or(7))
+            .saturating_add(1)
+    });
 
     let hdr = base().fg(C_CYAN).add_modifier(Modifier::BOLD);
     let mut header_cells = vec![
@@ -605,8 +621,14 @@ fn render_account_table(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     let plans: Vec<&str> = plan_labels.iter().map(String::as_str).collect();
-    let text_widths =
-        table_text_widths(area.width, &aliases, &emails, &plans, show_5h, show_credits);
+    let text_widths = table_text_widths(
+        area.width,
+        &aliases,
+        &emails,
+        &plans,
+        show_5h,
+        credits_width,
+    );
 
     let mut constraints = vec![
         Constraint::Length(2),                 // marker
@@ -624,8 +646,8 @@ fn render_account_table(f: &mut Frame, app: &mut App, area: Rect) {
     }
     constraints.push(Constraint::Length(12)); // 7d reset
     constraints.push(Constraint::Length(7)); // reset cards
-    if show_credits {
-        constraints.push(Constraint::Length(10)); // credits
+    if let Some(credits_width) = credits_width {
+        constraints.push(Constraint::Length(credits_width.saturating_sub(1)));
     }
 
     let table = Table::new(rows, constraints)
@@ -1036,33 +1058,26 @@ fn render_providers_tab(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Compact pay-per-use credits balance for the table column. Mirrors the CLI
-/// `print_usage_line` wording: "unlimited" for unmetered accounts, a dollar
-/// amount when a balance is reported, and "--" when the account does not use
+/// `print_usage_line` wording: "unlimited" for unmetered accounts, a credit
+/// balance when reported, and "--" when the account does not use
 /// the credits system (`credits_balance` absent).
 fn credits_table_text(u: &UsageInfo) -> String {
     if u.unlimited_credits == Some(true) {
         "unlimited".to_string()
     } else if let Some(balance) = u.credits_balance {
-        format!("${balance:.2}")
+        format_credits_balance(balance)
     } else {
         "--".to_string()
     }
 }
 
-/// Same low-balance thresholds as `color::credits` (the CLI renderer), mapped to
-/// the TUI palette so a nearly-empty balance reads red at a glance. Shared with
-/// the account-details popup so the column and the detail line agree on color.
+/// Match `color::credits`: unlimited is green, empty balances are red, and
+/// positive balances stay neutral. Shared with the account-details popup.
 pub(super) fn credits_table_color(u: &UsageInfo) -> Color {
     if u.unlimited_credits == Some(true) {
         C_GREEN
     } else if let Some(balance) = u.credits_balance {
-        if balance >= 10.0 {
-            C_GREEN
-        } else if balance >= 2.0 {
-            C_YELLOW
-        } else {
-            C_RED
-        }
+        if balance <= 0.0 { C_RED } else { C_WHITE }
     } else {
         DIM
     }
@@ -1856,10 +1871,11 @@ fn status_bar_height(app: &App, width: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_YELLOW, DIM, credits_table_color,
-        credits_table_text, plan_color, render_account_table, render_status_bar,
-        render_usage_gauges, reset_cards_color, reset_cards_table_state, status_bar_height,
-        status_message_color, table_text_widths, usage_gauges_height, version_area,
+        C_BLUE, C_CYAN, C_GRAY, C_GREEN, C_MAGENTA, C_RED, C_WHITE, C_YELLOW, DIM,
+        credits_table_color, credits_table_text, plan_color, render_account_table,
+        render_status_bar, render_usage_gauges, reset_cards_color, reset_cards_table_state,
+        status_bar_height, status_message_color, table_text_widths, usage_gauges_height,
+        version_area,
     };
     use crate::jwt::AccountInfo;
     use crate::tui::app::{AccountEntry, App, Tab, UsageStatus};
@@ -2265,7 +2281,7 @@ mod tests {
             &["oai001@ozi.xyz"],
             &["Pro 20×", "Team - NightCity Workspace"],
             true,
-            true,
+            Some(11),
         );
 
         assert!(widths.alias >= "a-very-long-account-alias".chars().count() as u16);
@@ -2280,7 +2296,7 @@ mod tests {
             &["a-very-long-address@example.com"],
             &["Team - NightCity Workspace"],
             true,
-            true,
+            Some(11),
         );
 
         assert!(widths.alias + widths.email + widths.plan <= 16);
@@ -2291,7 +2307,7 @@ mod tests {
         let alias = "a".repeat(45);
         let email = format!("{}@example.com", "e".repeat(40));
         let plan = format!("Team - {}", "Workspace".repeat(5));
-        let widths = table_text_widths(260, &[&alias], &[&email], &[&plan], true, true);
+        let widths = table_text_widths(260, &[&alias], &[&email], &[&plan], true, Some(11));
 
         assert_eq!(widths.alias, alias.len() as u16);
         assert_eq!(widths.email, email.len() as u16);
@@ -2311,21 +2327,28 @@ mod tests {
             credits_balance: Some(15.5),
             ..Default::default()
         };
-        assert_eq!(credits_table_text(&healthy), "$15.50");
-        assert_eq!(credits_table_color(&healthy), C_GREEN);
+        assert_eq!(credits_table_text(&healthy), "15.5 credits");
+        assert_eq!(credits_table_color(&healthy), C_WHITE);
 
         let mid = UsageInfo {
             credits_balance: Some(5.0),
             ..Default::default()
         };
-        assert_eq!(credits_table_color(&mid), C_YELLOW);
+        assert_eq!(credits_table_color(&mid), C_WHITE);
 
         let low = UsageInfo {
             credits_balance: Some(1.0),
             ..Default::default()
         };
-        assert_eq!(credits_table_text(&low), "$1.00");
-        assert_eq!(credits_table_color(&low), C_RED);
+        assert_eq!(credits_table_text(&low), "1 credits");
+        assert_eq!(credits_table_color(&low), C_WHITE);
+
+        let empty = UsageInfo {
+            credits_balance: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(credits_table_text(&empty), "0 credits");
+        assert_eq!(credits_table_color(&empty), C_RED);
 
         // Accounts that don't use the pay-per-use credits system read as "--".
         let none = UsageInfo::default();
@@ -2367,7 +2390,7 @@ mod tests {
         let UsageStatus::Loaded(usage) = &mut app.accounts[0].usage else {
             unreachable!()
         };
-        usage.credits_balance = Some(15.5);
+        usage.credits_balance = Some(62_500.0);
         usage.primary = Some(WindowUsage {
             used_percent: Some(20.0),
             resets_at: Some(crate::auth::now_unix_secs() + 3600),
@@ -2383,7 +2406,7 @@ mod tests {
         assert!(header.contains("5h"), "missing 5h columns: {header}");
         let joined = rows.join("\n");
         assert!(
-            joined.contains("$15.50"),
+            joined.contains("62,500 credits"),
             "the account's credits balance must render in the table:\n{joined}"
         );
     }

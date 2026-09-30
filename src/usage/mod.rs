@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 mod api;
+mod credits;
 mod parse;
 mod reset_credits;
 mod scoring;
@@ -14,6 +15,7 @@ pub use api::{
     fetch_usage_retried, fetch_usage_retried_force, fetch_usage_retried_unattended,
     refresh_expiring_tokens, validate_import_auth,
 };
+pub use credits::format_credits_balance;
 pub(crate) use reset_credits::{merge_cached_reset_credits, should_fetch_reset_credit_details};
 // Re-exported for the lib target's public API (used by integration tests via
 // `codex_switch::usage::X`); the binary target doesn't call these through this

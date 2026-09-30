@@ -495,7 +495,7 @@ impl MenuState {
                 let credits_text = match info.usage.as_deref() {
                     Some(u) if u.unlimited_credits == Some(true) => "unlimited".to_string(),
                     Some(u) => match u.credits_balance {
-                        Some(balance) => format!("${balance:.2}"),
+                        Some(balance) => crate::usage::format_credits_balance(balance),
                         None => "not available".to_string(),
                     },
                     None => "not available".to_string(),
@@ -737,8 +737,8 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, crossterm::event::KeyCode, style::Color};
 
     use super::{
-        AccountMenuInfo, C_CYAN, C_GREEN, C_PURPLE, C_RED, C_YELLOW, MenuAction, MenuState,
-        model_line_spans, quota_lines,
+        AccountMenuInfo, C_CYAN, C_GREEN, C_PURPLE, C_RED, C_WHITE, C_YELLOW, MenuAction,
+        MenuState, model_line_spans, quota_lines,
     };
     use crate::usage::{AdditionalRateLimit, ResetCredit, UsageInfo, WindowUsage};
 
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn account_details_show_a_dedicated_credits_field() {
-        // A pay-per-use balance renders as a dollar amount with the healthy color.
+        // A pay-per-use balance renders as raw credits, not a dollar amount.
         let mut menu = account_menu_with_usage(UsageInfo {
             credits_balance: Some(15.5),
             unlimited_credits: Some(false),
@@ -866,8 +866,8 @@ mod tests {
             find_text(terminal.backend(), "Credits").is_some(),
             "the detail popup must have a dedicated Credits field"
         );
-        let pos = find_text(terminal.backend(), "$15.50").expect("credits balance rendered");
-        assert_eq!(terminal.backend().buffer().cell(pos).unwrap().fg, C_GREEN);
+        let pos = find_text(terminal.backend(), "15.5 credits").expect("credits balance rendered");
+        assert_eq!(terminal.backend().buffer().cell(pos).unwrap().fg, C_WHITE);
 
         // Accounts without the credits system still get an explicit slot rather
         // than silently omitting it (the bug this fixes).

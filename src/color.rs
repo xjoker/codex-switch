@@ -104,17 +104,17 @@ pub fn usage_pct(s: &str, pct: f64) -> String {
     }
 }
 
-/// Color a credits balance: green >= $10, yellow >= $2, red < $2
+/// Keep finite credit balances neutral; only zero or negative balances warn.
 pub fn credits(s: &str, balance: f64, unlimited: bool) -> String {
     if !enabled() {
         return s.to_string();
     }
-    if unlimited || balance >= 10.0 {
+    if unlimited {
         format!("{}", s.green())
-    } else if balance >= 2.0 {
-        format!("{}", s.yellow())
-    } else {
+    } else if balance <= 0.0 {
         format!("{}", s.red())
+    } else {
+        s.to_string()
     }
 }
 

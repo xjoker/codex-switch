@@ -191,13 +191,39 @@ pub fn read_auth(path: &Path) -> Result<serde_json::Value> {
 }
 
 pub(crate) fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let shared_home = user_codex_home().ok();
+        let owned_home = app_home().ok();
+        atomic_write_private_inner(
+            path,
+            contents,
+            shared_home.as_deref(),
+            owned_home.as_deref(),
+        )
+    }
+    #[cfg(not(windows))]
+    atomic_write_private_inner(path, contents)
+}
+
+fn atomic_write_private_inner(
+    path: &Path,
+    contents: &[u8],
+    #[cfg(windows)] shared_home: Option<&Path>,
+    #[cfg(windows)] owned_home: Option<&Path>,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    #[cfg(windows)]
+    let harden_parent =
+        { should_harden_windows_parent(parent, shared_home, owned_home, parent.is_dir()) };
     std::fs::create_dir_all(parent)
         .with_context(|| format!("creating directory {}", parent.display()))?;
     #[cfg(windows)]
-    harden_windows_acl(parent, true)?;
+    if harden_parent {
+        harden_windows_acl(parent, true)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -205,10 +231,12 @@ pub(crate) fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
             .with_context(|| format!("setting permissions on {}", parent.display()))?;
     }
 
+    #[cfg(windows)]
+    let mut tmp = create_private_windows_temp(parent)
+        .with_context(|| format!("creating protected temporary file in {}", parent.display()))?;
+    #[cfg(not(windows))]
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("creating temporary file in {}", parent.display()))?;
-    #[cfg(windows)]
-    harden_windows_acl(tmp.path(), false)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -239,7 +267,49 @@ fn windows_private_acl_sddl(current_user_sid: &str, directory: bool) -> String {
 }
 
 #[cfg(windows)]
+fn should_harden_windows_parent(
+    parent: &Path,
+    shared_codex_home: Option<&Path>,
+    owned_app_home: Option<&Path>,
+    existed_before_write: bool,
+) -> bool {
+    if !existed_before_write || !parent.is_dir() {
+        return true;
+    }
+
+    // Skip a shared Codex home only when all three existing paths resolve
+    // successfully. Canonical paths avoid treating a sibling such as
+    // `codex-switch-old` as a descendant of `codex-switch`; resolution errors
+    // fail closed and retain directory hardening.
+    let (Some(shared), Some(owned)) = (shared_codex_home, owned_app_home) else {
+        return true;
+    };
+    let (Ok(parent_real), Ok(shared_real), Ok(owned_real)) = (
+        parent.canonicalize(),
+        shared.canonicalize(),
+        owned.canonicalize(),
+    ) else {
+        return true;
+    };
+
+    // App-owned paths take precedence over the shared-home exception.
+    if parent_real != shared_real {
+        return true;
+    }
+    parent_real.starts_with(owned_real)
+}
+
+#[cfg(windows)]
 fn harden_windows_acl(path: &Path, directory: bool) -> Result<()> {
+    windows_acl_security_descriptor(path, directory, true).map(|_| ())
+}
+
+#[cfg(windows)]
+fn windows_acl_security_descriptor(
+    path: &Path,
+    directory: bool,
+    apply: bool,
+) -> Result<*mut core::ffi::c_void> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::{null, null_mut};
 
@@ -452,13 +522,17 @@ fn harden_windows_acl(path: &Path, directory: bool) -> Result<()> {
     // and caches (tens of thousands of entries), where that took seconds on
     // every write. Skip the write when the exact protected DACL is already in
     // place; anything else, including an extra or missing ACE, is rewritten.
-    if windows_dacl_already_matches(&path_wide, dacl) {
+    if apply && windows_dacl_already_matches(&path_wide, dacl) {
         tracing::debug!(
             path = %path.display(),
             directory,
             "windows ACL already hardened"
         );
-        return Ok(());
+        return Ok(security_descriptor);
+    }
+
+    if !apply {
+        return Ok(security_descriptor);
     }
 
     let acl_write_start = std::time::Instant::now();
@@ -499,7 +573,59 @@ fn harden_windows_acl(path: &Path, directory: bool) -> Result<()> {
         ));
     }
 
-    Ok(())
+    Ok(security_descriptor)
+}
+
+#[cfg(windows)]
+fn create_private_windows_temp(parent: &Path) -> Result<tempfile::NamedTempFile<std::fs::File>> {
+    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    };
+
+    tempfile::Builder::new()
+        .prefix(".codex-switch-auth-")
+        .make_in(parent, |candidate| {
+            let security_descriptor = windows_acl_security_descriptor(candidate, false, false)
+                .map_err(|error| {
+                    std::io::Error::other(format!("preparing protected ACL: {error:#}"))
+                })?;
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: security_descriptor,
+                bInheritHandle: 0,
+            };
+            let candidate_wide: Vec<u16> = candidate
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            // SECURITY_ATTRIBUTES applies the exact protected DACL when the file is created.
+            // Its descriptor points to the process-lifetime cached SD; the
+            // attributes and NUL-terminated path remain live for this call.
+            let handle = unsafe {
+                CreateFileW(
+                    candidate_wide.as_ptr(),
+                    windows_sys::Win32::Foundation::GENERIC_READ
+                        | windows_sys::Win32::Foundation::GENERIC_WRITE,
+                    FILE_SHARE_DELETE | FILE_SHARE_READ,
+                    &attributes,
+                    CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: CreateFileW returned a uniquely owned file handle which
+            // is transferred to File and closed exactly once by its Drop.
+            Ok(unsafe { std::fs::File::from_raw_handle(handle.cast()) })
+        })
+        .map_err(anyhow::Error::from)
 }
 
 /// Whether the object at `path_wide` already carries a protected DACL whose
@@ -1335,6 +1461,194 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn shared_codex_parent_acl_is_left_alone_but_owned_parent_is_hardened() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join(".codex");
+        let owned = root.path().join("codex-switch");
+        let sibling = root.path().join("codex-switch-old");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::create_dir_all(owned.join("profiles").join("one")).unwrap();
+
+        assert!(!super::should_harden_windows_parent(
+            &shared,
+            Some(&shared),
+            Some(&owned),
+            true
+        ));
+        assert!(super::should_harden_windows_parent(
+            &owned.join("profiles").join("one"),
+            Some(&owned.join("profiles").join("one")),
+            Some(&owned),
+            true
+        ));
+        let owned_alias = owned
+            .join("profiles")
+            .join("..")
+            .join("profiles")
+            .join("one");
+        assert!(super::should_harden_windows_parent(
+            &owned_alias,
+            Some(&owned_alias),
+            Some(&owned),
+            true
+        ));
+        let sibling_alias = owned.join("..").join("codex-switch-old");
+        assert!(!super::should_harden_windows_parent(
+            &sibling_alias,
+            Some(&sibling_alias),
+            Some(&owned),
+            true
+        ));
+        assert!(super::should_harden_windows_parent(
+            &shared,
+            Some(&shared),
+            Some(&shared),
+            true
+        ));
+        assert!(super::should_harden_windows_parent(
+            &root.path().join("missing"),
+            Some(&root.path().join("missing")),
+            Some(&owned),
+            false
+        ));
+        assert!(super::should_harden_windows_parent(
+            &shared,
+            Some(&shared),
+            Some(&root.path().join("missing-owned")),
+            true
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_temp_is_private_before_first_write_and_failed_create_writes_nothing() {
+        use std::os::windows::ffi::OsStrExt;
+
+        fn acl_bytes(path: &Path) -> Vec<Vec<u8>> {
+            use std::os::windows::ffi::OsStrExt;
+
+            use windows_sys::Win32::Foundation::LocalFree;
+            use windows_sys::Win32::Security::Authorization::{
+                GetNamedSecurityInfoW, SE_FILE_OBJECT,
+            };
+            use windows_sys::Win32::Security::{
+                ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce,
+            };
+
+            let wide = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut descriptor = std::ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    GetNamedSecurityInfoW(
+                        wide.as_ptr(),
+                        SE_FILE_OBJECT,
+                        DACL_SECURITY_INFORMATION,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut dacl,
+                        std::ptr::null_mut(),
+                        &mut descriptor,
+                    )
+                },
+                0
+            );
+            let mut result = Vec::new();
+            for index in 0..unsafe { (*dacl).AceCount } as u32 {
+                let mut ace = std::ptr::null_mut();
+                assert_ne!(unsafe { GetAce(dacl, index, &mut ace) }, 0);
+                let size = unsafe { (*ace.cast::<ACE_HEADER>()).AceSize } as usize;
+                result.push(unsafe { std::slice::from_raw_parts(ace.cast::<u8>(), size) }.to_vec());
+            }
+            unsafe { LocalFree(descriptor) };
+            result
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(windows_system_tool("icacls.exe"))
+            .arg(dir.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)RX"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to seed an extra parent ACE");
+        let parent_acl_before = acl_bytes(dir.path());
+        let owned_home = dir.path().join("codex-switch");
+        std::fs::create_dir(&owned_home).unwrap();
+        let temp = super::create_private_windows_temp(dir.path()).unwrap();
+        assert_eq!(
+            acl_bytes(dir.path()),
+            parent_acl_before,
+            "temp creation must not rewrite the parent DACL"
+        );
+        let descriptor = super::windows_acl_security_descriptor(temp.path(), false, false).unwrap();
+        let mut dacl = std::ptr::null_mut();
+        let mut present = 0;
+        let mut defaulted = 0;
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::Security::GetSecurityDescriptorDacl(
+                    descriptor,
+                    &mut present,
+                    &mut dacl,
+                    &mut defaulted,
+                )
+            },
+            0
+        );
+        let wide = temp
+            .path()
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        assert!(super::windows_dacl_already_matches(&wide, dacl));
+        assert_eq!(
+            temp.as_file().metadata().unwrap().len(),
+            0,
+            "temp must be private before content is written"
+        );
+
+        let shared_path = dir.path().join("auth.json");
+        super::atomic_write_private_inner(
+            &shared_path,
+            b"first-secret",
+            Some(dir.path()),
+            Some(&owned_home),
+        )
+        .unwrap();
+        assert_eq!(
+            acl_bytes(dir.path()),
+            parent_acl_before,
+            "writing shared auth must not rewrite the shared parent DACL"
+        );
+        let shared_wide = shared_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        assert!(super::windows_dacl_already_matches(&shared_wide, dacl));
+        super::atomic_write_private_inner(
+            &shared_path,
+            b"replacement-secret",
+            Some(dir.path()),
+            Some(&owned_home),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&shared_path).unwrap(), b"replacement-secret");
+
+        let missing_parent = dir.path().join("does-not-exist");
+        let failure = super::create_private_windows_temp(&missing_parent);
+        assert!(failure.is_err());
+        assert!(std::fs::read_dir(&missing_parent).is_err());
+    }
+
     /// Absolute path of a Windows system tool. Other tests swap `PATH` for a
     /// fake `codex` directory while these run, so a bare name can vanish.
     #[cfg(windows)]
@@ -1410,6 +1724,12 @@ mod tests {
 
         let path = dir.path().join("auth.json");
         super::atomic_write_private(&path, br#"{"refresh_token":"secret"}"#).unwrap();
+        super::atomic_write_private(&path, br#"{"refresh_token":"replacement"}"#).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            br#"{"refresh_token":"replacement"}"#,
+            "a protected temp handle must allow atomic replacement"
+        );
 
         let inspect = r#"
 $ErrorActionPreference = 'Stop'

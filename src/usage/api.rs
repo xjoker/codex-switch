@@ -37,6 +37,95 @@ impl std::error::Error for UsageRateLimited {}
 
 static USAGE_COOLDOWNS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
+struct UsageFetchTiming<'a> {
+    alias: &'a str,
+    started: Instant,
+    attempts: u32,
+    cache: &'static str,
+    outcome: &'static str,
+}
+
+impl<'a> UsageFetchTiming<'a> {
+    fn new(alias: &'a str) -> Self {
+        Self {
+            alias,
+            started: Instant::now(),
+            attempts: 0,
+            cache: "checked",
+            outcome: "error",
+        }
+    }
+}
+
+impl Drop for UsageFetchTiming<'_> {
+    fn drop(&mut self) {
+        info!(
+            profile_alias = diagnostic_alias(self.alias),
+            phase = "usage_total",
+            elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            attempts = self.attempts,
+            cache = self.cache,
+            outcome = self.outcome,
+            "usage fetch finished"
+        );
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn log_local_phase(alias: &str, phase: &'static str, started: Instant, outcome: &'static str) {
+    info!(
+        profile_alias = diagnostic_alias(alias),
+        phase,
+        elapsed_ms = elapsed_ms(started),
+        outcome,
+        "usage local phase finished"
+    );
+}
+
+fn diagnostic_alias(alias: &str) -> &str {
+    if alias.contains('@') {
+        "<redacted-email-alias>"
+    } else {
+        alias
+    }
+}
+
+async fn send_usage_request(
+    alias: &str,
+    phase: &'static str,
+    request: reqwest::RequestBuilder,
+) -> Result<http_retry::BufferedResponse> {
+    let started = Instant::now();
+    match http_retry::send(request, ReplaySafety::DeferredGet).await {
+        Ok(response) => {
+            info!(
+                profile_alias = diagnostic_alias(alias),
+                phase,
+                elapsed_ms = elapsed_ms(started),
+                status = %response.status,
+                response_bytes = response.body.len(),
+                outcome = "response",
+                "usage HTTP phase finished"
+            );
+            Ok(response)
+        }
+        Err(error) => {
+            // Do not log the error string: some transport errors include URL data.
+            info!(
+                profile_alias = diagnostic_alias(alias),
+                phase,
+                elapsed_ms = elapsed_ms(started),
+                outcome = "transport_error",
+                "usage HTTP phase finished"
+            );
+            Err(error)
+        }
+    }
+}
+
 fn usage_cooldowns() -> &'static Mutex<HashMap<String, Instant>> {
     USAGE_COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -276,7 +365,9 @@ fn persist_refreshed_tokens(
     alias: &str,
     presented_refresh_token: &str,
     new_tokens: &RefreshedTokens,
+    operation: &'static str,
 ) -> std::result::Result<(), UsageError> {
+    let started = Instant::now();
     let persisted = crate::profile::update_profile_tokens_if_refresh_matches(
         alias,
         presented_refresh_token,
@@ -284,7 +375,14 @@ fn persist_refreshed_tokens(
         &new_tokens.access_token,
         &new_tokens.refresh_token,
     )
-    .map_err(|err| UsageError::token_persist_failed(alias, &err))?;
+    .map_err(|err| UsageError::token_persist_failed(alias, &err));
+    let persisted = match persisted {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            log_local_phase(alias, operation, started, "error");
+            return Err(error);
+        }
+    };
     if !persisted {
         // The outer retry loop also owns persistence for the captured rotation,
         // while the inner request may already have persisted before replaying
@@ -302,8 +400,10 @@ fn persist_refreshed_tokens(
                         == Some(new_tokens.refresh_token.as_str())
             });
         if already_persisted {
+            log_local_phase(alias, operation, started, "already_persisted");
             return Ok(());
         }
+        log_local_phase(alias, operation, started, "superseded");
         return Err(UsageError {
             summary: "refresh superseded by a concurrent profile update".into(),
             detail: format!(
@@ -311,6 +411,7 @@ fn persist_refreshed_tokens(
             ),
         });
     }
+    log_local_phase(alias, operation, started, "saved");
     Ok(())
 }
 
@@ -607,23 +708,56 @@ async fn fetch_usage_retried_inner(
     _current_alias: &str,
     refresh: Refresh,
 ) -> std::result::Result<UsageInfo, UsageError> {
+    let mut timing = UsageFetchTiming::new(alias);
     if !refresh.skips_usage_cache() {
+        let cache_started = Instant::now();
         if let Some(cached) = crate::cache::get_async(alias).await {
+            log_local_phase(alias, "cache_get_initial", cache_started, "hit");
+            timing.cache = "hit";
+            timing.outcome = "success";
             debug!("{alias}: cache hit");
             return Ok(cached);
         }
+        log_local_phase(alias, "cache_get_initial", cache_started, "miss");
+        timing.cache = "miss";
         debug!("{alias}: cache miss, fetching from API");
     } else {
+        timing.cache = "bypass";
         debug!("{alias}: {refresh:?} refresh, bypassing the usage cache");
     }
 
-    auth::ensure_chatgpt_backend_supported(&format!("fetch ChatGPT usage for profile '{alias}'"))
-        .map_err(|error| UsageError {
+    let policy_started = Instant::now();
+    let policy_result = auth::ensure_chatgpt_backend_supported(&format!(
+        "fetch ChatGPT usage for profile '{alias}'"
+    ));
+    log_local_phase(
+        alias,
+        "policy_check",
+        policy_started,
+        if policy_result.is_ok() {
+            "allowed"
+        } else {
+            "denied"
+        },
+    );
+    policy_result.map_err(|error| UsageError {
         summary: "managed authentication policy".into(),
         detail: format!("[{alias}] {error:#}"),
     })?;
 
-    let val = auth::read_auth(profile_path).map_err(|e| {
+    let profile_read_started = Instant::now();
+    let profile_result = auth::read_auth(profile_path);
+    log_local_phase(
+        alias,
+        "profile_read",
+        profile_read_started,
+        if profile_result.is_ok() {
+            "read"
+        } else {
+            "error"
+        },
+    );
+    let val = profile_result.map_err(|e| {
         let detail = format!("failed to read auth file {}: {e}", profile_path.display());
         UsageError {
             summary: "auth file unreadable".into(),
@@ -642,7 +776,17 @@ async fn fetch_usage_retried_inner(
     // explicit user force skips this — see [`Refresh`].
     if !refresh.may_re_present_a_rejected_credential()
         && let Some(rt) = refresh_token.as_deref()
-        && let Some(known) = crate::cache::get_auth_failure_async(alias, rt).await
+        && let Some(known) = {
+            let started = Instant::now();
+            let result = crate::cache::get_auth_failure_async(alias, rt).await;
+            log_local_phase(
+                alias,
+                "cache_get_auth_verdict",
+                started,
+                if result.is_some() { "hit" } else { "miss" },
+            );
+            result
+        }
     {
         debug!("{alias}: credential already rejected by the auth server, not retrying");
         return Err(known);
@@ -683,9 +827,18 @@ async fn fetch_usage_retried_inner(
     let mut max_attempts = MAX_RETRIES;
     let mut attempt = 0;
     while attempt < max_attempts {
+        timing.attempts = attempt + 1;
         if attempt > 0 {
-            debug!("[{alias}] retry attempt {}/{max_attempts}", attempt + 1);
+            let retry_started = Instant::now();
             tokio::time::sleep(RETRY_DELAY).await;
+            info!(
+                profile_alias = diagnostic_alias(alias),
+                phase = "usage_retry_wait",
+                attempt = attempt + 1,
+                elapsed_ms = elapsed_ms(retry_started),
+                "usage retry delay"
+            );
+            debug!("[{alias}] retry attempt {}/{max_attempts}", attempt + 1);
         }
 
         // Deliberately *after* the delay. The winner writes the rotated token
@@ -747,7 +900,7 @@ async fn fetch_usage_retried_inner(
                     &anyhow::anyhow!("refresh response without presented refresh_token"),
                 )
             })?;
-            persist_refreshed_tokens(alias, presented, new_tokens)?;
+            persist_refreshed_tokens(alias, presented, new_tokens, "token_persist_reconcile")?;
             at = new_tokens.access_token.clone();
             id_token = Some(new_tokens.id_token.clone());
             refresh_token = Some(new_tokens.refresh_token.clone());
@@ -755,9 +908,19 @@ async fn fetch_usage_retried_inner(
 
         match outcome.result {
             Ok(mut usage) => {
+                let cache_get_started = Instant::now();
                 let cached = crate::cache::get_async(alias).await;
+                log_local_phase(
+                    alias,
+                    "cache_get_reset_merge",
+                    cache_get_started,
+                    if cached.is_some() { "hit" } else { "miss" },
+                );
                 merge_cached_reset_credits(&mut usage, cached.as_ref(), chrono::Utc::now());
+                let cache_put_started = Instant::now();
                 crate::cache::put_async(alias, &usage).await;
+                log_local_phase(alias, "cache_put_usage", cache_put_started, "complete");
+                timing.outcome = "success";
                 return Ok(usage);
             }
             Err(e) => {
@@ -876,7 +1039,29 @@ async fn fetch_usage_capturing_refresh(
     terminal_refresh: &mut Option<TerminalAuthError>,
     persist_rotated_tokens: bool,
 ) -> Result<UsageInfo> {
-    let client = auth::build_http_client()?;
+    let client_started = Instant::now();
+    let client = match auth::build_http_client() {
+        Ok(client) => {
+            info!(
+                profile_alias = diagnostic_alias(alias),
+                phase = "client_build",
+                elapsed_ms = elapsed_ms(client_started),
+                outcome = "success",
+                "usage HTTP client build finished"
+            );
+            client
+        }
+        Err(error) => {
+            info!(
+                profile_alias = diagnostic_alias(alias),
+                phase = "client_build",
+                elapsed_ms = elapsed_ms(client_started),
+                outcome = "error",
+                "usage HTTP client build finished"
+            );
+            return Err(error);
+        }
+    };
     let usage_url = usage_url();
     let mut rejected_refresh: Option<anyhow::Error> = None;
 
@@ -892,8 +1077,13 @@ async fn fetch_usage_capturing_refresh(
                 let bearer = new_tokens.access_token.clone();
                 *refreshed = Some(new_tokens);
                 if persist_rotated_tokens {
-                    persist_refreshed_tokens(alias, rt, refreshed.as_ref().unwrap())
-                        .map_err(|error| anyhow::anyhow!(error.detail))?;
+                    persist_refreshed_tokens(
+                        alias,
+                        rt,
+                        refreshed.as_ref().unwrap(),
+                        "token_persist_before_replay",
+                    )
+                    .map_err(|error| anyhow::anyhow!(error.detail))?;
                 }
 
                 let resp = apply_account_routing_headers(
@@ -903,7 +1093,7 @@ async fn fetch_usage_capturing_refresh(
                     account_id,
                     is_fedramp,
                 );
-                let resp = http_retry::send(resp, ReplaySafety::DeferredGet)
+                let resp = send_usage_request(alias, "usage_get_after_proactive_refresh", resp)
                     .await
                     .context("Usage API request failed")?;
 
@@ -944,7 +1134,7 @@ async fn fetch_usage_capturing_refresh(
         account_id,
         is_fedramp,
     );
-    let resp = http_retry::send(resp, ReplaySafety::DeferredGet)
+    let resp = send_usage_request(alias, "usage_get", resp)
         .await
         .context("Usage API request failed")?;
 
@@ -977,8 +1167,13 @@ async fn fetch_usage_capturing_refresh(
                 let bearer = new_tokens.access_token.clone();
                 *refreshed = Some(new_tokens);
                 if persist_rotated_tokens {
-                    persist_refreshed_tokens(alias, rt, refreshed.as_ref().unwrap())
-                        .map_err(|error| anyhow::anyhow!(error.detail))?;
+                    persist_refreshed_tokens(
+                        alias,
+                        rt,
+                        refreshed.as_ref().unwrap(),
+                        "token_persist_before_replay",
+                    )
+                    .map_err(|error| anyhow::anyhow!(error.detail))?;
                 }
 
                 let resp2 = apply_account_routing_headers(
@@ -988,7 +1183,7 @@ async fn fetch_usage_capturing_refresh(
                     account_id,
                     is_fedramp,
                 );
-                let resp2 = http_retry::send(resp2, ReplaySafety::DeferredGet)
+                let resp2 = send_usage_request(alias, "usage_get_after_401_refresh", resp2)
                     .await
                     .context("Usage API retry request failed")?;
 
@@ -1164,22 +1359,58 @@ pub(crate) async fn do_refresh_token(
     let token_url = auth::token_url();
     debug!("[{alias}] sending token refresh request");
 
-    let resp = build_refresh_request(client, &token_url, refresh_token)
+    let refresh_started = Instant::now();
+    let resp = match build_refresh_request(client, &token_url, refresh_token)
         .send()
         .await
-        .map_err(|error| auth::format_auth_reqwest_error("token refresh request failed", error))?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            info!(
+                profile_alias = diagnostic_alias(alias),
+                phase = "refresh_post",
+                elapsed_ms = elapsed_ms(refresh_started),
+                outcome = "transport_error",
+                "credential refresh HTTP phase finished"
+            );
+            return Err(auth::format_auth_reqwest_error(
+                "token refresh request failed",
+                error,
+            ));
+        }
+    };
 
     let status = resp.status();
     debug!("[{alias}] token refresh response: HTTP {status}");
 
     // Read the body once for parsing, but never log its contents: unknown
     // server error bodies can carry credentials outside our known schema.
-    let body_text = resp.text().await.map_err(|error| {
-        auth::format_auth_reqwest_error(
-            &format!("failed to read token refresh response body (HTTP {status})"),
-            error,
-        )
-    })?;
+    let body_text = match resp.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            info!(
+                profile_alias = diagnostic_alias(alias),
+                phase = "refresh_post",
+                elapsed_ms = elapsed_ms(refresh_started),
+                status = %status,
+                outcome = "body_error",
+                "credential refresh HTTP phase finished"
+            );
+            return Err(auth::format_auth_reqwest_error(
+                &format!("failed to read token refresh response body (HTTP {status})"),
+                error,
+            ));
+        }
+    };
+    info!(
+        profile_alias = diagnostic_alias(alias),
+        phase = "refresh_post",
+        elapsed_ms = elapsed_ms(refresh_started),
+        status = %status,
+        response_bytes = body_text.len(),
+        outcome = "response",
+        "credential refresh HTTP phase finished"
+    );
 
     let r: RefreshResponse = serde_json::from_str(&body_text).map_err(|e| {
         debug!(
@@ -1365,7 +1596,7 @@ pub async fn refresh_expiring_tokens_within(
                 )
                 .await
                 {
-                    Ok(new_tokens) => match persist_refreshed_tokens(&alias, &rt, &new_tokens) {
+                    Ok(new_tokens) => match persist_refreshed_tokens(&alias, &rt, &new_tokens, "token_persist_opportunistic") {
                         Ok(()) => {
                             info!("[{alias}] opportunistic token refresh succeeded");
                             None
@@ -1421,6 +1652,104 @@ mod tests {
     use super::*;
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use serde_json::json;
+
+    #[derive(Clone, Default)]
+    struct TimingLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for TimingLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TimingLog {
+        type Writer = TimingLog;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl TimingLog {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).to_string()
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_http_timing_includes_delayed_mock_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            stream.write_all(b"{}").await.unwrap();
+            stream.flush().await.unwrap();
+        });
+
+        let logs = TimingLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let response = send_usage_request(
+            "private@example.invalid",
+            "usage_get",
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/usage")),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.status, reqwest::StatusCode::OK);
+        let output = logs.contents();
+        let usage_line = output
+            .lines()
+            .find(|line| line.contains("usage_get"))
+            .expect("usage GET timing event should be captured");
+        let field = |name: &str| {
+            usage_line
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix(&format!("{name}=")))
+                .map(|value| value.trim_matches('"'))
+        };
+        assert_eq!(field("phase"), Some("usage_get"), "{usage_line}");
+        assert!(output.contains("<redacted-email-alias>"), "{output}");
+        assert!(!output.contains("private@example.invalid"), "{output}");
+        assert_eq!(
+            field("status").and_then(|value| value.split(' ').next()),
+            Some("200")
+        );
+        assert_eq!(field("response_bytes"), Some("2"));
+        let elapsed = field("elapsed_ms")
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("timing log should contain integer elapsed_ms");
+        assert!(
+            elapsed >= 100,
+            "delayed response was not included: {output}"
+        );
+    }
 
     fn jwt_with_exp(exp: i64) -> String {
         let payload = URL_SAFE_NO_PAD.encode(serde_json::json!({"exp": exp}).to_string());

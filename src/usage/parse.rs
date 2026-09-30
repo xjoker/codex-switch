@@ -186,7 +186,7 @@ pub fn parse_usage(body: &Value) -> UsageInfo {
         .unwrap_or(true);
 
     // balance changed from number to string "0" in new API — handle both.
-    // Skip entirely when has_credits=false to avoid showing "$0.00" for accounts
+    // Skip entirely when has_credits=false to avoid showing a zero balance for accounts
     // that simply don't use the pay-per-use credits system.
     let credits_balance = if has_credits {
         body.pointer("/credits/balance").and_then(|v| {

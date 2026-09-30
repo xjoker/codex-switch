@@ -184,7 +184,7 @@ pub(crate) fn print_usage_line(u: &usage::UsageInfo) {
         let text = if unlimited {
             "credits: unlimited".to_string()
         } else {
-            format!("credits: ${balance:.2}")
+            usage::format_credits_balance(balance)
         };
         println!("  {}", color::credits(&text, balance, unlimited));
     }

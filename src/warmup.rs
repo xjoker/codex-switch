@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::http_retry::{self, ReplaySafety};
 
@@ -212,6 +212,7 @@ pub(crate) async fn fetch_models(
     is_fedramp: bool,
 ) -> Result<Vec<ModelEntry>> {
     let version = crate::auth::codex_cli_version();
+    let started = Instant::now();
     for attempt in 1..=3 {
         let response = http_retry::send(
             build_models_request(client, access_token, account_id, is_fedramp, version),
@@ -220,20 +221,86 @@ pub(crate) async fn fetch_models(
         .await;
         match response {
             Ok(resp) if resp.status.is_success() => {
-                let body: serde_json::Value = serde_json::from_slice(&resp.body)?;
-                return parse_models_body(&body);
+                let body: serde_json::Value =
+                    serde_json::from_slice(&resp.body).map_err(|error| {
+                        info!(
+                            status = resp.status.as_u16(),
+                            client_version = version,
+                            is_fedramp,
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            outcome = "invalid_json",
+                            "authenticated /models response is not valid JSON"
+                        );
+                        anyhow::Error::new(error).context(format!(
+                            "decoding /models response for Codex client_version {version}"
+                        ))
+                    })?;
+                let models = parse_models_body(&body).map_err(|error| {
+                    info!(
+                        status = resp.status.as_u16(),
+                        client_version = version,
+                        is_fedramp,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        outcome = "invalid_catalog",
+                        "authenticated /models catalog could not be parsed"
+                    );
+                    error.context(format!(
+                        "parsing /models catalog for Codex client_version {version}"
+                    ))
+                })?;
+                if models.is_empty() {
+                    info!(
+                        model_count = 0,
+                        status = resp.status.as_u16(),
+                        client_version = version,
+                        is_fedramp,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        outcome = "empty_catalog",
+                        "authenticated /models catalog returned no models"
+                    );
+                    return Ok(models);
+                }
+                info!(
+                    model_count = models.len(),
+                    status = resp.status.as_u16(),
+                    client_version = version,
+                    is_fedramp,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    outcome = "ok",
+                    "fetched authenticated /models catalog"
+                );
+                return Ok(models);
             }
             Ok(resp) => {
                 let status = resp.status;
                 let retryable = status.is_server_error();
                 if !retryable || attempt == 3 {
-                    return Err(ModelsHttpError(status).into());
+                    info!(
+                        status = status.as_u16(),
+                        client_version = version,
+                        is_fedramp,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        outcome = "http_error",
+                        "authenticated /models catalog request failed"
+                    );
+                    return Err(anyhow::Error::new(ModelsHttpError(status)).context(format!(
+                        "/models request used Codex client_version {version}"
+                    )));
                 }
                 debug!("models fetch attempt {attempt}/3 returned {status}; retrying");
             }
             Err(error) => {
                 if attempt == 3 {
-                    return Err(error.context("models fetch failed after 3 attempts"));
+                    info!(
+                        client_version = version,
+                        is_fedramp,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        outcome = "transport_error",
+                        "authenticated /models catalog request failed"
+                    );
+                    return Err(error.context(format!(
+                        "models fetch failed after 3 attempts with Codex client_version {version}"
+                    )));
                 }
                 debug!("models fetch attempt {attempt}/3 failed: {error}; retrying");
             }
@@ -258,6 +325,19 @@ fn is_models_auth_error(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<ModelsHttpError>()
         .is_some_and(|error| error.0 == reqwest::StatusCode::UNAUTHORIZED)
+}
+
+fn require_profile_model_catalog(
+    alias: &str,
+    models: Vec<ModelEntry>,
+    client_version: &str,
+) -> Result<Vec<ModelEntry>> {
+    if models.is_empty() {
+        bail!(
+            "{alias}: authenticated /models catalog returned no models for Codex client_version {client_version}"
+        );
+    }
+    Ok(models)
 }
 
 /// Resolve every model this warmup should touch, from one `/models` response:
@@ -1063,7 +1143,7 @@ pub(crate) async fn fetch_models_for_profile(
         }
     }
 
-    match fetch_models(
+    let models = match fetch_models(
         &client,
         &profile_tokens.access_token,
         profile_tokens.account_id.as_deref(),
@@ -1071,7 +1151,7 @@ pub(crate) async fn fetch_models_for_profile(
     )
     .await
     {
-        Ok(models) => Ok(models),
+        Ok(models) => models,
         Err(error) if is_models_auth_error(&error) => {
             let expected = profile_tokens.clone();
             profile_tokens = if refresh_attempted {
@@ -1092,10 +1172,11 @@ pub(crate) async fn fetch_models_for_profile(
                 profile_tokens.account_id.as_deref(),
                 profile_tokens.is_fedramp,
             )
-            .await
+            .await?
         }
-        Err(error) => Err(error),
-    }
+        Err(error) => return Err(error),
+    };
+    require_profile_model_catalog(alias, models, crate::auth::codex_cli_version())
 }
 
 #[cfg(test)]
@@ -1374,6 +1455,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["first", "second"]
         );
+    }
+
+    #[test]
+    fn model_parser_preserves_the_gpt_6_1_sol_slug_from_the_server_catalog() {
+        let models = parse_models_body(&serde_json::json!({
+            "models": [{"slug": "gpt-6.1-sol", "visibility": "List"}]
+        }))
+        .unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "gpt-6.1-sol");
+        assert_eq!(models[0].visibility.as_deref(), Some("List"));
+    }
+
+    #[test]
+    fn empty_profile_catalog_is_an_explicit_versioned_error() {
+        let error = require_profile_model_catalog("sample", Vec::new(), "0.159.2")
+            .expect_err("the account picker must not render an empty catalog as loading");
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated /models catalog returned no models")
+        );
+        assert!(error.to_string().contains("client_version 0.159.2"));
     }
 
     #[test]
@@ -1808,6 +1913,15 @@ mod tests {
         )
         .build()
         .unwrap();
+
+        assert_eq!(
+            request
+                .url()
+                .query_pairs()
+                .find(|(key, _)| key == "client_version")
+                .map(|(_, value)| value.into_owned()),
+            Some("0.144.1".to_string())
+        );
 
         assert_eq!(
             request
