@@ -112,7 +112,7 @@ fn restart_daemon_if_running(allow_restart: bool) -> DaemonRestart {
 /// write handles (on Windows, through the node process behind `codex.cmd`),
 /// so EOF may never arrive. The exit status is what matters then, so whatever
 /// was not delivered in time is dropped.
-fn output_with_timeout(mut command: Command, timeout: Duration) -> io::Result<Output> {
+pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> io::Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -431,12 +431,15 @@ mod tests {
 
     #[test]
     fn hung_codex_is_killed_at_the_deadline() {
-        let command = if cfg!(windows) {
+        #[cfg(windows)]
+        let command = {
             let mut c = Command::new(powershell_exe());
             c.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
             c
-        } else {
-            let mut c = Command::new("sleep");
+        };
+        #[cfg(not(windows))]
+        let command = {
+            let mut c = Command::new("/bin/sleep");
             c.arg("30");
             c
         };
@@ -450,16 +453,19 @@ mod tests {
     fn output_returns_promptly_when_a_grandchild_keeps_the_pipe_open() {
         // The direct child exits at once but leaves a grandchild holding the
         // inherited pipe write handles, so the readers never see EOF.
-        let command = if cfg!(windows) {
+        #[cfg(windows)]
+        let command = {
             let mut c = Command::new(windows_system_tool("cmd.exe"));
             c.arg("/c").arg(format!(
                 "start /b {} -NoProfile -Command Start-Sleep 8",
                 powershell_exe().display()
             ));
             c
-        } else {
+        };
+        #[cfg(not(windows))]
+        let command = {
             let mut c = Command::new("/bin/sh");
-            c.args(["-c", "sleep 8 & exit 0"]);
+            c.args(["-c", "/bin/sleep 8 & exit 0"]);
             c
         };
         let started = Instant::now();

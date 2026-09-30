@@ -624,10 +624,10 @@ async fn each_retry_round_presents_the_rotated_refresh_token() {
 }
 
 /// D3: OpenAI returns `error` as an object, not the OAuth-standard string.
-/// The actionable server message must survive deserialization instead of being
-/// replaced by a serde type error.
+/// Preserve the actionable code without echoing a server-controlled message
+/// that may contain the rejected credential.
 #[tokio::test]
-async fn object_shaped_oauth_error_is_reported_with_code_and_message() {
+async fn object_shaped_oauth_error_keeps_code_without_echoing_credentials() {
     let _lock = ENV_LOCK.lock().await;
     let server = MockServer::start(
         vec![(
@@ -639,7 +639,7 @@ async fn object_shaped_oauth_error_is_reported_with_code_and_message() {
             json!({
                 "error": {
                     "code": "refresh_token_reused",
-                    "message": "Your refresh token has already been used to generate a new access token. Please try signing in again.",
+                    "message": "Rejected credential: secret-refresh-token. Please try signing in again.",
                     "param": null,
                     "type": "invalid_request_error",
                 }
@@ -659,8 +659,8 @@ async fn object_shaped_oauth_error_is_reported_with_code_and_message() {
         err.detail
     );
     assert!(
-        err.detail.contains("Please try signing in again."),
-        "server error message missing from user-facing detail: {}",
+        err.detail.contains("sign in again") && !err.detail.contains("secret-refresh-token"),
+        "refresh failure must be actionable without echoing credentials: {}",
         err.detail
     );
     server.shutdown();
@@ -668,7 +668,7 @@ async fn object_shaped_oauth_error_is_reported_with_code_and_message() {
 
 /// D3/D4: the OAuth-standard string shape must keep working too.
 #[tokio::test]
-async fn string_shaped_oauth_error_is_reported_with_description() {
+async fn string_shaped_oauth_error_keeps_code_without_echoing_credentials() {
     let _lock = ENV_LOCK.lock().await;
     let server = MockServer::start(
         vec![(
@@ -682,7 +682,7 @@ async fn string_shaped_oauth_error_is_reported_with_description() {
             StatusCode::BAD_REQUEST,
             json!({
                 "error": "invalid_grant",
-                "error_description": "The refresh token is invalid or has expired.",
+                "error_description": "The refresh token secret-refresh-token is invalid or has expired.",
             }),
         )],
     )
@@ -699,9 +699,8 @@ async fn string_shaped_oauth_error_is_reported_with_description() {
         err.detail
     );
     assert!(
-        err.detail
-            .contains("The refresh token is invalid or has expired."),
-        "server error description missing from user-facing detail: {}",
+        err.detail.contains("sign in again") && !err.detail.contains("secret-refresh-token"),
+        "refresh failure must be actionable without echoing credentials: {}",
         err.detail
     );
     server.shutdown();

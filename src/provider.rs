@@ -27,6 +27,7 @@ use anyhow::{Context, Result};
 use fs4::{FileExt, TryLockError};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use crate::auth;
@@ -93,10 +94,15 @@ pub struct ProviderProfile {
     /// Models this endpoint can run. At least one; `default_model` must be in it.
     #[serde(default)]
     pub models: Vec<ProviderModel>,
-    /// Last conclusive result from the explicit `provider probe` command.
-    /// Missing means unknown; launch never performs this network request.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    responses_support: BTreeMap<String, bool>,
+    /// Recent conclusive result from `provider probe`. Entries are tied to the
+    /// effective endpoint and credentials, and expire so a transient outage
+    /// can never permanently deny a model at launch.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_responses_support",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    responses_support: BTreeMap<String, ResponsesSupportRecord>,
     /// Legacy single-model field from pre-multi-model files. Read on load, never
     /// written back.
     #[serde(default, skip_serializing)]
@@ -308,7 +314,32 @@ impl ProviderProfile {
         }
         self.responses_support
             .retain(|slug, _| self.models.iter().any(|model| model.id == *slug));
+        self.trim_responses_support();
         self.model.clear();
+    }
+
+    fn trim_responses_support(&mut self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        self.responses_support.retain(|_, record| {
+            record.checked_at <= now
+                && now.saturating_sub(record.checked_at) <= RESPONSES_SUPPORT_TTL_SECS
+        });
+        if self.responses_support.len() <= MAX_RESPONSES_SUPPORT_ENTRIES {
+            return;
+        }
+        let mut oldest: Vec<(u64, String)> = self
+            .responses_support
+            .iter()
+            .map(|(model, record)| (record.checked_at, model.clone()))
+            .collect();
+        oldest.sort_unstable();
+        let remove_count = oldest.len() - MAX_RESPONSES_SUPPORT_ENTRIES;
+        for (_, model) in oldest.into_iter().take(remove_count) {
+            self.responses_support.remove(&model);
+        }
     }
 
     /// Reject anything Codex (or our launch translation) would choke on before
@@ -387,7 +418,9 @@ impl ProviderProfile {
         }
         for entry in &self.codex_config {
             match entry.split_once('=') {
-                Some((key, _)) if !key.trim().is_empty() => {}
+                Some((key, _)) if !key.trim().is_empty() => {
+                    validate_provider_override_shape(&self.provider_id, key)?;
+                }
                 _ => anyhow::bail!(
                     "codex config override '{entry}' must be in KEY=VALUE form with a non-empty key"
                 ),
@@ -424,21 +457,79 @@ impl ProviderProfile {
     }
 
     pub(crate) fn responses_support_for(&self, model: &str) -> Option<bool> {
-        self.responses_support.get(model).copied()
+        let record = self.responses_support.get(model)?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        if record.fingerprint.is_empty()
+            || record.checked_at > now
+            || now.saturating_sub(record.checked_at) > RESPONSES_SUPPORT_TTL_SECS
+            || self.responses_support_fingerprint().ok()?.as_str() != record.fingerprint
+        {
+            return None;
+        }
+        match record.support {
+            ResponsesSupport::Supported => Some(true),
+            ResponsesSupport::Unsupported => Some(false),
+            ResponsesSupport::Unknown => None,
+        }
     }
 
     pub(crate) fn record_responses_probes(&mut self, probes: &[ResponsesProbe]) {
+        let Ok(fingerprint) = self.responses_support_fingerprint() else {
+            self.responses_support.clear();
+            return;
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        self.responses_support.retain(|_, record| {
+            record.fingerprint == fingerprint
+                && record.checked_at <= now
+                && now.saturating_sub(record.checked_at) <= RESPONSES_SUPPORT_TTL_SECS
+        });
         for probe in probes {
             match probe.support {
                 ResponsesSupport::Supported => {
-                    self.responses_support.insert(probe.model.clone(), true);
+                    self.responses_support.insert(
+                        probe.model.clone(),
+                        ResponsesSupportRecord {
+                            support: ResponsesSupport::Supported,
+                            fingerprint: fingerprint.clone(),
+                            checked_at: now,
+                        },
+                    );
                 }
                 ResponsesSupport::Unsupported => {
-                    self.responses_support.insert(probe.model.clone(), false);
+                    self.responses_support.insert(
+                        probe.model.clone(),
+                        ResponsesSupportRecord {
+                            support: ResponsesSupport::Unsupported,
+                            fingerprint: fingerprint.clone(),
+                            checked_at: now,
+                        },
+                    );
                 }
-                ResponsesSupport::Unknown => {}
+                ResponsesSupport::Unknown => {
+                    self.responses_support.remove(&probe.model);
+                }
             }
         }
+        if self.responses_support.len() > MAX_RESPONSES_SUPPORT_ENTRIES {
+            let mut oldest: Vec<(u64, String)> = self
+                .responses_support
+                .iter()
+                .map(|(model, record)| (record.checked_at, model.clone()))
+                .collect();
+            oldest.sort_unstable();
+            let remove_count = oldest.len() - MAX_RESPONSES_SUPPORT_ENTRIES;
+            for (_, model) in oldest.into_iter().take(remove_count) {
+                self.responses_support.remove(&model);
+            }
+        }
+    }
+
+    fn responses_support_fingerprint(&self) -> Result<String> {
+        Ok(resolve_provider_connection(self)?.fingerprint())
     }
 
     /// Compact list label: the default model, plus how many others exist.
@@ -520,6 +611,27 @@ impl ProviderProfile {
     /// profile's `env_key`. Injected into the child process only.
     pub fn launch_env(&self) -> (String, String) {
         (self.env_key.clone(), self.api_key.clone())
+    }
+
+    /// Clone this profile for a native Codex run, moving saved provider leaf
+    /// overrides along with the runtime provider ID. The native session uses
+    /// a per-run provider ID, so leaving these `-c model_providers.<alias>.*`
+    /// entries untouched creates an incomplete second provider in Codex.
+    pub(crate) fn for_runtime_provider_id(&self, runtime_provider_id: &str) -> Self {
+        let mut runtime = self.clone();
+        let original_prefix = format!("model_providers.{}.", self.provider_id);
+        let runtime_prefix = format!("model_providers.{runtime_provider_id}.");
+        for entry in &mut runtime.codex_config {
+            if let Some((key, value)) = entry.split_once('=') {
+                if key.trim() == "model_provider" {
+                    *entry = format!("model_provider={}", toml_string(runtime_provider_id));
+                } else if let Some(suffix) = key.trim().strip_prefix(&original_prefix) {
+                    *entry = format!("{runtime_prefix}{suffix}={value}");
+                }
+            }
+        }
+        runtime.provider_id = runtime_provider_id.to_string();
+        runtime
     }
 
     pub(crate) fn has_explicit_model_catalog(&self) -> bool {
@@ -711,6 +823,7 @@ fn tailor_saved_catalog(
             })
             .with_context(|| format!("saved provider catalog is missing model '{slug}'"))?;
         let mut entry = remaining.remove(index);
+        repair_legacy_generated_instructions(&mut entry)?;
         let effort = if slug == selected_slug {
             match reasoning {
                 ReasoningLaunch::Saved => models
@@ -726,7 +839,13 @@ fn tailor_saved_catalog(
                 .find(|model| model.id == *slug)
                 .and_then(|model| model.reasoning.as_deref())
         };
-        apply_catalog_reasoning(&mut entry, effort)?;
+        apply_catalog_reasoning_with_clear(
+            &mut entry,
+            effort,
+            slug == selected_slug
+                && (matches!(reasoning, ReasoningLaunch::Skip)
+                    || (effort.is_some() && thinking_effort(effort).is_none())),
+        )?;
         let object = entry
             .as_object_mut()
             .context("saved provider catalog model is not an object")?;
@@ -740,8 +859,13 @@ fn tailor_saved_catalog(
         if slug == selected_slug
             && let Some(context_window) = selected_context_window
         {
-            object.insert("context_window".into(), context_window.into());
-            object.insert("max_context_window".into(), context_window.into());
+            let max_context_window = object.get("max_context_window").and_then(json_positive_i64);
+            object.insert(
+                "context_window".into(),
+                max_context_window
+                    .map_or(context_window, |max| context_window.min(max))
+                    .into(),
+            );
         }
         ordered.push(entry);
     }
@@ -749,10 +873,8 @@ fn tailor_saved_catalog(
     Ok(())
 }
 
-/// Codex's fallback for an unknown slug is a 272k window. Custom models such as
-/// GLM-5.3 Flash are 1M; using the fallback is what the metadata warning means
-/// by "degrade performance".
-const DEFAULT_PROVIDER_CONTEXT_WINDOW: i64 = 1_048_576;
+/// Codex 0.159.2's fallback metadata uses a 272k context for unknown slugs.
+const DEFAULT_PROVIDER_CONTEXT_WINDOW: i64 = 272_000;
 
 /// Gateways at or under this size can be imported wholesale with
 /// `--fetch-models` / TUI `f`. Larger catalogs (OpenRouter is hundreds) must
@@ -760,6 +882,11 @@ const DEFAULT_PROVIDER_CONTEXT_WINDOW: i64 = 1_048_576;
 pub(crate) const SMALL_REMOTE_CATALOG_LIMIT: usize = 48;
 
 const GATEWAY_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_GATEWAY_MODELS_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROVIDER_CATALOG_BODY_BYTES: usize = 1024 * 1024;
+const MAX_RESPONSES_PROBE_BODY_BYTES: usize = 1024 * 1024;
+const RESPONSES_SUPPORT_TTL_SECS: u64 = 5 * 60;
+const MAX_RESPONSES_SUPPORT_ENTRIES: usize = 256;
 
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 
@@ -771,6 +898,45 @@ pub(crate) struct RemoteModel {
     pub description: Option<String>,
     pub context_window: Option<i64>,
     pub input_modalities: Vec<String>,
+    /// Full Codex-native model metadata, retained so catalog extensions and
+    /// instruction templates survive a read/write round trip.
+    pub catalog_entry: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResponsesSupportRecord {
+    support: ResponsesSupport,
+    fingerprint: String,
+    checked_at: u64,
+}
+
+/// Old files stored `model -> bool`. Retain their shape as stale records so
+/// they load cleanly but cannot preserve an old launch denial.
+fn deserialize_responses_support<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, ResponsesSupportRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let stored = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    stored
+        .into_iter()
+        .map(|(model, value)| {
+            let record = match value {
+                serde_json::Value::Bool(supported) => ResponsesSupportRecord {
+                    support: if supported {
+                        ResponsesSupport::Supported
+                    } else {
+                        ResponsesSupport::Unsupported
+                    },
+                    fingerprint: String::new(),
+                    checked_at: 0,
+                },
+                value => serde_json::from_value(value).map_err(serde::de::Error::custom)?,
+            };
+            Ok((model, record))
+        })
+        .collect()
 }
 
 fn override_value<'a>(config: &'a [String], key: &str) -> Option<&'a str> {
@@ -837,20 +1003,476 @@ fn same_models_endpoint(base_url: &str, fallback_source: &str) -> bool {
     !left.is_empty() && left == right
 }
 
-/// `GET {base_url}/models` with the provider key for an explicit sync action.
-pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Vec<RemoteModel>> {
-    let models = fetch_gateway_models_at(
+/// Effective HTTP settings after applying the provider's saved `-c` values to
+/// the generated model-provider block. Values stay in memory only; the
+/// fingerprint hashes them before persistence.
+#[derive(Debug, Clone, Serialize)]
+struct ProviderHttpConfig {
+    base_url: String,
+    model_catalog_url: Option<String>,
+    wire_api: String,
+    allow_insecure_http: bool,
+    api_key: Option<String>,
+    stored_api_key: String,
+    headers: BTreeMap<String, String>,
+    query_params: BTreeMap<String, String>,
+}
+
+impl ProviderHttpConfig {
+    fn fingerprint(&self) -> String {
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    fn secrets(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for candidate in std::iter::once(self.stored_api_key.as_str())
+            .chain(self.api_key.as_deref())
+            .chain(self.headers.values().map(String::as_str))
+            .chain(self.query_params.values().map(String::as_str))
+        {
+            if !candidate.is_empty() && !out.iter().any(|secret| secret == candidate) {
+                out.push(candidate.to_string());
+            }
+        }
+        for endpoint in
+            std::iter::once(self.base_url.as_str()).chain(self.model_catalog_url.as_deref())
+        {
+            if let Ok(url) = reqwest::Url::parse(endpoint) {
+                for (_, value) in url.query_pairs() {
+                    if !value.is_empty() && !out.contains(&value.to_string()) {
+                        out.push(value.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn url_for_path(&self, path: &str) -> Result<reqwest::Url> {
+        let mut url =
+            reqwest::Url::parse(&self.base_url).context("provider base URL is invalid")?;
+        let mut full_path = url.path().trim_end_matches('/').to_string();
+        full_path.push('/');
+        full_path.push_str(path.trim_start_matches('/'));
+        url.set_path(&full_path);
+        append_query_params(&mut url, &self.query_params);
+        Ok(url)
+    }
+
+    fn models_url(&self) -> Result<(reqwest::Url, bool)> {
+        if let Some(catalog_url) = &self.model_catalog_url {
+            let mut url = reqwest::Url::parse(catalog_url)
+                .context("provider model catalog URL is invalid")?;
+            append_query_params(&mut url, &self.query_params);
+            url.query_pairs_mut()
+                .append_pair("client_version", auth::codex_cli_version());
+            // Codex's explicit model catalog URL is a complete URL and rejects
+            // redirects, even when a redirect would stay on the same origin.
+            return Ok((url, false));
+        }
+        let mut url = self.url_for_path("models")?;
+        url.query_pairs_mut()
+            .append_pair("client_version", auth::codex_cli_version());
+        Ok((url, true))
+    }
+}
+
+fn append_query_params(url: &mut reqwest::Url, params: &BTreeMap<String, String>) {
+    if params.is_empty() {
+        return;
+    }
+    let mut query = url.query_pairs_mut();
+    for (name, value) in params {
+        query.append_pair(name, value);
+    }
+}
+
+fn string_table(value: Option<&toml::Value>, field: &str) -> Result<BTreeMap<String, String>> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let table = value
+        .as_table()
+        .with_context(|| format!("provider {field} must be a table of strings"))?;
+    table
+        .iter()
+        .map(|(name, value)| {
+            let value = value
+                .as_str()
+                .with_context(|| format!("provider {field} values must be strings"))?;
+            Ok((name.clone(), value.to_string()))
+        })
+        .collect()
+}
+
+fn provider_override_value(raw: &str) -> toml::Value {
+    toml::from_str::<toml::Value>(&format!("value = {raw}"))
+        .ok()
+        .and_then(|value| value.get("value").cloned())
+        .unwrap_or_else(|| toml::Value::String(raw.to_string()))
+}
+
+fn validate_provider_override_shape(provider_id: &str, raw_key: &str) -> Result<()> {
+    // A whole model_providers table or a whole table for this provider cannot
+    // be remapped safely into the per-run cs_* provider. Require dotted leaf
+    // overrides so fetch/probe and launch can resolve the same fields.
+    let key = raw_key.trim().replace('"', "");
+    if key == "model_providers" || key == format!("model_providers.{provider_id}") {
+        anyhow::bail!(
+            "full-table provider overrides are not supported; use dotted leaf keys such as model_providers.{provider_id}.base_url"
+        );
+    }
+    Ok(())
+}
+
+fn resolve_provider_connection(profile: &ProviderProfile) -> Result<ProviderHttpConfig> {
+    resolve_provider_connection_from_parts(
         &profile.base_url,
         &profile.api_key,
+        &profile.env_key,
         profile.allow_insecure_http,
+        &profile.wire_api,
+        &profile.provider_id,
+        &profile.codex_config,
     )
-    .await?;
+}
+
+fn resolve_provider_connection_from_parts(
+    base_url: &str,
+    stored_api_key: &str,
+    default_env_key: &str,
+    allow_insecure_http: bool,
+    wire_api: &str,
+    provider_id: &str,
+    codex_config: &[String],
+) -> Result<ProviderHttpConfig> {
+    let provider_id = if provider_id.is_empty() {
+        "provider"
+    } else {
+        provider_id
+    };
+    for entry in codex_config {
+        if let Some((key, _)) = entry.split_once('=') {
+            validate_provider_override_shape(provider_id, key)?;
+        }
+    }
+    let prefix = format!("model_providers.{provider_id}.");
+    let mut config = toml::map::Map::new();
+    for (key, value) in [
+        ("base_url", toml::Value::String(base_url.to_string())),
+        ("env_key", toml::Value::String(default_env_key.to_string())),
+        ("wire_api", toml::Value::String(wire_api.to_string())),
+        ("http_headers", toml::Value::Table(toml::map::Map::new())),
+        (
+            "env_http_headers",
+            toml::Value::Table(toml::map::Map::new()),
+        ),
+        ("query_params", toml::Value::Table(toml::map::Map::new())),
+    ] {
+        insert_toml_override(
+            &mut config,
+            &format!("model_providers.{provider_id}.{key}"),
+            value,
+        )?;
+    }
+    for entry in codex_config {
+        let Some((key, raw_value)) = entry.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if let Some(suffix) = key.strip_prefix(&prefix)
+            && !suffix.is_empty()
+        {
+            insert_toml_override(
+                &mut config,
+                &format!("model_providers.{provider_id}.{suffix}"),
+                provider_override_value(raw_value.trim()),
+            )?;
+        }
+    }
+    let provider = config
+        .get("model_providers")
+        .and_then(toml::Value::as_table)
+        .and_then(|providers| providers.get(provider_id))
+        .and_then(toml::Value::as_table)
+        .context("provider connection settings could not be resolved")?;
+    let string_field = |field: &str, default: &str| -> Result<String> {
+        provider
+            .get(field)
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .with_context(|| format!("provider {field} must be a string"))
+            })
+            .unwrap_or_else(|| Ok(default.to_string()))
+    };
+    let base_url = string_field("base_url", base_url)?;
+    let wire_api = string_field("wire_api", wire_api)?;
+    if wire_api != "responses" {
+        anyhow::bail!("provider wire_api must be \"responses\" for Codex model requests");
+    }
+    validate_base_url(&base_url, allow_insecure_http)?;
+    let model_catalog_url = provider
+        .get("model_catalog_url")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .context("provider model_catalog_url must be a URL string")
+        })
+        .transpose()?;
+    if let Some(catalog_url) = &model_catalog_url {
+        validate_base_url(catalog_url, allow_insecure_http)?;
+    }
+
+    let static_headers = string_table(provider.get("http_headers"), "http_headers")?;
+    let env_headers = string_table(provider.get("env_http_headers"), "env_http_headers")?;
+    let query_params = string_table(provider.get("query_params"), "query_params")?;
+    let env_key = string_field("env_key", default_env_key)?;
+    if provider.get("auth").is_some() || provider.get("aws").is_some() {
+        anyhow::bail!(
+            "provider command or AWS authentication cannot be resolved for model sync or probe"
+        );
+    }
+    if env_key.is_empty() && !default_env_key.is_empty() {
+        anyhow::bail!("provider env_key is empty");
+    }
+    let api_key = if default_env_key.is_empty() && env_key.is_empty() {
+        (!stored_api_key.is_empty()).then(|| stored_api_key.to_string())
+    } else if env_key.is_empty() {
+        None
+    } else if env_key == default_env_key {
+        (!stored_api_key.is_empty()).then(|| stored_api_key.to_string())
+    } else {
+        Some(
+            std::env::var(&env_key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .with_context(|| {
+                    format!("provider API key environment variable '{env_key}' is not set")
+                })?,
+        )
+    };
+    let experimental_bearer = provider
+        .get("experimental_bearer_token")
+        .and_then(toml::Value::as_str)
+        .filter(|value| !value.is_empty());
+    if api_key.is_some() && experimental_bearer.is_some() {
+        anyhow::bail!("provider env_key and experimental_bearer_token cannot both be configured");
+    }
+    let api_key = api_key.or_else(|| experimental_bearer.map(str::to_string));
+
+    let mut headers = BTreeMap::new();
+    for (name, value) in static_headers {
+        if let (Ok(name), Ok(value)) = (
+            reqwest::header::HeaderName::try_from(name.as_str()),
+            reqwest::header::HeaderValue::try_from(value.as_str()),
+        ) {
+            headers.insert(name.as_str().to_string(), value.to_str()?.to_string());
+        }
+    }
+    for (name, env_name) in env_headers {
+        let value = if env_name == default_env_key && !stored_api_key.is_empty() {
+            Some(stored_api_key.to_string())
+        } else {
+            std::env::var(&env_name).ok()
+        };
+        if let Some(value) = value
+            && !value.trim().is_empty()
+            && let (Ok(name), Ok(header_value)) = (
+                reqwest::header::HeaderName::try_from(name.as_str()),
+                reqwest::header::HeaderValue::try_from(value.as_str()),
+            )
+        {
+            headers.insert(
+                name.as_str().to_string(),
+                header_value.to_str()?.to_string(),
+            );
+        }
+    }
+    // EndpointSession applies its AuthProvider after provider headers, so the
+    // configured env key is authoritative when both define Authorization.
+    if let Some(key) = &api_key {
+        let value = reqwest::header::HeaderValue::try_from(format!("Bearer {key}"))
+            .context("provider API key cannot be used as an HTTP header")?;
+        headers.insert(
+            reqwest::header::AUTHORIZATION.as_str().to_string(),
+            value.to_str()?.to_string(),
+        );
+    }
+
+    Ok(ProviderHttpConfig {
+        base_url,
+        model_catalog_url,
+        wire_api,
+        allow_insecure_http,
+        api_key,
+        stored_api_key: stored_api_key.to_string(),
+        headers,
+        query_params,
+    })
+}
+
+fn display_safe_url(url: &reqwest::Url) -> String {
+    let mut safe = url.clone();
+    let _ = safe.set_username("");
+    let _ = safe.set_password(None);
+    // Provider URLs can contain credentials in a path segment as well as in
+    // userinfo or the query (for example, a gateway token in the path). Keep
+    // diagnostics to the origin so none of those parts reach errors or logs.
+    safe.set_path("/");
+    safe.set_query(None);
+    safe.set_fragment(None);
+    safe.to_string().trim_end_matches('/').to_string()
+}
+
+fn safe_fallback_source(source: &str) -> String {
+    match reqwest::Url::parse(source) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => display_safe_url(&url),
+        _ => source.to_string(),
+    }
+}
+
+fn redact_connection_secrets(value: &str, connection: &ProviderHttpConfig) -> String {
+    connection
+        .secrets()
+        .into_iter()
+        .fold(value.to_string(), |message, secret| {
+            message.replace(&secret, "[redacted]")
+        })
+}
+
+fn provider_http_headers(
+    connection: &ProviderHttpConfig,
+    with_json_content_type: bool,
+) -> Result<reqwest::header::HeaderMap> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in &connection.headers {
+        let name = reqwest::header::HeaderName::try_from(name.as_str())
+            .context("provider contains an invalid HTTP header name")?;
+        let value = reqwest::header::HeaderValue::try_from(value.as_str())
+            .context("provider contains an invalid HTTP header value")?;
+        headers.insert(name, value);
+    }
+    if with_json_content_type && !headers.contains_key(reqwest::header::CONTENT_TYPE) {
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+    }
+    Ok(headers)
+}
+
+async fn read_limited_response_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    description: &str,
+) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        anyhow::bail!("{description} exceeds the {max_bytes}-byte response limit");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| anyhow::anyhow!("reading {description}: {}", error.without_url()))?
+    {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            anyhow::bail!("{description} exceeds the {max_bytes}-byte response limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn same_origin_redirect_policy(url: &reqwest::Url) -> reqwest::redirect::Policy {
+    let origin = url.origin();
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 10 || attempt.url().origin() != origin {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// `GET {base_url}/models` with the provider key for an explicit sync action.
+pub(crate) async fn fetch_gateway_models(profile: &ProviderProfile) -> Result<Vec<RemoteModel>> {
+    let models = fetch_gateway_models_for_profile(profile).await?;
     debug!(
-        "provider '{}' gateway /models returned {} entries",
+        "provider '{}' gateway model catalog returned {} entries",
         profile.alias,
         models.len()
     );
     Ok(models)
+}
+
+pub(crate) async fn fetch_gateway_models_for_profile(
+    profile: &ProviderProfile,
+) -> Result<Vec<RemoteModel>> {
+    let connection = resolve_provider_connection(profile)?;
+    fetch_gateway_models_with_connection(&connection).await
+}
+
+pub(crate) async fn fetch_gateway_models_with_overrides(
+    base_url: &str,
+    api_key: &str,
+    default_env_key: &str,
+    allow_insecure_http: bool,
+    wire_api: &str,
+    provider_id: &str,
+    codex_config: &[String],
+) -> Result<Vec<RemoteModel>> {
+    let connection = resolve_provider_connection_from_parts(
+        base_url,
+        api_key,
+        default_env_key,
+        allow_insecure_http,
+        wire_api,
+        provider_id,
+        codex_config,
+    )?;
+    fetch_gateway_models_with_connection(&connection).await
+}
+
+async fn fetch_gateway_models_with_connection(
+    connection: &ProviderHttpConfig,
+) -> Result<Vec<RemoteModel>> {
+    let (url, allow_same_origin_redirects) = connection.models_url()?;
+    let display_url = redact_connection_secrets(&display_safe_url(&url), connection);
+    let client = auth::build_http_client_with_redirect_policy(if allow_same_origin_redirects {
+        same_origin_redirect_policy(&url)
+    } else {
+        reqwest::redirect::Policy::none()
+    })?;
+    let headers = provider_http_headers(connection, false)?;
+    let response = client
+        .get(url.clone())
+        .headers(headers)
+        .timeout(GATEWAY_MODELS_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| anyhow::anyhow!("GET {display_url}: {}", error.without_url()))?;
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("GET {display_url} returned {status}");
+    }
+    let max_bytes = if connection.model_catalog_url.is_some() {
+        MAX_PROVIDER_CATALOG_BODY_BYTES
+    } else {
+        MAX_GATEWAY_MODELS_BODY_BYTES
+    };
+    let body = read_limited_response_body(response, max_bytes, "provider model catalog").await?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&body).context("parsing provider model catalog JSON")?;
+    Ok(parse_gateway_models(&value))
 }
 
 pub(crate) async fn fetch_gateway_models_at(
@@ -858,37 +1480,74 @@ pub(crate) async fn fetch_gateway_models_at(
     api_key: &str,
     allow_insecure_http: bool,
 ) -> Result<Vec<RemoteModel>> {
-    validate_base_url(base_url, allow_insecure_http)?;
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
-    fetch_models_url(&url, Some(api_key)).await
+    fetch_gateway_models_with_overrides(
+        base_url,
+        api_key,
+        "",
+        allow_insecure_http,
+        DEFAULT_WIRE_API,
+        "provider",
+        &[],
+    )
+    .await
 }
 
-/// Same as [`fetch_gateway_models_at`] from a sync caller (CLI add, TUI `f`).
-pub(crate) fn fetch_gateway_models_blocking(
+/// Same as [`fetch_gateway_models_with_overrides`] from a sync caller
+/// (CLI add, TUI `f`).
+pub(crate) fn fetch_gateway_models_overrides_blocking(
     base_url: &str,
     api_key: &str,
+    default_env_key: &str,
     allow_insecure_http: bool,
+    wire_api: &str,
+    provider_id: &str,
+    codex_config: &[String],
 ) -> Result<Vec<RemoteModel>> {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| {
-            handle.block_on(fetch_gateway_models_at(
+            handle.block_on(fetch_gateway_models_with_overrides(
                 base_url,
                 api_key,
+                default_env_key,
                 allow_insecure_http,
+                wire_api,
+                provider_id,
+                codex_config,
             ))
         }),
         Err(_) => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .context("starting runtime for gateway /models")?;
-            runtime.block_on(fetch_gateway_models_at(
+                .context("starting runtime for gateway model catalog")?;
+            runtime.block_on(fetch_gateway_models_with_overrides(
                 base_url,
                 api_key,
+                default_env_key,
                 allow_insecure_http,
+                wire_api,
+                provider_id,
+                codex_config,
             ))
         }
     }
+}
+
+/// Same as [`fetch_gateway_models_at`] from a sync caller (legacy callers).
+pub(crate) fn fetch_gateway_models_blocking(
+    base_url: &str,
+    api_key: &str,
+    allow_insecure_http: bool,
+) -> Result<Vec<RemoteModel>> {
+    fetch_gateway_models_overrides_blocking(
+        base_url,
+        api_key,
+        "",
+        allow_insecure_http,
+        DEFAULT_WIRE_API,
+        "provider",
+        &[],
+    )
 }
 
 pub(crate) async fn fetch_fallback_models(source: &str) -> Result<Vec<RemoteModel>> {
@@ -899,7 +1558,8 @@ pub(crate) async fn fetch_fallback_models(source: &str) -> Result<Vec<RemoteMode
     if source.starts_with("http://") || source.starts_with("https://") {
         let models = fetch_models_url(source, None).await?;
         debug!(
-            "metadata fallback GET {source} returned {} entries",
+            "metadata fallback GET {} returned {} entries",
+            safe_fallback_source(source),
             models.len()
         );
         return Ok(models);
@@ -913,22 +1573,32 @@ pub(crate) async fn fetch_fallback_models(source: &str) -> Result<Vec<RemoteMode
 
 async fn fetch_models_url(url: &str, bearer: Option<&str>) -> Result<Vec<RemoteModel>> {
     let client = auth::build_http_client()?;
-    let mut request = client.get(url).timeout(GATEWAY_MODELS_TIMEOUT);
+    let parsed_url = reqwest::Url::parse(url).context("model catalog URL is invalid")?;
+    let display_url = display_safe_url(&parsed_url);
+    let mut request = client
+        .get(parsed_url.clone())
+        .timeout(GATEWAY_MODELS_TIMEOUT);
     if let Some(key) = bearer {
         request = request.header("Authorization", format!("Bearer {key}"));
     }
-    let response = request.send().await.with_context(|| format!("GET {url}"))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|error| anyhow::anyhow!("GET {display_url}: {}", error.without_url()))?;
     let status = response.status();
-    let body = response.bytes().await.context("reading /models body")?;
     if !status.is_success() {
-        anyhow::bail!("GET {url} returned {status}");
+        anyhow::bail!("GET {display_url} returned {status}");
     }
-    let value: serde_json::Value = serde_json::from_slice(&body).context("parsing /models JSON")?;
+    let body = read_limited_response_body(response, MAX_GATEWAY_MODELS_BODY_BYTES, "model catalog")
+        .await?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&body).context("parsing model catalog JSON")?;
     Ok(parse_gateway_models(&value))
 }
 
 /// Whether `{base_url}/responses` will accept this slug for Codex.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ResponsesSupport {
     /// The Responses handler ran (typically HTTP 400 missing `input`).
     Supported,
@@ -1004,25 +1674,47 @@ pub(crate) async fn probe_responses_support(
     model: &str,
     allow_insecure_http: bool,
 ) -> Result<ResponsesProbe> {
-    validate_base_url(base_url, allow_insecure_http)?;
-    let url = format!("{}/responses", base_url.trim_end_matches('/'));
-    let client = auth::build_http_client()?;
+    let connection = resolve_provider_connection_from_parts(
+        base_url,
+        api_key,
+        "",
+        allow_insecure_http,
+        DEFAULT_WIRE_API,
+        "provider",
+        &[],
+    )?;
+    probe_responses_support_with_connection(&connection, model).await
+}
+
+async fn probe_responses_support_with_connection(
+    connection: &ProviderHttpConfig,
+    model: &str,
+) -> Result<ResponsesProbe> {
+    let url = connection.url_for_path("responses")?;
+    let display_url = redact_connection_secrets(&display_safe_url(&url), connection);
+    let client = auth::build_http_client_with_redirect_policy(same_origin_redirect_policy(&url))?;
+    let headers = provider_http_headers(connection, true)?;
+    let body = serde_json::to_vec(&serde_json::json!({ "model": model }))
+        .context("serializing Responses probe")?;
     let response = client
-        .post(&url)
+        .post(url.clone())
+        .headers(headers)
         .timeout(GATEWAY_MODELS_TIMEOUT)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "model": model }))
+        .body(body)
         .send()
         .await
-        .with_context(|| format!("POST {url}"))?;
+        .map_err(|error| anyhow::anyhow!("POST {display_url}: {}", error.without_url()))?;
     let status = response.status().as_u16();
-    let body = response
-        .bytes()
-        .await
-        .context("reading /responses probe body")?;
+    let body = read_limited_response_body(
+        response,
+        MAX_RESPONSES_PROBE_BODY_BYTES,
+        "Responses probe body",
+    )
+    .await?;
     let body_text = String::from_utf8_lossy(&body);
     let (message, error_type, code) = openai_error_fields(&body_text);
+    let message = message.map(|message| redact_connection_secrets(&message, connection));
+    let code = code.map(|code| redact_connection_secrets(&code, connection));
     let support = classify_responses_probe(
         status,
         code.as_deref(),
@@ -1038,7 +1730,7 @@ pub(crate) async fn probe_responses_support(
     );
     Ok(ResponsesProbe {
         model: model.to_string(),
-        url,
+        url: display_url,
         support,
         status,
         code,
@@ -1050,6 +1742,7 @@ pub(crate) async fn probe_provider_models(
     profile: &ProviderProfile,
     model: Option<&str>,
 ) -> Result<Vec<ResponsesProbe>> {
+    let connection = resolve_provider_connection(profile)?;
     let slugs: Vec<String> = match model {
         Some(id) => {
             let selected = profile.resolve_model(Some(id))?;
@@ -1059,15 +1752,7 @@ pub(crate) async fn probe_provider_models(
     };
     let mut results = Vec::with_capacity(slugs.len());
     for slug in slugs {
-        results.push(
-            probe_responses_support(
-                &profile.base_url,
-                &profile.api_key,
-                &slug,
-                profile.allow_insecure_http,
-            )
-            .await?,
-        );
+        results.push(probe_responses_support_with_connection(&connection, &slug).await?);
     }
     Ok(results)
 }
@@ -1117,22 +1802,39 @@ fn classify_responses_probe(
         message.unwrap_or("")
     )
     .to_ascii_lowercase();
-
-    if status == 404
-        || status == 405
-        || blob.contains("bad_response_status_code")
-        || ((400..500).contains(&status) && blob.contains("not found"))
-    {
-        return ResponsesSupport::Unsupported;
-    }
-    if matches!(status, 400 | 422) {
-        if blob.contains("model_not_found") || blob.contains("model not found") {
-            return ResponsesSupport::Unsupported;
-        }
-        return ResponsesSupport::Supported;
-    }
     if status == 200 {
         return ResponsesSupport::Supported;
+    }
+    if matches!(status, 400 | 422)
+        && ((blob.contains("missing_required_parameter") && blob.contains("input"))
+            || (blob.contains("missing required parameter") && blob.contains("input"))
+            || blob.contains("input is required")
+            || blob.contains("required field: input"))
+    {
+        return ResponsesSupport::Supported;
+    }
+
+    // A model lookup failure does not establish anything about the Responses
+    // route. Many gateways report it as HTTP 404, so it must remain unknown.
+    let model_unavailable = blob.contains("model_not_found")
+        || blob.contains("model not found")
+        || blob.contains("unknown model")
+        || blob.contains("model does not exist");
+    if model_unavailable {
+        return ResponsesSupport::Unknown;
+    }
+
+    let endpoint_unavailable = blob.contains("unsupported_endpoint")
+        || blob.contains("endpoint_not_found")
+        || blob.contains("route_not_found")
+        || blob.contains("method_not_allowed")
+        || blob.contains("not_implemented")
+        || ((blob.contains("cannot post")
+            || blob.contains("no route")
+            || blob.contains("unknown route"))
+            && blob.contains("/responses"));
+    if (status == 404 && endpoint_unavailable) || status == 405 || status == 501 {
+        return ResponsesSupport::Unsupported;
     }
     ResponsesSupport::Unknown
 }
@@ -1153,7 +1855,10 @@ async fn load_metadata_fallback(
     match fetch_fallback_models(&source).await {
         Ok(models) => models,
         Err(err) => {
-            debug!("metadata fallback unavailable ({source}): {err:#}");
+            debug!(
+                "metadata fallback unavailable ({}): {err:#}",
+                safe_fallback_source(&source)
+            );
             Vec::new()
         }
     }
@@ -1244,7 +1949,19 @@ fn remote_from_item(slug: &str, item: &serde_json::Value) -> RemoteModel {
         description,
         context_window,
         input_modalities: parse_input_modalities(item),
+        catalog_entry: is_codex_catalog_entry(item)
+            .then(|| item.as_object().cloned())
+            .flatten(),
     }
+}
+
+fn is_codex_catalog_entry(item: &serde_json::Value) -> bool {
+    item.get("slug")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && (item.get("model_messages").is_some()
+            || item.get("base_instructions").is_some()
+            || item.get("supported_reasoning_levels").is_some())
 }
 
 fn parse_input_modalities(item: &serde_json::Value) -> Vec<String> {
@@ -1260,7 +1977,9 @@ fn parse_input_modalities(item: &serde_json::Value) -> Vec<String> {
         let Some(name) = value.as_str() else {
             continue;
         };
-        if (name == "text" || name == "image") && !out.iter().any(|existing| existing == name) {
+        if matches!(name, "text" | "image" | "audio")
+            && !out.iter().any(|existing| existing == name)
+        {
             out.push(name.to_string());
         }
     }
@@ -1346,24 +2065,59 @@ fn overlay_remote_metadata(
     let fallback_modalities = fallback
         .map(|model| model.input_modalities.as_slice())
         .unwrap_or(&[]);
+    let mut catalog_entry = fallback
+        .and_then(|model| model.catalog_entry.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(primary_entry) = primary.and_then(|model| model.catalog_entry.as_ref()) {
+        catalog_entry.extend(primary_entry.clone());
+    }
+    let display_name = pick_text(
+        primary.and_then(|model| model.display_name.as_ref()),
+        fallback.and_then(|model| model.display_name.as_ref()),
+    );
+    let description = pick_text(
+        primary.and_then(|model| model.description.as_ref()),
+        fallback.and_then(|model| model.description.as_ref()),
+    );
+    let context_window = primary
+        .and_then(|model| model.context_window)
+        .or_else(|| fallback.and_then(|model| model.context_window));
+    let input_modalities = if primary_modalities.is_empty() {
+        fallback_modalities.to_vec()
+    } else {
+        primary_modalities.to_vec()
+    };
+    if !catalog_entry.is_empty() && primary.is_some_and(|model| model.catalog_entry.is_none()) {
+        if let Some(display_name) = &display_name {
+            catalog_entry.insert("display_name".into(), display_name.clone().into());
+        }
+        if let Some(description) = &description {
+            catalog_entry.insert("description".into(), description.clone().into());
+        }
+        if !input_modalities.is_empty() {
+            catalog_entry.insert(
+                "input_modalities".into(),
+                serde_json::Value::Array(
+                    input_modalities
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::from)
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(context_window) = primary.and_then(|model| model.context_window) {
+            catalog_entry.insert("max_context_window".into(), context_window.into());
+        }
+    }
     Some(RemoteModel {
         slug: slug.to_string(),
-        display_name: pick_text(
-            primary.and_then(|model| model.display_name.as_ref()),
-            fallback.and_then(|model| model.display_name.as_ref()),
-        ),
-        description: pick_text(
-            primary.and_then(|model| model.description.as_ref()),
-            fallback.and_then(|model| model.description.as_ref()),
-        ),
-        context_window: primary
-            .and_then(|model| model.context_window)
-            .or_else(|| fallback.and_then(|model| model.context_window)),
-        input_modalities: if primary_modalities.is_empty() {
-            fallback_modalities.to_vec()
-        } else {
-            primary_modalities.to_vec()
-        },
+        display_name,
+        description,
+        context_window,
+        input_modalities,
+        catalog_entry: (!catalog_entry.is_empty()).then_some(catalog_entry),
     })
 }
 
@@ -1536,20 +2290,44 @@ fn entry_context_window(
     user_context: Option<i64>,
     remote: Option<&RemoteModel>,
 ) -> i64 {
-    if slug == default_slug
-        && let Some(value) = user_context
-    {
-        return value;
+    let catalog = remote.and_then(|model| model.catalog_entry.as_ref());
+    let resolved_context = remote
+        .and_then(|model| model.context_window)
+        .or_else(|| {
+            catalog
+                .and_then(|entry| entry.get("context_window"))
+                .and_then(json_positive_i64)
+        })
+        .or_else(|| {
+            catalog
+                .and_then(|entry| entry.get("max_context_window"))
+                .and_then(json_positive_i64)
+        })
+        .unwrap_or(DEFAULT_PROVIDER_CONTEXT_WINDOW);
+    if slug != default_slug {
+        return resolved_context;
     }
-    if let Some(value) = remote.and_then(|model| model.context_window) {
-        return value;
-    }
-    DEFAULT_PROVIDER_CONTEXT_WINDOW
+    let Some(value) = user_context else {
+        return resolved_context;
+    };
+    let max = catalog
+        .and_then(|entry| entry.get("max_context_window"))
+        .and_then(json_positive_i64)
+        .or_else(|| {
+            remote.and_then(|model| {
+                model
+                    .catalog_entry
+                    .is_none()
+                    .then_some(model.context_window)
+                    .flatten()
+            })
+        });
+    max.map_or(value, |max| value.min(max))
 }
 
-/// A Codex `model_catalog_json` body. Each `slug` is listed with
-/// `visibility: list` so `/model` can show it. Codex 0.149 requires
-/// `base_instructions` (an empty string is accepted).
+/// A Codex `model_catalog_json` body. Native entries keep all upstream fields;
+/// generated entries use the conservative fallback metadata understood by
+/// Codex 0.159.2.
 fn build_model_catalog(
     saved: &[String],
     models: &[ProviderModel],
@@ -1591,52 +2369,28 @@ fn thinking_effort(value: Option<&str>) -> Option<&str> {
         .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
 }
 
-const THINKING_REASONING_LEVELS: &[(&str, &str)] = &[
-    ("low", "Light reasoning"),
-    ("medium", "Balanced"),
-    ("high", "Enhanced reasoning"),
-    ("xhigh", "Extra high reasoning"),
-    ("max", "Deep reasoning"),
-];
-
 fn apply_catalog_reasoning(entry: &mut serde_json::Value, reasoning: Option<&str>) -> Result<()> {
+    let clear_default = reasoning.is_some() && thinking_effort(reasoning).is_none();
+    apply_catalog_reasoning_with_clear(entry, reasoning, clear_default)
+}
+
+fn apply_catalog_reasoning_with_clear(
+    entry: &mut serde_json::Value,
+    reasoning: Option<&str>,
+    clear_default: bool,
+) -> Result<()> {
     let thinking = thinking_effort(reasoning);
-    // Codex 0.150 always puts `reasoning.effort` on POST /responses when the
-    // catalog has a default (including `none`). Skip/plain-chat slugs must
-    // advertise no levels and omit the default so the field stays off the wire.
-    let levels: Vec<serde_json::Value> = match thinking {
-        Some(effort) => {
-            let mut levels: Vec<serde_json::Value> = THINKING_REASONING_LEVELS
-                .iter()
-                .map(|(level, description)| {
-                    serde_json::json!({ "effort": level, "description": description })
-                })
-                .collect();
-            if !levels.iter().any(|level| level["effort"] == effort) {
-                levels.insert(
-                    0,
-                    serde_json::json!({ "effort": effort, "description": effort }),
-                );
-            }
-            levels
-        }
-        None => Vec::new(),
-    };
     let object = entry
         .as_object_mut()
         .context("provider catalog model is not an object")?;
-    object.insert("supported_reasoning_levels".into(), levels.into());
-    object.insert(
-        "supports_reasoning_summaries".into(),
-        thinking.is_some().into(),
-    );
     match thinking {
         Some(effort) => {
             object.insert("default_reasoning_level".into(), effort.into());
         }
-        None => {
+        None if clear_default => {
             object.remove("default_reasoning_level");
         }
+        None => {}
     }
     Ok(())
 }
@@ -1656,10 +2410,41 @@ fn catalog_entry(
         .and_then(|model| model.description.as_deref())
         .filter(|value| !value.is_empty())
         .unwrap_or(display_name);
+    if let Some(native_entry) = meta.and_then(|model| model.catalog_entry.as_ref()) {
+        let mut entry = serde_json::Value::Object(native_entry.clone());
+        let object = entry
+            .as_object_mut()
+            .expect("cloned catalog entry is an object");
+        object.insert("slug".into(), slug.into());
+        object.insert("priority".into(), priority.into());
+        object.insert("context_window".into(), context_window.into());
+        if !object.contains_key("display_name") {
+            object.insert("display_name".into(), display_name.into());
+        }
+        if !object.contains_key("description") {
+            object.insert("description".into(), description.into());
+        }
+        if !object.contains_key("input_modalities") {
+            let modalities = meta
+                .map(|model| model.input_modalities.clone())
+                .filter(|values| !values.is_empty())
+                .unwrap_or_else(|| vec!["text".to_string()]);
+            object.insert("input_modalities".into(), modalities.into());
+        }
+        ensure_required_catalog_fields(object);
+        ensure_catalog_instructions(object);
+        apply_catalog_reasoning(&mut entry, reasoning).expect("native catalog entry is an object");
+        return entry;
+    }
     let modalities: Vec<String> = meta
         .map(|model| model.input_modalities.clone())
         .filter(|values| !values.is_empty())
-        .unwrap_or_else(|| vec!["text".to_string(), "image".to_string()]);
+        .unwrap_or_else(|| vec!["text".to_string()]);
+    // The fallback context window is a conservative default, not an
+    // authoritative limit. Keep the maximum unknown so a later explicit
+    // context override is not capped by this synthesized default.
+    let max_context_window = meta.and_then(|model| model.context_window);
+    let instructions = CODEX_MODEL_INSTRUCTIONS;
     let mut entry = serde_json::json!({
         "slug": slug,
         "display_name": display_name,
@@ -1668,20 +2453,205 @@ fn catalog_entry(
         "visibility": "list",
         "supported_in_api": true,
         "priority": priority,
-        "base_instructions": "",
+        "base_instructions": instructions,
+        "model_messages": {"instructions_template": instructions},
         "default_reasoning_summary": "none",
+        "supported_reasoning_levels": [],
         "support_verbosity": false,
         "supports_parallel_tool_calls": false,
-        "apply_patch_tool_type": "freeform",
+        "supports_reasoning_summary_parameter": false,
+        "supports_image_detail_original": false,
+        "apply_patch_tool_type": null,
+        "web_search_tool_type": "text",
         "truncation_policy": {"mode": "bytes", "limit": 10000},
         "context_window": context_window,
-        "max_context_window": context_window,
+        "max_context_window": max_context_window,
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
         "input_modalities": modalities,
     });
     apply_catalog_reasoning(&mut entry, reasoning).expect("catalog entry is an object");
     entry
+}
+
+const CODEX_MODEL_INSTRUCTIONS: &str =
+    include_str!("../assets/upstream-codex/model-instructions.md");
+
+fn ensure_catalog_instructions(object: &mut serde_json::Map<String, serde_json::Value>) {
+    if object
+        .get("base_instructions")
+        .is_some_and(|value| !value.is_string() && !value.is_null())
+    {
+        object.remove("base_instructions");
+    }
+    let has_legacy_instructions = object
+        .get("base_instructions")
+        .is_some_and(serde_json::Value::is_string);
+    if object
+        .get("model_messages")
+        .is_some_and(|messages| !messages.is_object() && !messages.is_null())
+    {
+        object.insert("model_messages".into(), serde_json::json!({}));
+    }
+    let has_message_instructions = object
+        .get("model_messages")
+        .and_then(|messages| messages.get("instructions_template"))
+        .is_some_and(serde_json::Value::is_string);
+    if has_legacy_instructions || has_message_instructions {
+        if let Some(messages) = object
+            .get_mut("model_messages")
+            .and_then(serde_json::Value::as_object_mut)
+            && messages
+                .get("instructions_template")
+                .is_some_and(|value| !value.is_string() && !value.is_null())
+        {
+            messages.remove("instructions_template");
+        }
+        return;
+    }
+    object.insert("base_instructions".into(), CODEX_MODEL_INSTRUCTIONS.into());
+    let messages = object
+        .entry("model_messages")
+        .or_insert_with(|| serde_json::json!({}));
+    if !messages.is_object() {
+        *messages = serde_json::json!({});
+    }
+    messages
+        .as_object_mut()
+        .expect("model_messages is an object")
+        .insert(
+            "instructions_template".into(),
+            CODEX_MODEL_INSTRUCTIONS.into(),
+        );
+}
+
+fn ensure_required_catalog_fields(object: &mut serde_json::Map<String, serde_json::Value>) {
+    if !object
+        .get("display_name")
+        .is_some_and(serde_json::Value::is_string)
+    {
+        let slug = object
+            .get("slug")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("custom-model");
+        object.insert("display_name".into(), slug.into());
+    }
+    if !object
+        .get("shell_type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| {
+            matches!(
+                value,
+                "unified_exec" | "shell_command" | "default" | "local" | "disabled"
+            )
+        })
+    {
+        object.insert("shell_type".into(), "shell_command".into());
+    }
+    if !object
+        .get("visibility")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| matches!(value, "list" | "hide" | "none"))
+    {
+        object.insert("visibility".into(), "list".into());
+    }
+    if !object
+        .get("supported_in_api")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
+        object.insert("supported_in_api".into(), true.into());
+    }
+    if !object
+        .get("support_verbosity")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
+        object.insert("support_verbosity".into(), false.into());
+    }
+    if !object
+        .get("supported_reasoning_levels")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        object.insert("supported_reasoning_levels".into(), serde_json::json!([]));
+    } else if let Some(levels) = object
+        .get_mut("supported_reasoning_levels")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        levels.retain(|level| {
+            level
+                .get("effort")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|effort| !effort.is_empty())
+                && level
+                    .get("description")
+                    .is_some_and(serde_json::Value::is_string)
+        });
+    }
+    if !object
+        .get("truncation_policy")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|policy| {
+            policy
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|mode| matches!(mode, "bytes" | "tokens"))
+                && policy.get("limit").and_then(json_positive_i64).is_some()
+        })
+    {
+        object.insert(
+            "truncation_policy".into(),
+            serde_json::json!({"mode": "bytes", "limit": 10000}),
+        );
+    }
+    if !object
+        .get("experimental_supported_tools")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        object.insert("experimental_supported_tools".into(), serde_json::json!([]));
+    } else if let Some(tools) = object
+        .get_mut("experimental_supported_tools")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        tools.retain(serde_json::Value::is_string);
+    }
+    if !object
+        .get("input_modalities")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        object.insert("input_modalities".into(), serde_json::json!(["text"]));
+    } else if let Some(modalities) = object
+        .get_mut("input_modalities")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        modalities.retain(|modality| {
+            modality
+                .as_str()
+                .is_some_and(|value| matches!(value, "text" | "image" | "audio"))
+        });
+    }
+}
+
+fn repair_legacy_generated_instructions(entry: &mut serde_json::Value) -> Result<()> {
+    let object = entry
+        .as_object_mut()
+        .context("saved provider catalog model is not an object")?;
+    let is_legacy_generated = object
+        .get("base_instructions")
+        .and_then(serde_json::Value::as_str)
+        == Some("")
+        && !object.contains_key("model_messages")
+        && object
+            .get("supports_reasoning_summaries")
+            .is_some_and(serde_json::Value::is_boolean);
+    if !is_legacy_generated {
+        return Ok(());
+    }
+    object.insert("base_instructions".into(), CODEX_MODEL_INSTRUCTIONS.into());
+    object.insert(
+        "model_messages".into(),
+        serde_json::json!({"instructions_template": CODEX_MODEL_INSTRUCTIONS}),
+    );
+    object.remove("supports_reasoning_summaries");
+    Ok(())
 }
 /// Render a string as a TOML basic (quoted) string for a `codex -c key=value`
 /// override, escaping the characters TOML requires. Codex parses the value part
@@ -1951,6 +2921,16 @@ pub(crate) struct ProviderLaunchProfile {
     _lease: Option<ProviderRunLease>,
 }
 
+/// Native provider profiles are single CODEX_HOME filenames. Keep this
+/// validation shared by resume and cleanup so damaged run metadata cannot
+/// redirect a profile-file operation outside the Codex home.
+fn is_valid_native_profile_name(name: &str) -> bool {
+    name.starts_with("cs-")
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
 impl ProviderLaunchProfile {
     pub(crate) fn begin(profile: &ProviderProfile) -> Result<Self> {
         let path = unique_run_dir(&profile.identity_id)?;
@@ -1997,11 +2977,7 @@ impl ProviderLaunchProfile {
                 path.display()
             );
         };
-        if !profile_name.starts_with("cs-")
-            || !profile_name
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-        {
+        if !is_valid_native_profile_name(&profile_name) {
             anyhow::bail!("invalid native provider profile name in {}", path.display());
         }
         if !runtime_provider_id.starts_with("cs_")
@@ -2409,23 +3385,24 @@ fn collect_native_home_sessions(
             {
                 let entry = entry.with_context(|| format!("reading {}", path.display()))?;
                 let child = entry.path();
-                if child.is_dir() {
+                let kind = entry
+                    .file_type()
+                    .with_context(|| format!("reading file type {}", child.display()))?;
+                if kind.is_dir() {
                     pending.push(child);
                     continue;
                 }
-                if !child
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+                if !kind.is_file()
+                    || !child
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with("rollout-") && name.ends_with(".jsonl")
+                        })
                 {
                     continue;
                 }
-                let file = File::open(&child)
-                    .with_context(|| format!("opening Codex rollout {}", child.display()))?;
-                let Some(Ok(line)) = BufReader::new(file).lines().next() else {
-                    continue;
-                };
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                let Ok(value) = read_rollout_metadata(&child) else {
                     continue;
                 };
                 let Some(runtime_id) = session_model_provider(&value) else {
@@ -2973,116 +3950,133 @@ fn codex_thread_writer_active(codex_home: &Path, session_id: &str) -> bool {
 pub(crate) fn native_session_writer_active(codex_home: &Path, session_id: &str) -> bool {
     codex_thread_writer_active(codex_home, session_id)
 }
-/// Runtime provider ids that still own a rollout under one Codex home, plus
-/// the newest mtime of any rollout we could not classify.  A run whose id is
-/// absent has no resumable session left; an unreadable recent rollout could
-/// hold anything and buys every run more time.
+/// Runtime providers referenced by surviving rollouts. An incomplete scan is
+/// never evidence that a run is orphaned: losing resume configuration is worse
+/// than retaining an unused run directory.
 struct LiveRuntimeScan {
     ids: HashSet<String>,
-    unreadable_newest: Option<chrono::DateTime<chrono::Utc>>,
+    incomplete: bool,
 }
 
 fn scan_live_runtime_ids(codex_home: &Path) -> LiveRuntimeScan {
     let mut scan = LiveRuntimeScan {
         ids: HashSet::new(),
-        unreadable_newest: None,
+        incomplete: false,
     };
-    let sessions_root = codex_home.join("sessions");
-    if !sessions_root.exists() {
+    let home_is_readable_directory =
+        || codex_home.is_dir() && std::fs::read_dir(codex_home).is_ok();
+    if !home_is_readable_directory() {
+        scan.incomplete = true;
         return scan;
     }
-    let mut pending = vec![sessions_root];
+    let mut pending = vec![
+        codex_home.join("sessions"),
+        codex_home.join("archived_sessions"),
+    ];
     while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && home_is_readable_directory() =>
+            {
+                continue;
+            }
+            Err(_) => {
+                scan.incomplete = true;
+                continue;
+            }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let Ok(entry) = entry else {
+                scan.incomplete = true;
+                continue;
+            };
             let path = entry.path();
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let Ok(kind) = entry.file_type() else {
+                scan.incomplete = true;
+                continue;
+            };
+            if kind.is_symlink() {
+                scan.incomplete = true;
+                continue;
+            }
+            if kind.is_dir() {
                 pending.push(path);
                 continue;
             }
             let name = entry.file_name();
             let Some(name) = name.to_str() else {
+                scan.incomplete = true;
                 continue;
             };
             if !name.starts_with("rollout-") {
                 continue;
             }
-            let modified = entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .ok()
-                .map(chrono::DateTime::<chrono::Utc>::from);
-            if !name.ends_with(".jsonl") {
-                // Compressed/archived rollouts cannot be substring-checked;
-                // a recent one may hold any provider's only session record.
-                if let Some(mtime) = modified
-                    && scan.unreadable_newest.is_none_or(|newest| mtime > newest)
-                {
-                    scan.unreadable_newest = Some(mtime);
-                }
+            if !kind.is_file() || !name.ends_with(".jsonl") {
+                scan.incomplete = true;
                 continue;
             }
-            let Ok(file) = File::open(&path) else {
-                continue;
-            };
-            let mut head = [0u8; 8192];
-            use std::io::Read;
-            let mut reader = BufReader::new(file);
-            let Ok(len) = reader.read(&mut head) else {
-                continue;
-            };
-            let Ok(value) =
-                serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&head[..len]))
-            else {
-                continue;
-            };
-            if let Some(runtime_id) = session_model_provider(&value)
-                && runtime_id.starts_with("cs_")
-            {
-                scan.ids.insert(runtime_id);
+            match rollout_runtime_provider(&path) {
+                Ok(runtime_id) if runtime_id.starts_with("cs_") => {
+                    scan.ids.insert(runtime_id);
+                }
+                Ok(_) => {}
+                Err(_) => scan.incomplete = true,
             }
         }
+    }
+    if !home_is_readable_directory() {
+        scan.incomplete = true;
     }
     scan
 }
 
-fn run_created_at(meta: &ProviderRunMeta) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::parse_from_rfc3339(&meta.created_at)
-        .ok()
-        .map(|dt| dt.with_timezone(&chrono::Utc))
+fn read_rollout_metadata(path: &Path) -> Result<serde_json::Value> {
+    // Codex writes session metadata as the first JSONL record. Its instructions
+    // can exceed 8 KiB; read a complete record without reading the whole history.
+    // A larger or truncated record remains unclassified and prevents cleanup.
+    const MAX_METADATA_BYTES: usize = 1024 * 1024;
+    use std::io::Read;
+    let mut reader = BufReader::new(File::open(path)?).take((MAX_METADATA_BYTES + 1) as u64);
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line)?;
+    anyhow::ensure!(
+        line.len() <= MAX_METADATA_BYTES,
+        "rollout metadata exceeds scan limit"
+    );
+    serde_json::from_slice(&line).context("invalid rollout metadata")
+}
+
+fn rollout_runtime_provider(path: &Path) -> Result<String> {
+    let value = read_rollout_metadata(path)?;
+    session_model_provider(&value)
+        .filter(|id| !id.trim().is_empty())
+        .context("rollout has no classifiable provider metadata")
 }
 
 /// Whether a native run is junk rather than resume state: no launcher holds
 /// it, its Codex child is gone, and no surviving rollout references its
-/// runtime id (the session is gone or never existed).  An unreadable rollout
-/// newer than the run keeps it — a false keep costs kilobytes while a false
+/// runtime id (the session is gone or never existed). An unreadable rollout
+/// keeps it — a false keep costs kilobytes while a false
 /// delete loses the only handle back to a session.
-fn native_run_is_dead(
-    run_path: &Path,
-    meta: &ProviderRunMeta,
-    scan: &LiveRuntimeScan,
-) -> Result<bool> {
+fn native_run_is_dead(meta: &ProviderRunMeta, scan: &LiveRuntimeScan) -> bool {
     if meta.child_pid.is_some_and(pid_alive) {
-        return Ok(false);
+        return false;
     }
     let Some(runtime_id) = meta.runtime_provider_id.as_deref() else {
-        return Ok(false);
+        return false;
     };
-    if scan.ids.contains(runtime_id) {
-        return Ok(false);
+    if scan.incomplete || scan.ids.contains(runtime_id) {
+        return false;
     }
-    if let (Some(created), Some(newest)) = (run_created_at(meta), scan.unreadable_newest)
-        && newest >= created
-    {
-        return Ok(false);
-    }
-    Ok(ProviderRunLease::try_acquire(run_path)?.is_some())
+    true
 }
 
 fn delete_native_profile_file(meta: &ProviderRunMeta) {
     if let (Some(codex_home), Some(profile_name)) = (&meta.codex_home, &meta.profile_name) {
+        if !is_valid_native_profile_name(profile_name) {
+            return;
+        }
         let _ = std::fs::remove_file(codex_home.join(format!("{profile_name}.config.toml")));
     }
 }
@@ -3098,7 +4092,12 @@ pub(crate) fn sweep_dead_native_runs() -> Result<()> {
     if !root.exists() {
         return Ok(());
     }
-    let mut scans: HashMap<PathBuf, LiveRuntimeScan> = HashMap::new();
+    struct Candidate {
+        path: PathBuf,
+        meta: ProviderRunMeta,
+        _lease: ProviderRunLease,
+    }
+    let mut candidates: HashMap<PathBuf, Vec<Candidate>> = HashMap::new();
     for identity in std::fs::read_dir(&root)
         .with_context(|| format!("reading provider runs {}", root.display()))?
     {
@@ -3114,21 +4113,36 @@ pub(crate) fn sweep_dead_native_runs() -> Result<()> {
             if !run.file_type()?.is_dir() {
                 continue;
             }
+            if !ProviderLaunchProfile::is_native_run(&run_path)? {
+                continue;
+            }
+            // Keep the lease across metadata reading, the shared-home scan and
+            // deletion. No candidate can start/resume while the scan is in use.
+            let Some(lease) = ProviderRunLease::try_acquire(&run_path)? else {
+                continue;
+            };
             let Some(meta) = read_run_meta(&run_path)? else {
                 continue;
             };
-            if !ProviderLaunchProfile::is_native_run(&run_path)? {
+            if meta.child_pid.is_some_and(pid_alive) {
                 continue;
             }
             let Some(codex_home) = meta.codex_home.clone() else {
                 continue;
             };
-            let scan = scans
-                .entry(codex_home)
-                .or_insert_with_key(|home| scan_live_runtime_ids(home));
-            if native_run_is_dead(&run_path, &meta, scan)? {
-                delete_native_profile_file(&meta);
-                let _ = std::fs::remove_dir_all(&run_path);
+            candidates.entry(codex_home).or_default().push(Candidate {
+                path: run_path,
+                meta,
+                _lease: lease,
+            });
+        }
+    }
+    for (codex_home, runs) in candidates {
+        let scan = scan_live_runtime_ids(&codex_home);
+        for run in runs {
+            if native_run_is_dead(&run.meta, &scan) {
+                delete_native_profile_file(&run.meta);
+                let _ = std::fs::remove_dir_all(&run.path);
             }
         }
     }
@@ -3939,6 +4953,36 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_rejects_traversal_in_damaged_native_profile_metadata() {
+        let _home = TestHome::new();
+        let user_home = auth::user_codex_home().unwrap();
+        let separator = std::path::MAIN_SEPARATOR;
+        let malicious_name = format!("cs-{separator}..{separator}..{separator}victim");
+        std::fs::create_dir_all(user_home.join("cs-")).unwrap();
+        let sentinel = user_home.parent().unwrap().join("victim.config.toml");
+        std::fs::write(&sentinel, "preserve this unrelated file").unwrap();
+        let profile = sample("damaged-meta");
+        let meta = ProviderRunMeta {
+            provider_identity_id: profile.identity_id,
+            alias: profile.alias,
+            model: None,
+            cwd: None,
+            created_at: now_rfc3339(),
+            codex_home: Some(user_home),
+            profile_name: Some(malicious_name),
+            runtime_provider_id: Some("cs_test_run".into()),
+            child_pid: None,
+        };
+
+        delete_native_profile_file(&meta);
+
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "preserve this unrelated file"
+        );
+    }
+
+    #[test]
     fn sweep_removes_dead_runs_and_keeps_sessions_and_live_children() {
         let _home = TestHome::new();
         let user_home = auth::user_codex_home().unwrap();
@@ -3971,7 +5015,8 @@ mod tests {
         std::fs::write(
             session_dir.join("rollout-kept.jsonl"),
             format!(
-                "{{\"payload\":{{\"id\":\"kept\",\"model_provider\":\"{}\",\"timestamp\":\"{}\"}}}}\n",
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"kept\",\"model_provider\":\"{}\",\"timestamp\":\"{}\"}}}}\n\
+                 {{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"hello\"}}}}\n",
                 with_session.runtime_provider_id,
                 today.to_rfc3339()
             ),
@@ -4007,6 +5052,151 @@ mod tests {
         );
         assert!(!with_session_path.exists());
         assert!(live.config_file_path().exists());
+    }
+
+    #[test]
+    fn sweep_retains_long_metadata_and_archived_sessions() {
+        let _home = TestHome::new();
+        let user_home = auth::user_codex_home().unwrap();
+        let profile = sample("long-rollout");
+        for directory in ["sessions", "archived_sessions"] {
+            let mut run = native_run_with_config(&profile);
+            run.disarm();
+            let config = run.config_file_path();
+            let path = run.path.clone();
+            let payload = serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "long-session",
+                    "model_provider": run.runtime_provider_id,
+                    "base_instructions": "instructions ".repeat(2048),
+                }
+            });
+            let sessions = user_home.join(directory);
+            std::fs::create_dir_all(&sessions).unwrap();
+            std::fs::write(
+                sessions.join("rollout-long.jsonl"),
+                format!("{payload}\n{{\"type\":\"event_msg\",\"payload\":{{}}}}\n"),
+            )
+            .unwrap();
+            drop(run);
+            sweep_dead_native_runs().unwrap();
+            assert!(config.exists(), "{directory}: metadata must retain config");
+            assert!(path.exists(), "{directory}: metadata must retain run");
+        }
+    }
+
+    #[test]
+    fn sweep_never_deletes_on_unclassifiable_rollouts() {
+        let _home = TestHome::new();
+        let user_home = auth::user_codex_home().unwrap();
+        let profile = sample("unknown-rollout");
+        let mut run = native_run_with_config(&profile);
+        run.disarm();
+        let config = run.config_file_path();
+        let path = run.path.clone();
+        drop(run);
+        let sessions = user_home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join("rollout-incomplete.jsonl");
+        let oversized = serde_json::json!({
+            "payload": { "model_provider": "openai", "instructions": "x".repeat(1024 * 1024) }
+        })
+        .to_string();
+        for body in ["", "{\"payload\":", "{\"unknown_schema\":true}", &oversized] {
+            std::fs::write(&rollout, body).unwrap();
+            sweep_dead_native_runs().unwrap();
+            assert!(config.exists(), "unclassified rollout must retain config");
+            assert!(path.exists(), "unclassified rollout must retain run");
+        }
+        std::fs::rename(&rollout, sessions.join("rollout-incomplete.jsonl.zst")).unwrap();
+        sweep_dead_native_runs().unwrap();
+        assert!(config.exists(), "compressed rollout must retain config");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn sweep_keeps_runs_when_sessions_directory_cannot_be_enumerated() {
+        let _home = TestHome::new();
+        let user_home = auth::user_codex_home().unwrap();
+        let profile = sample("blocked-scan");
+        let mut run = native_run_with_config(&profile);
+        run.disarm();
+        let config = run.config_file_path();
+        let path = run.path.clone();
+        drop(run);
+        // A non-directory at the expected path produces a portable read_dir
+        // failure, including under privileged test runners.
+        std::fs::write(user_home.join("sessions"), "not a directory").unwrap();
+        sweep_dead_native_runs().unwrap();
+        assert!(config.exists());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn runtime_scan_requires_an_available_home_but_allows_missing_session_dirs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let missing_home = temporary.path().join("missing-home");
+        assert!(scan_live_runtime_ids(&missing_home).incomplete);
+
+        let non_directory_home = temporary.path().join("home-file");
+        std::fs::write(&non_directory_home, "not a directory").unwrap();
+        assert!(scan_live_runtime_ids(&non_directory_home).incomplete);
+
+        let empty_home = temporary.path().join("empty-home");
+        std::fs::create_dir(&empty_home).unwrap();
+        let scan = scan_live_runtime_ids(&empty_home);
+        assert!(!scan.incomplete);
+        assert!(scan.ids.is_empty());
+    }
+
+    #[test]
+    fn sweep_keeps_runs_when_their_codex_home_is_temporarily_unavailable() {
+        let _home = TestHome::new();
+        let user_home = auth::user_codex_home().unwrap();
+        let profile = sample("offline-codex-home");
+        let mut run = native_run_with_config(&profile);
+        run.disarm();
+        let run_path = run.path.clone();
+        let offline_home = user_home.with_file_name("offline-codex-home");
+        let saved_profile = offline_home.join(format!("{}.config.toml", run.profile_name));
+        drop(run);
+
+        std::fs::rename(&user_home, &offline_home).unwrap();
+        let scan = scan_live_runtime_ids(&user_home);
+        assert!(scan.incomplete);
+        sweep_dead_native_runs().unwrap();
+
+        assert!(run_path.exists(), "unavailable home must keep run metadata");
+        assert!(
+            saved_profile.exists(),
+            "profile remains with the offline home"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_session_directories_keep_recovery_profiles_and_do_not_loop_indexing() {
+        let _home = TestHome::new();
+        let user_home = auth::user_codex_home().unwrap();
+        let profile = sample("linked-session");
+        save(&profile).unwrap();
+        let mut run = native_run_with_config(&profile);
+        let config_path = run.config_file_path();
+        run.disarm();
+        drop(run);
+        let sessions = user_home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::os::unix::fs::symlink(&sessions, sessions.join("loop")).unwrap();
+        assert!(scan_live_runtime_ids(&user_home).incomplete);
+        sweep_dead_native_runs().unwrap();
+        assert!(config_path.exists());
+        let index = ProviderSessionIndex::rebuild(
+            &auth::app_home().unwrap().join("provider-runs"),
+            &profile.identity_id,
+        )
+        .unwrap();
+        assert!(index.is_empty());
     }
 
     #[test]
@@ -4585,9 +5775,14 @@ mod tests {
         assert!(list_providers().unwrap().is_empty());
 
         let mut profile = sample("openrouter");
-        profile
-            .responses_support
-            .insert("openai/gpt-5.3-codex".into(), true);
+        profile.record_responses_probes(&[ResponsesProbe {
+            model: "openai/gpt-5.3-codex".into(),
+            url: "https://openrouter.ai/api/v1/responses".into(),
+            support: ResponsesSupport::Supported,
+            status: 400,
+            code: Some("missing_required_parameter".into()),
+            message: "Missing required parameter: input".into(),
+        }]);
         save(&profile).unwrap();
         let mut form_style_update = profile.clone();
         form_style_update.responses_support.clear();
@@ -4771,6 +5966,41 @@ api_key = "sk-legacy-key"
             !args.iter().any(|a| a.contains("sk-secret-1234")),
             "the API key must never appear in argv"
         );
+    }
+
+    #[test]
+    fn runtime_provider_profile_remaps_saved_transport_override_prefixes() {
+        let mut profile = sample("alignment");
+        profile.codex_config = vec![
+            "model_providers.alignment.base_url=\"https://gateway.example/v1\"".into(),
+            "model_providers.alignment.http_headers={\"X-Gateway\"=\"value\"}".into(),
+            "model_providers.alignment.env_http_headers={\"X-Key\"=\"GATEWAY_KEY\"}".into(),
+            "model_providers.alignment.query_params={tenant=\"acme\"}".into(),
+            "model_provider=\"alignment\"".into(),
+        ];
+
+        let runtime = profile.for_runtime_provider_id("cs_identity_run");
+        let args = runtime
+            .codex_config_args_with(None, ReasoningLaunch::Saved)
+            .unwrap();
+        let joined = args.join(" ");
+
+        assert!(
+            joined.contains(
+                "model_providers.cs_identity_run.base_url=\"https://gateway.example/v1\""
+            )
+        );
+        assert!(
+            joined
+                .contains("model_providers.cs_identity_run.http_headers={\"X-Gateway\"=\"value\"}")
+        );
+        assert!(joined.contains(
+            "model_providers.cs_identity_run.env_http_headers={\"X-Key\"=\"GATEWAY_KEY\"}"
+        ));
+        assert!(joined.contains("model_providers.cs_identity_run.query_params={tenant=\"acme\"}"));
+        assert!(!joined.contains("model_providers.alignment."));
+        assert!(!joined.contains("model_provider=\"alignment\""));
+        assert!(joined.contains("model_provider=\"cs_identity_run\""));
     }
 
     #[test]
@@ -5221,7 +6451,15 @@ api_key = "sk-legacy-key"
         assert_eq!(catalog["models"][0]["slug"], "glm-5.3-flash");
         assert_eq!(catalog["models"][0]["visibility"], "list");
         assert_eq!(catalog["models"][0]["context_window"], 8_192);
-        assert_eq!(catalog["models"][0]["base_instructions"], "");
+        assert!(
+            catalog["models"][0]["base_instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("coding agent"))
+        );
+        assert_eq!(
+            catalog["models"][0]["model_messages"]["instructions_template"],
+            catalog["models"][0]["base_instructions"]
+        );
         assert!(catalog["models"][0]["default_reasoning_level"].is_null());
         assert!(
             catalog["models"][0]["supported_reasoning_levels"]
@@ -5229,7 +6467,10 @@ api_key = "sk-legacy-key"
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+        assert_eq!(
+            catalog["models"][0]["supports_reasoning_summary_parameter"],
+            false
+        );
         assert_eq!(
             std::fs::read_to_string(catalog_path).unwrap(),
             saved_catalog,
@@ -5261,7 +6502,335 @@ api_key = "sk-legacy-key"
             description: None,
             context_window: Some(8_192),
             input_modalities: vec![],
+            catalog_entry: None,
         }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Codex0159Catalog {
+        models: Vec<Codex0159Model>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Codex0159Model {
+        slug: String,
+        display_name: String,
+        supported_reasoning_levels: Vec<serde_json::Value>,
+        shell_type: String,
+        visibility: String,
+        supported_in_api: bool,
+        priority: i32,
+        support_verbosity: bool,
+        truncation_policy: Codex0159TruncationPolicy,
+        experimental_supported_tools: Vec<String>,
+        #[serde(default)]
+        model_messages: Option<Codex0159ModelMessages>,
+        #[serde(flatten)]
+        other_fields: serde_json::Map<String, serde_json::Value>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Codex0159TruncationPolicy {
+        mode: String,
+        limit: i64,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Codex0159ModelMessages {
+        instructions_template: Option<String>,
+    }
+
+    fn validate_codex_0159_model_catalog(catalog: &serde_json::Value) {
+        let decoded: Codex0159Catalog = serde_json::from_value(catalog.clone())
+            .expect("catalog must deserialize against Codex 0.159.2 ModelInfo's required fields");
+        let entries = catalog["models"].as_array().unwrap();
+        assert_eq!(decoded.models.len(), entries.len());
+        for (model, raw) in decoded.models.iter().zip(entries) {
+            assert!(!model.slug.is_empty());
+            assert!(!model.display_name.is_empty());
+            assert_eq!(model.shell_type, "shell_command");
+            assert_eq!(model.visibility, "list");
+            assert!(model.supported_in_api);
+            assert!(model.priority >= 0);
+            assert!(
+                model.supported_reasoning_levels.iter().all(|level| {
+                    level["effort"].is_string() && level["description"].is_string()
+                })
+            );
+            assert_eq!(
+                model.support_verbosity,
+                raw["support_verbosity"].as_bool().unwrap()
+            );
+            assert!(model.truncation_policy.limit > 0);
+            assert!(matches!(
+                model.truncation_policy.mode.as_str(),
+                "bytes" | "tokens"
+            ));
+            assert!(
+                model
+                    .experimental_supported_tools
+                    .iter()
+                    .all(|tool| !tool.is_empty())
+            );
+            let legacy = model
+                .other_fields
+                .get("base_instructions")
+                .and_then(serde_json::Value::as_str);
+            let canonical = model
+                .model_messages
+                .as_ref()
+                .and_then(|messages| messages.instructions_template.as_deref());
+            assert!(
+                legacy.is_some() || canonical.is_some(),
+                "Codex 0.159.2 requires a base instruction template for {}",
+                model.slug
+            );
+        }
+    }
+
+    fn native_catalog_row(slug: &str) -> serde_json::Value {
+        serde_json::json!({
+            "slug": slug,
+            "display_name": "Native model",
+            "description": "Full native description",
+            "default_reasoning_level": "low",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Native low"},
+                {"effort": "high", "description": "Native high"}
+            ],
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": true,
+            "priority": 7,
+            "model_messages": {
+                "instructions_template": "Native canonical instructions",
+                "confirmation_policies": {"browser_use": "Native policy"}
+            },
+            "base_instructions": "Legacy native instructions",
+            "support_verbosity": true,
+            "default_verbosity": "low",
+            "supports_reasoning_summary_parameter": false,
+            "supports_image_detail_original": true,
+            "supports_reasoning_effort_updates": true,
+            "apply_patch_tool_type": "freeform",
+            "truncation_policy": {"mode": "tokens", "limit": 8192},
+            "context_window": 128000,
+            "max_context_window": 256000,
+            "effective_context_window_percent": 91,
+            "experimental_supported_tools": ["native-tool"],
+            "input_modalities": ["text", "image", "audio"],
+            "future_catalog_field": {"enabled": true, "version": 2}
+        })
+    }
+
+    #[test]
+    fn native_catalog_rows_preserve_full_metadata_and_bound_context_overrides() {
+        let row = native_catalog_row("native-model");
+        let remote = parse_gateway_models(&serde_json::json!({"models": [row.clone()]}));
+        assert_eq!(remote.len(), 1);
+        assert!(remote[0].catalog_entry.is_some());
+
+        let catalog = build_model_catalog(
+            &["native-model".into()],
+            &[ProviderModel {
+                id: "native-model".into(),
+                reasoning: Some("high".into()),
+                no_web_search: false,
+            }],
+            &remote,
+            &[],
+            "native-model",
+            Some(400_000),
+            Some("high"),
+        );
+        let model = &catalog["models"][0];
+        assert_eq!(model["context_window"], 256_000);
+        assert_eq!(model["max_context_window"], 256_000);
+        assert_eq!(model["default_reasoning_level"], "high");
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            row["supported_reasoning_levels"]
+        );
+        assert_eq!(model["supports_reasoning_summary_parameter"], false);
+        assert_eq!(model["supports_reasoning_effort_updates"], true);
+        assert_eq!(model["supports_image_detail_original"], true);
+        assert_eq!(model["input_modalities"], row["input_modalities"]);
+        assert_eq!(model["model_messages"], row["model_messages"]);
+        assert_eq!(model["base_instructions"], row["base_instructions"]);
+        assert_eq!(model["future_catalog_field"], row["future_catalog_field"]);
+        validate_codex_0159_model_catalog(&catalog);
+
+        let mut skipped = catalog.clone();
+        tailor_saved_catalog(
+            &mut skipped,
+            &["native-model".into()],
+            &[],
+            "native-model",
+            &ReasoningLaunch::Skip,
+            Some(500_000),
+        )
+        .unwrap();
+        let model = &skipped["models"][0];
+        assert!(model.get("default_reasoning_level").is_none());
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            row["supported_reasoning_levels"]
+        );
+        assert_eq!(model["context_window"], 256_000);
+        assert_eq!(model["max_context_window"], 256_000);
+        validate_codex_0159_model_catalog(&skipped);
+    }
+
+    #[test]
+    fn missing_metadata_uses_codex_unknown_model_defaults_and_valid_catalog_shape() {
+        let catalog = build_model_catalog(
+            &["unknown-model".into()],
+            &[ProviderModel::from_id("unknown-model")],
+            &[],
+            &[],
+            "unknown-model",
+            None,
+            None,
+        );
+        let model = &catalog["models"][0];
+        assert_eq!(model["context_window"], 272_000);
+        assert!(model["max_context_window"].is_null());
+        assert_eq!(model["input_modalities"], serde_json::json!(["text"]));
+        assert_eq!(model["supports_image_detail_original"], false);
+        assert_eq!(model["supports_reasoning_summary_parameter"], false);
+        assert_eq!(model["supported_reasoning_levels"], serde_json::json!([]));
+        assert!(
+            model["base_instructions"].as_str().is_some_and(|text| {
+                text.contains("You are a coding agent") && !text.is_empty()
+            })
+        );
+        assert_eq!(
+            model["model_messages"]["instructions_template"],
+            model["base_instructions"]
+        );
+        validate_codex_0159_model_catalog(&catalog);
+
+        let overridden = build_model_catalog(
+            &["unknown-model".into()],
+            &[ProviderModel::from_id("unknown-model")],
+            &[],
+            &[],
+            "unknown-model",
+            Some(1_000_000),
+            None,
+        );
+        assert_eq!(overridden["models"][0]["context_window"], 1_000_000);
+        assert!(overridden["models"][0]["max_context_window"].is_null());
+        validate_codex_0159_model_catalog(&overridden);
+
+        // A catalog first saved with the fallback value must still allow a
+        // later explicit context override when no authoritative max is known.
+        let mut saved_then_overridden = catalog.clone();
+        tailor_saved_catalog(
+            &mut saved_then_overridden,
+            &["unknown-model".into()],
+            &[ProviderModel::from_id("unknown-model")],
+            "unknown-model",
+            &ReasoningLaunch::Saved,
+            Some(1_000_000),
+        )
+        .unwrap();
+        assert_eq!(
+            saved_then_overridden["models"][0]["context_window"],
+            1_000_000
+        );
+        assert!(saved_then_overridden["models"][0]["max_context_window"].is_null());
+        validate_codex_0159_model_catalog(&saved_then_overridden);
+    }
+
+    #[test]
+    fn partial_native_catalogs_get_required_defaults_and_keep_their_fields() {
+        let partial = serde_json::json!({
+            "slug": "partial-native",
+            "supported_reasoning_levels": [
+                {"effort": "high", "description": "Native high"}
+            ],
+            "future_catalog_field": {"kept": true}
+        });
+        let remote = parse_gateway_models(&serde_json::json!({"models": [partial.clone()]}));
+        assert!(remote[0].catalog_entry.is_some());
+        let catalog = build_model_catalog(
+            &["partial-native".into()],
+            &[ProviderModel::from_id("partial-native")],
+            &remote,
+            &[],
+            "partial-native",
+            None,
+            None,
+        );
+        let model = &catalog["models"][0];
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            partial["supported_reasoning_levels"]
+        );
+        assert_eq!(
+            model["future_catalog_field"],
+            partial["future_catalog_field"]
+        );
+        assert_eq!(model["shell_type"], "shell_command");
+        assert_eq!(model["visibility"], "list");
+        assert_eq!(model["supported_in_api"], true);
+        assert_eq!(model["support_verbosity"], false);
+        assert_eq!(
+            model["truncation_policy"],
+            serde_json::json!({"mode": "bytes", "limit": 10_000})
+        );
+        assert_eq!(model["input_modalities"], serde_json::json!(["text"]));
+        validate_codex_0159_model_catalog(&catalog);
+    }
+
+    #[test]
+    fn offline_catalog_migrates_old_generated_empty_prompt_only() {
+        let mut catalog = serde_json::json!({
+            "models": [
+                {
+                    "slug": "legacy-generated",
+                    "display_name": "legacy-generated",
+                    "base_instructions": "",
+                    "supports_reasoning_summaries": false,
+                    "supported_reasoning_levels": [],
+                    "context_window": 8192,
+                    "max_context_window": 8192
+                },
+                {
+                    "slug": "native-empty",
+                    "display_name": "native-empty",
+                    "base_instructions": "",
+                    "model_messages": {"instructions_template": ""},
+                    "supports_reasoning_summaries": false,
+                    "supported_reasoning_levels": [],
+                    "context_window": 8192,
+                    "max_context_window": 8192
+                }
+            ]
+        });
+        tailor_saved_catalog(
+            &mut catalog,
+            &["legacy-generated".into(), "native-empty".into()],
+            &[],
+            "legacy-generated",
+            &ReasoningLaunch::Saved,
+            None,
+        )
+        .unwrap();
+        let generated = &catalog["models"][0];
+        assert!(
+            generated["base_instructions"]
+                .as_str()
+                .is_some_and(|instructions| instructions.contains("coding agent"))
+        );
+        assert!(generated.get("supports_reasoning_summaries").is_none());
+        let explicit_empty = &catalog["models"][1];
+        assert_eq!(explicit_empty["base_instructions"], "");
+        assert_eq!(
+            explicit_empty["model_messages"]["instructions_template"],
+            ""
+        );
     }
 
     #[test]
@@ -5273,6 +6842,7 @@ api_key = "sk-legacy-key"
                 description: None,
                 context_window: Some(200_000),
                 input_modalities: vec![],
+                catalog_entry: None,
             },
             RemoteModel {
                 slug: "glm-5.3-flash".into(),
@@ -5280,6 +6850,7 @@ api_key = "sk-legacy-key"
                 description: None,
                 context_window: Some(1_048_576),
                 input_modalities: vec!["text".into()],
+                catalog_entry: None,
             },
         ];
         let catalog = build_model_catalog(
@@ -5296,7 +6867,10 @@ api_key = "sk-legacy-key"
         assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
         assert_eq!(catalog["models"][0]["display_name"], "GLM Flash");
         assert!(catalog["models"][0]["default_reasoning_level"].is_null());
-        assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+        assert_eq!(
+            catalog["models"][0]["supports_reasoning_summary_parameter"],
+            false
+        );
         assert!(
             catalog["models"][0]["supported_reasoning_levels"]
                 .as_array()
@@ -5324,7 +6898,10 @@ api_key = "sk-legacy-key"
             "a none default still puts reasoning.effort on Codex 0.150 requests: {levels:?}"
         );
         assert!(catalog["models"][0]["default_reasoning_level"].is_null());
-        assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+        assert_eq!(
+            catalog["models"][0]["supports_reasoning_summary_parameter"],
+            false
+        );
     }
 
     #[test]
@@ -5351,7 +6928,10 @@ api_key = "sk-legacy-key"
                 .is_empty(),
             "skip must not leave a default Codex 0.150 can send"
         );
-        assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], false);
+        assert_eq!(
+            catalog["models"][0]["supports_reasoning_summary_parameter"],
+            false
+        );
     }
 
     #[test]
@@ -5383,13 +6963,15 @@ api_key = "sk-legacy-key"
         );
         assert_eq!(catalog["models"][1]["slug"], "glm-5.3-flash");
         assert_eq!(catalog["models"][1]["default_reasoning_level"], "high");
-        assert_eq!(catalog["models"][1]["supports_reasoning_summaries"], true);
+        assert_eq!(
+            catalog["models"][1]["supports_reasoning_summary_parameter"],
+            false
+        );
         assert!(
             catalog["models"][1]["supported_reasoning_levels"]
                 .as_array()
                 .unwrap()
-                .iter()
-                .any(|level| level["effort"] == "high")
+                .is_empty()
         );
     }
 
@@ -5412,7 +6994,7 @@ api_key = "sk-legacy-key"
     }
 
     #[test]
-    fn classify_new_api_404_as_unsupported() {
+    fn generic_bad_response_404_is_inconclusive() {
         let (message, error_type, code) = openai_error_fields(
             r#"{"error":{"message":"Not Found","type":"bad_response_status_code","param":"","code":"bad_response_status_code"}}"#,
         );
@@ -5426,7 +7008,7 @@ api_key = "sk-legacy-key"
                 error_type.as_deref(),
                 message.as_deref()
             ),
-            ResponsesSupport::Unsupported
+            ResponsesSupport::Unknown
         );
     }
 
@@ -5454,8 +7036,121 @@ api_key = "sk-legacy-key"
         );
     }
 
+    #[test]
+    fn another_required_parameter_does_not_prove_responses_support() {
+        assert_eq!(
+            classify_responses_probe(
+                400,
+                Some("missing_required_parameter"),
+                Some("invalid_request_error"),
+                Some("Missing required parameter: 'model'.")
+            ),
+            ResponsesSupport::Unknown
+        );
+    }
+
+    #[test]
+    fn ambiguous_404_and_server_statuses_never_deny_a_model() {
+        assert_eq!(
+            classify_responses_probe(404, Some("model_not_found"), None, Some("Model not found")),
+            ResponsesSupport::Unknown
+        );
+        assert_eq!(
+            classify_responses_probe(404, None, Some("not_found"), Some("Not Found")),
+            ResponsesSupport::Unknown
+        );
+        assert_eq!(
+            classify_responses_probe(
+                502,
+                Some("bad_response_status_code"),
+                None,
+                Some("upstream failure")
+            ),
+            ResponsesSupport::Unknown
+        );
+        assert_eq!(
+            classify_responses_probe(405, None, None, None),
+            ResponsesSupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn responses_verdicts_are_scoped_expiring_and_unknown_clears_denial() {
+        let unsupported = ResponsesProbe {
+            model: "openai/gpt-5.3-codex".into(),
+            url: "https://openrouter.ai/api/v1/responses".into(),
+            support: ResponsesSupport::Unsupported,
+            status: 404,
+            code: Some("bad_response_status_code".into()),
+            message: "Not Found".into(),
+        };
+        let unknown = ResponsesProbe {
+            support: ResponsesSupport::Unknown,
+            status: 502,
+            code: Some("bad_response_status_code".into()),
+            message: "upstream failure".into(),
+            ..unsupported.clone()
+        };
+        let mut profile = sample("verdicts");
+        profile.record_responses_probes(std::slice::from_ref(&unsupported));
+        assert_eq!(
+            profile.responses_support_for("openai/gpt-5.3-codex"),
+            Some(false)
+        );
+
+        profile.record_responses_probes(std::slice::from_ref(&unknown));
+        assert_eq!(
+            profile.responses_support_for("openai/gpt-5.3-codex"),
+            None,
+            "an inconclusive result must clear an earlier denial"
+        );
+
+        profile.record_responses_probes(std::slice::from_ref(&unsupported));
+        profile.api_key = "changed-key".into();
+        assert_eq!(
+            profile.responses_support_for("openai/gpt-5.3-codex"),
+            None,
+            "changing the key invalidates the cached result"
+        );
+
+        profile.api_key = "sk-secret-1234".into();
+        profile.record_responses_probes(std::slice::from_ref(&unsupported));
+        profile
+            .responses_support
+            .get_mut("openai/gpt-5.3-codex")
+            .unwrap()
+            .checked_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - RESPONSES_SUPPORT_TTL_SECS
+            - 1;
+        assert_eq!(
+            profile.responses_support_for("openai/gpt-5.3-codex"),
+            None,
+            "expired probe evidence must not block launch"
+        );
+    }
+
+    #[test]
+    fn legacy_boolean_verdicts_deserialize_as_stale_records() {
+        #[derive(Deserialize)]
+        struct Stored {
+            #[serde(deserialize_with = "deserialize_responses_support")]
+            responses_support: BTreeMap<String, ResponsesSupportRecord>,
+        }
+
+        let stored: Stored =
+            serde_json::from_str(r#"{"responses_support":{"openai/gpt-5.3-codex":false}}"#)
+                .unwrap();
+        let record = &stored.responses_support["openai/gpt-5.3-codex"];
+        assert_eq!(record.support, ResponsesSupport::Unsupported);
+        assert!(record.fingerprint.is_empty());
+        assert_eq!(record.checked_at, 0);
+    }
+
     #[tokio::test]
-    async fn probe_posts_model_only_and_treats_new_api_404_as_unsupported() {
+    async fn probe_posts_model_only_and_classifies_explicit_unsupported_route() {
         use axum::http::StatusCode;
         use axum::routing::post;
         use axum::{Json, Router};
@@ -5470,10 +7165,10 @@ api_key = "sk-legacy-key"
                     StatusCode::NOT_FOUND,
                     Json(json!({
                         "error": {
-                            "message": "Not Found",
-                            "type": "bad_response_status_code",
+                            "message": "Cannot POST /responses",
+                            "type": "unsupported_endpoint",
                             "param": "",
-                            "code": "bad_response_status_code"
+                            "code": "unsupported_endpoint"
                         }
                     })),
                 )
@@ -5495,8 +7190,8 @@ api_key = "sk-legacy-key"
         .unwrap();
         assert_eq!(probe.support, ResponsesSupport::Unsupported);
         assert_eq!(probe.status, 404);
-        assert_eq!(probe.code.as_deref(), Some("bad_response_status_code"));
-        assert_eq!(probe.message, "Not Found");
+        assert_eq!(probe.code.as_deref(), Some("unsupported_endpoint"));
+        assert_eq!(probe.message, "Cannot POST /responses");
         assert!(probe.refusal_message("AI-KR").contains("deepseek-v4-flash"));
     }
 
@@ -5540,6 +7235,235 @@ api_key = "sk-legacy-key"
         .unwrap();
         assert_eq!(probe.support, ResponsesSupport::Supported);
         assert_eq!(probe.status, 400);
+    }
+
+    #[test]
+    fn model_sync_uses_catalog_url_headers_query_and_client_version() {
+        use axum::http::{HeaderMap, Uri};
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use serde_json::json;
+
+        let _env_lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        const ENV_NAME: &str = "CODEX_SWITCH_TEST_PROVIDER_HEADER";
+        struct RestoreEnv {
+            previous: Option<OsString>,
+        }
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.previous {
+                        Some(value) => {
+                            std::env::set_var("CODEX_SWITCH_TEST_PROVIDER_HEADER", value)
+                        }
+                        None => std::env::remove_var("CODEX_SWITCH_TEST_PROVIDER_HEADER"),
+                    }
+                }
+            }
+        }
+        let restore = RestoreEnv {
+            previous: std::env::var_os(ENV_NAME),
+        };
+        unsafe { std::env::set_var(ENV_NAME, "environment-header-value") };
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+        let app = Router::new().route(
+            "/catalog",
+            get(|headers: HeaderMap, uri: Uri| async move {
+                assert_eq!(headers["authorization"], "Bearer stored-key");
+                assert_eq!(headers["x-gateway"], "static-header-value");
+                assert_eq!(headers["x-env-gateway"], "environment-header-value");
+                assert_eq!(headers["x-generated-key"], "stored-key");
+                let query = uri.query().unwrap_or_default();
+                assert!(query.contains("catalog_token=catalog-secret"));
+                assert!(query.contains("tenant=acme"));
+                assert!(query.contains(&format!("client_version={}", auth::codex_cli_version())));
+                Json(json!({"models": [{"slug": "catalog-model"}]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let config = vec![
+            format!(
+                "model_providers.provider.model_catalog_url={}",
+                toml_string(&format!("http://{addr}/catalog?catalog_token=catalog-secret"))
+            ),
+            "model_providers.provider.query_params={tenant=\"acme\"}".into(),
+            "model_providers.provider.http_headers={\"X-Gateway\"=\"static-header-value\", Authorization=\"Bearer header-value\"}".into(),
+            format!(
+                "model_providers.provider.env_http_headers={{\"X-Env-Gateway\"={}, \"X-Generated-Key\"=\"CODEX_SWITCH_PROVIDER_KEY\"}}",
+                toml_string(ENV_NAME)
+            ),
+        ];
+        let models = fetch_gateway_models_with_overrides(
+            &format!("http://{addr}/v1"),
+            "stored-key",
+            "CODEX_SWITCH_PROVIDER_KEY",
+            true,
+            "responses",
+            "provider",
+            &config,
+        )
+        .await
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "catalog-model");
+            });
+        drop(restore);
+    }
+
+    #[tokio::test]
+    async fn responses_probe_uses_query_and_headers_and_does_not_poison_on_502() {
+        use axum::http::{HeaderMap, StatusCode, Uri};
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use serde_json::{Value, json};
+
+        let app = Router::new().route(
+            "/v1/responses",
+            post(
+                |headers: HeaderMap, uri: Uri, Json(body): Json<Value>| async move {
+                    assert_eq!(body, json!({"model": "model-x"}));
+                    assert_eq!(headers["authorization"], "Bearer stored-key");
+                    assert_eq!(headers["x-gateway"], "probe-header");
+                    assert!(uri.query().unwrap_or_default().contains("tenant=probe"));
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({
+                            "error": {
+                                "message": "upstream failure included stored-key",
+                                "type": "server_error",
+                                "code": "bad_response_status_code"
+                            }
+                        })),
+                    )
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{addr}/v1");
+        let config = vec![
+            "model_providers.provider.query_params={tenant=\"probe\"}".into(),
+            "model_providers.provider.http_headers={\"X-Gateway\"=\"probe-header\"}".into(),
+        ];
+        let connection = resolve_provider_connection_from_parts(
+            &base_url,
+            "stored-key",
+            "CODEX_SWITCH_PROVIDER_KEY",
+            true,
+            "responses",
+            "provider",
+            &config,
+        )
+        .unwrap();
+        let probe = probe_responses_support_with_connection(&connection, "model-x")
+            .await
+            .unwrap();
+        assert_eq!(probe.support, ResponsesSupport::Unknown);
+        assert_eq!(probe.status, StatusCode::BAD_GATEWAY.as_u16());
+        assert!(!probe.url.contains("tenant=probe"));
+        assert!(!probe.message.contains("stored-key"));
+        assert!(probe.message.contains("[redacted]"));
+
+        let mut profile = sample("provider");
+        profile.base_url = base_url;
+        profile.api_key = "stored-key".into();
+        profile.allow_insecure_http = true;
+        profile.codex_config = config;
+        profile.models[0].id = "model-x".into();
+        profile.default_model = "model-x".into();
+        let prior_denial = ResponsesProbe {
+            support: ResponsesSupport::Unsupported,
+            status: 404,
+            code: Some("unsupported_endpoint".into()),
+            message: "Cannot POST /responses".into(),
+            ..probe.clone()
+        };
+        profile.record_responses_probes(&[prior_denial]);
+        assert_eq!(profile.responses_support_for("model-x"), Some(false));
+        profile.record_responses_probes(&[probe]);
+        assert_eq!(profile.responses_support_for("model-x"), None);
+    }
+
+    #[test]
+    fn provider_url_diagnostics_only_show_the_origin() {
+        let url = reqwest::Url::parse(
+            "https://user:pass@example.com:8443/v1/path-token?api_key=query-secret#fragment-secret",
+        )
+        .unwrap();
+        let display = display_safe_url(&url);
+
+        assert_eq!(display, "https://example.com:8443");
+        assert!(!display.contains("user"));
+        assert!(!display.contains("pass"));
+        assert!(!display.contains("path-token"));
+        assert!(!display.contains("query-secret"));
+        assert!(!display.contains("fragment-secret"));
+    }
+
+    #[test]
+    fn full_provider_table_overrides_are_rejected_before_transport() {
+        for override_value in [
+            r#"model_providers.provider={base_url="https://gateway.example/v1"}"#,
+            r#"model_providers={provider={base_url="https://gateway.example/v1"}}"#,
+        ] {
+            let error = resolve_provider_connection_from_parts(
+                "https://api.example.com/v1",
+                "stored-key",
+                "CODEX_SWITCH_PROVIDER_KEY",
+                false,
+                "responses",
+                "provider",
+                &[override_value.into()],
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("full-table provider overrides"));
+        }
+    }
+
+    #[test]
+    fn provider_http_settings_still_require_the_insecure_http_opt_in() {
+        assert!(
+            resolve_provider_connection_from_parts(
+                "https://api.example.com/v1",
+                "stored-key",
+                "CODEX_SWITCH_PROVIDER_KEY",
+                false,
+                "responses",
+                "provider",
+                &[r#"model_providers.provider.base_url="http://127.0.0.1:8080/v1""#.into()],
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_provider_connection_from_parts(
+                "https://api.example.com/v1",
+                "stored-key",
+                "CODEX_SWITCH_PROVIDER_KEY",
+                false,
+                "responses",
+                "provider",
+                &[
+                    r#"model_providers.provider.model_catalog_url="http://catalog.example/models""#
+                        .into()
+                ],
+            )
+            .is_err()
+        );
     }
 
     #[test]

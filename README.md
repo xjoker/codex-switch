@@ -44,7 +44,7 @@ codex-switch launch       # start Codex with the best account
 ## What it does
 
 - Saves, imports, renames, switches, and recoverably deletes Codex profiles.
-- Saves custom API providers (OpenRouter and other Responses-compatible endpoints) with multiple models per endpoint, and launches Codex with them without writing to `~/.codex`:
+- Saves custom API providers (OpenRouter and other Responses-compatible endpoints) with multiple models per endpoint, and launches Codex through native per-run profiles while keeping shared authentication and ChatGPT configuration intact:
 
   ```bash
   codex-switch provider add openrouter \

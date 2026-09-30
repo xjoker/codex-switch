@@ -53,7 +53,7 @@ Optional flags:
 | `--metadata-fallback URL\|PATH\|none` | public OpenRouter `/models` | Catalog metadata fallback during explicit model sync |
 | `--api-key-stdin` | off | Read the key from stdin instead of a hidden prompt |
 
-`--set` is for overrides that are not per-model. Values are passed to Codex verbatim — Codex, not codex-switch, decides which keys and values are valid — so only the `KEY=VALUE` shape is checked.
+`--set` is for overrides that are not per-model. Use dotted provider leaves such as `model_providers.<id>.http_headers.X-Route="team"`; whole `model_providers` tables and whole provider tables are rejected because they cannot be remapped safely to native per-run IDs. Supported HTTP connection leaves are resolved consistently for model fetching, probes and launch. Other values remain Codex configuration overrides.
 
 The alias follows the same rules as a ChatGPT profile (ASCII letters, digits, `_`, `-`, `.`; at most 64 characters) and must not collide with an existing profile, an existing provider, or Codex's reserved ids `openai`, `ollama`, and `lmstudio`.
 
@@ -119,7 +119,9 @@ codex-switch provider probe AI-KR
 codex-switch provider probe AI-KR --model deepseek-v4-flash
 ```
 
-That POSTs `{base_url}/responses` with only `{"model":"<slug>"}` (no `input`). A supporting Responses handler returns HTTP 400 at validation. HTTP 404 `bad_response_status_code` / `Not Found` means Chat Completions only — Codex cannot use it. Conclusive results are saved in `provider.toml`; launch reads that verdict offline and refuses a saved unsupported slug. Run `provider probe` again after the endpoint changes.
+That POSTs the resolved Responses URL with only `{"model":"<slug>"}` (no `input`). A validation error specifically naming the missing input can confirm support. Authentication failures, temporary gateway errors, and ambiguous model-not-found responses remain inconclusive. Only explicit evidence that the Responses route or API is unsupported can block launch. Saved verdicts expire and are scoped to the model, credential and effective connection settings; old unscoped boolean verdicts do not block launch.
+
+Model fetching, probing and launch resolve the provider's `--set` overrides consistently, including `base_url`, `model_catalog_url`, `http_headers`, `env_http_headers` and `query_params`. Explicit catalog URLs reject redirects. Other provider requests may follow redirects only within the same origin, so custom credentials cannot be forwarded to a different host.
 
 ## Model-specific request settings
 
@@ -150,7 +152,7 @@ codex-switch provider add openrouter \
 
 Effort values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Codex also accepts `ultra`) come from the Codex version in use, so codex-switch does not restrict them on the CLI. The TUI form offers the common presets and `(skip)`. Plain chat models need no reasoning flag.
 
-The generated Codex catalog only advertises thinking levels when a model has a saved effort (or the launch picker sets one). Otherwise it lists no reasoning levels and omits `default_reasoning_level`, so Codex 0.150 does not send `reasoning.effort`. Launch also lifts a leftover `model_reasoning_effort` out of the user's `config.toml` for that process (Codex writes that key when `/model` changes effort) and puts the previous value back on exit. Gateways that 404 on a reasoning field (Cursor-style `composer-2.5`, which exposes a `fast` parameter rather than effort) stay usable. Do not set `--reasoning` on those models. `(skip)` in the launch picker is this session only: it does not write the profile, and it must not keep a previous `high`.
+Native Codex catalogs retain their instructions, reasoning levels, tools, modalities and other capability metadata. Generic model lists receive Codex-compatible defaults and nonempty upstream instructions; an unknown model does not automatically gain image support or a one-million-token context window. An explicit context override remains available, bounded by authoritative limits when the provider supplies them. Setting a reasoning default does not manufacture a list of supported levels. `(skip)` clears the default for this launch while retaining advertised capabilities and leaves the saved provider unchanged. Each launch uses its own native profile without temporarily rewriting the shared `config.toml`.
 
 ## TUI
 

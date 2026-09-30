@@ -1,7 +1,9 @@
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Command;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -12,12 +14,70 @@ const MAX_BACKUPS: usize = 3;
 
 pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Upstream Codex version this release is contract-aligned with.
-pub(crate) const ALIGNED_CODEX_VERSION: &str = "0.144.1";
+pub(crate) const ALIGNED_CODEX_VERSION: &str = "0.159.2";
+
+const CODEX_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+static CODEX_CLI_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Use the same bounded local Codex version probe for request query parameters
+/// and the HTTP User-Agent. A malformed, missing, or unresponsive CLI falls
+/// back to the release's upstream contract version.
+pub(crate) fn codex_cli_version() -> &'static str {
+    CODEX_CLI_VERSION
+        .get_or_init(detect_codex_cli_version)
+        .as_str()
+}
+
+fn detect_codex_cli_version() -> String {
+    let Some(path) = crate::launch::command_on_path("codex") else {
+        return ALIGNED_CODEX_VERSION.to_string();
+    };
+    let command = codex_version_command(&path);
+    crate::app_server::output_with_timeout(command, CODEX_VERSION_PROBE_TIMEOUT)
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            parse_codex_cli_version(&format!("{stdout}\n{stderr}"))
+        })
+        .unwrap_or_else(|| ALIGNED_CODEX_VERSION.to_string())
+}
+
+fn codex_version_command(path: &Path) -> Command {
+    let mut command = Command::new(path);
+    command.arg("--version");
+    command
+}
+
+fn parse_codex_cli_version(output: &str) -> Option<String> {
+    output.split_whitespace().find_map(|token| {
+        let candidate = token
+            .trim_matches(|character: char| {
+                !character.is_ascii_alphanumeric() && !matches!(character, '.' | '-' | '+')
+            })
+            .strip_prefix('v')
+            .unwrap_or(token.trim_matches(|character: char| {
+                !character.is_ascii_alphanumeric() && !matches!(character, '.' | '-' | '+')
+            }));
+        if !candidate.starts_with(|character: char| character.is_ascii_digit()) {
+            return None;
+        }
+        let version = semver::Version::parse(candidate).ok()?;
+        // Codex's reported contract version is the complete numeric release;
+        // prerelease/build decorations are not part of API version headers.
+        Some(format!(
+            "{}.{}.{}",
+            version.major, version.minor, version.patch
+        ))
+    })
+}
 
 /// User-Agent in the upstream shape: `codex_cli_rs/<version> (<os>; <arch>)`.
 pub(crate) fn codex_user_agent() -> String {
     format!(
-        "codex_cli_rs/{ALIGNED_CODEX_VERSION} ({}; {})",
+        "codex_cli_rs/{} ({}; {})",
+        codex_cli_version(),
         std::env::consts::OS,
         std::env::consts::ARCH
     )
@@ -38,8 +98,8 @@ pub(crate) fn token_url() -> String {
 #[cfg(test)]
 pub(crate) static URL_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// User Codex home (`$CODEX_HOME`, or `~/.codex`). Provider launch links
-/// prompts, skills, and `AGENTS.md` from here into a per-run Codex home.
+/// User Codex home (`$CODEX_HOME`, or `~/.codex`). Provider launches retain
+/// this shared home and select a private native config profile.
 pub(crate) fn user_codex_home() -> Result<PathBuf> {
     codex_home_from_values(std::env::var_os("CODEX_HOME"), dirs::home_dir())
 }
@@ -821,10 +881,30 @@ pub fn build_http_client() -> Result<reqwest::Client> {
 }
 
 pub fn build_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::Client> {
+    build_http_client_with_proxy_and_redirect_policy(
+        proxy_url,
+        reqwest::redirect::Policy::default(),
+    )
+}
+
+/// Build a shared client with the normal proxy and custom CA behavior while
+/// allowing credential-bearing callers to choose their redirect policy.
+pub(crate) fn build_http_client_with_redirect_policy(
+    redirect_policy: reqwest::redirect::Policy,
+) -> Result<reqwest::Client> {
+    let proxy_url = crate::config::resolve_proxy();
+    build_http_client_with_proxy_and_redirect_policy(proxy_url.as_deref(), redirect_policy)
+}
+
+pub(crate) fn build_http_client_with_proxy_and_redirect_policy(
+    proxy_url: Option<&str>,
+    redirect_policy: reqwest::redirect::Policy,
+) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .user_agent(codex_user_agent())
         .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(60));
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(redirect_policy);
 
     if let Some(url) = proxy_url {
         let sanitized_url = sanitize_proxy_url(url);
@@ -922,6 +1002,17 @@ pub fn format_reqwest_error(context: &str, err: &reqwest::Error) -> anyhow::Erro
     anyhow::anyhow!("{msg}")
 }
 
+/// Format an authentication-request failure without endpoint details or the
+/// reqwest source chain. URLs can contain userinfo and query credentials, and
+/// intermediaries may include request details in lower-level error messages.
+pub(crate) fn format_auth_reqwest_error(context: &str, err: reqwest::Error) -> anyhow::Error {
+    let mut msg = format!("{context}: {}", err.without_url());
+    if let Some(hint) = tls_trust_hint(&msg) {
+        msg.push_str(hint);
+    }
+    anyhow::anyhow!("{msg}")
+}
+
 fn cleanup_old_backups(path: &Path) {
     let parent = match path.parent() {
         Some(p) => p,
@@ -962,6 +1053,109 @@ fn cleanup_old_backups(path: &Path) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn codex_version_parser_uses_the_full_numeric_release() {
+        assert_eq!(
+            parse_codex_cli_version("codex-cli 0.159.2-rc.1+build.7 (local)\n"),
+            Some("0.159.2".to_string())
+        );
+        assert_eq!(
+            parse_codex_cli_version("v0.158.0\n"),
+            Some("0.158.0".to_string())
+        );
+        assert_eq!(parse_codex_cli_version("codex is unavailable\n"), None);
+    }
+
+    #[test]
+    fn user_agent_uses_the_same_aligned_version_as_model_requests() {
+        let version = codex_cli_version();
+        assert!(codex_user_agent().starts_with(&format!("codex_cli_rs/{version} ")));
+        assert_eq!(ALIGNED_CODEX_VERSION, "0.159.2");
+    }
+
+    #[test]
+    fn codex_version_probe_has_a_hard_deadline() {
+        #[cfg(windows)]
+        let command = {
+            let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+            let path = PathBuf::from(root)
+                .join("System32")
+                .join(r"WindowsPowerShell\v1.0\powershell.exe");
+            let mut command = Command::new(path);
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 5",
+            ]);
+            command
+        };
+        #[cfg(not(windows))]
+        let command = {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("5");
+            command
+        };
+        let start = std::time::Instant::now();
+        let error = crate::app_server::output_with_timeout(command, Duration::from_millis(100))
+            .expect_err("a hanging version command must time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn auth_request_errors_do_not_expose_url_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let url = format!(
+            "http://user-secret:password-secret@{address}/oauth/token?refresh_secret=query-secret"
+        );
+        let error = reqwest::Client::new()
+            .get(url)
+            .send()
+            .await
+            .expect_err("the local listener was closed before the request");
+
+        let formatted =
+            format_auth_reqwest_error("token refresh request failed", error).to_string();
+        for secret in [
+            "user-secret",
+            "password-secret",
+            "refresh_secret",
+            "query-secret",
+        ] {
+            assert!(
+                !formatted.contains(secret),
+                "authentication diagnostics exposed {secret:?}: {formatted}"
+            );
+        }
+        assert!(formatted.contains("token refresh request failed"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_version_command_runs_a_cmd_path_wrapper() {
+        let directory = tempfile::tempdir().unwrap();
+        let wrapper = directory.path().join("codex cli.cmd");
+        std::fs::write(
+            &wrapper,
+            "@echo off\r\necho codex-cli 0.159.2 (wrapper)\r\n",
+        )
+        .unwrap();
+
+        let output = crate::app_server::output_with_timeout(
+            codex_version_command(&wrapper),
+            CODEX_VERSION_PROBE_TIMEOUT,
+        )
+        .expect("cmd wrapper should run");
+        assert!(output.status.success());
+        assert_eq!(
+            parse_codex_cli_version(&String::from_utf8_lossy(&output.stdout)),
+            Some("0.159.2".to_string())
+        );
+    }
 
     fn assert_recent_rfc3339(value: &serde_json::Value) {
         let text = value.as_str().expect("last_refresh should be a string");
@@ -1015,8 +1209,9 @@ mod tests {
     #[test]
     fn test_user_agent_matches_upstream_shape() {
         let ua = codex_user_agent();
+        let version = codex_cli_version();
         assert!(
-            ua.starts_with("codex_cli_rs/0.144.1 ("),
+            ua.starts_with(&format!("codex_cli_rs/{version} (")),
             "unexpected UA: {ua}"
         );
         assert!(ua.ends_with(')'));

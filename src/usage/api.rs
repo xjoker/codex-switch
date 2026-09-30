@@ -8,14 +8,14 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
-use crate::auth::{self, CLIENT_ID, format_reqwest_error};
+use crate::auth::{self, CLIENT_ID};
 use crate::http_retry::{self, ReplaySafety};
 
 use super::parse::parse_usage_checked;
 use super::reset_credits::merge_cached_reset_credits;
 use super::{
-    ImportValidation, MAX_RETRIES, RETRY_DELAY, Refresh, RefreshedTokens, TerminalAuthError,
-    TokenPersistFailure, UsageError, UsageFetchOutcome, UsageInfo,
+    ImportValidation, MAX_RETRIES, ProfileTokens, RETRY_DELAY, Refresh, RefreshedTokens,
+    TerminalAuthError, TokenPersistFailure, UsageError, UsageFetchOutcome, UsageInfo,
 };
 
 #[derive(Debug)]
@@ -98,9 +98,9 @@ pub(crate) fn apply_account_routing_headers(
 
 /// The auth server reports failures in two shapes: the OAuth 2.0 standard
 /// `{"error": "invalid_grant", "error_description": "..."}` and OpenAI's
-/// `{"error": {"code": ..., "message": ..., "type": ...}}`. Accept both, or the
-/// whole response fails to deserialize and the actionable server message is
-/// replaced by a serde type error.
+/// `{"error": {"code": ..., "message": ..., "type": ...}}`. Accept both,
+/// but never surface server-provided descriptions: a gateway can echo request
+/// credentials into them.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RefreshError {
@@ -204,13 +204,6 @@ async fn remember_terminal_verdict(
     crate::cache::put_auth_failure_async(alias, refresh_token, error).await;
 }
 
-fn format_refresh_error(code: &str, message: Option<&str>) -> String {
-    match message {
-        Some(message) => format!("{code}: {message}"),
-        None => code.to_string(),
-    }
-}
-
 fn usage_url() -> String {
     std::env::var("CS_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
 }
@@ -302,14 +295,15 @@ fn resolve_refreshed_tokens(
     current_access_token: Option<&str>,
     current_refresh_token: &str,
 ) -> Result<RefreshedTokens> {
-    if let Some((code, message)) = response.error_parts() {
+    if let Some((code, _untrusted_message)) = response.error_parts() {
         if is_terminal_auth_failure(&code, status) {
-            return Err(TerminalAuthError { code, message }.into());
+            return Err(TerminalAuthError {
+                code,
+                message: None,
+            }
+            .into());
         }
-        anyhow::bail!(
-            "token refresh failed: {}",
-            format_refresh_error(&code, message.as_deref())
-        );
+        anyhow::bail!("token refresh failed: {code}");
     }
 
     // A non-2xx without a recognizable error body still means no tokens were
@@ -382,6 +376,191 @@ fn reload_rotated_credentials(
         access_token: access_token?,
         refresh_token,
     })
+}
+
+fn read_profile_tokens(profile_path: &Path) -> Result<(Value, ProfileTokens)> {
+    let value = auth::read_auth(profile_path)
+        .with_context(|| format!("reading auth file {}", profile_path.display()))?;
+    let tokens = profile_tokens_from_auth(&value)?;
+    Ok((value, tokens))
+}
+
+fn profile_tokens_from_auth(value: &Value) -> Result<ProfileTokens> {
+    let (access_token, refresh_token) = auth::extract_tokens(value);
+    let access_token = access_token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("auth file missing access_token"))?;
+    let info = crate::jwt::parse_account_info(value);
+    Ok(ProfileTokens {
+        id_token: auth::extract_id_token(value).filter(|token| !token.trim().is_empty()),
+        access_token,
+        refresh_token: refresh_token.filter(|token| !token.trim().is_empty()),
+        account_id: info.account_id,
+        email: info.email.map(|email| email.to_lowercase()),
+        is_fedramp: info.is_fedramp,
+    })
+}
+
+fn profile_tokens_changed(left: &ProfileTokens, right: &ProfileTokens) -> bool {
+    left != right
+}
+
+fn same_profile_identity(left: &ProfileTokens, right: &ProfileTokens) -> bool {
+    left.account_id == right.account_id && left.email == right.email
+}
+
+fn ensure_profile_identity(
+    alias: &str,
+    expected: &ProfileTokens,
+    current: &ProfileTokens,
+) -> Result<()> {
+    if !same_profile_identity(expected, current) {
+        return Err(crate::usage::RefreshSafetyError::new(format!(
+            "authenticated account does not match profile '{alias}'"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Read credentials written by another process without starting another token
+/// refresh. A different identity is an error, even when the credentials did
+/// change, because the caller's account routing headers belong to the old one.
+pub(crate) fn reload_profile_tokens_if_changed(
+    alias: &str,
+    profile_path: &Path,
+    expected: &ProfileTokens,
+) -> Result<Option<ProfileTokens>> {
+    let (_, current) = read_profile_tokens(profile_path)?;
+    ensure_profile_identity(alias, expected, &current)?;
+    Ok(profile_tokens_changed(&current, expected).then_some(current))
+}
+
+fn validate_refreshed_identity(
+    alias: &str,
+    current_auth: &Value,
+    expected: &ProfileTokens,
+    refreshed: &RefreshedTokens,
+) -> Result<Value> {
+    let mut candidate = current_auth.clone();
+    auth::apply_tokens(
+        &mut candidate,
+        &refreshed.id_token,
+        &refreshed.access_token,
+        &refreshed.refresh_token,
+    )
+    .map_err(|error| {
+        crate::usage::RefreshSafetyError::new(format!(
+            "{alias}: token refresh succeeded but the rotated credentials could not be validated: {error:#}"
+        ))
+    })?;
+    let existing = crate::profile::extract_identity(current_auth);
+    let incoming = crate::profile::extract_identity(&candidate);
+    if existing.account_id != expected.account_id
+        || incoming.account_id != expected.account_id
+        || existing.email != expected.email
+        || incoming.email != expected.email
+    {
+        return Err(crate::usage::RefreshSafetyError::new(format!(
+            "{alias}: authenticated account changed during token refresh; refusing to save or use rotated credentials"
+        ))
+        .into());
+    }
+    Ok(candidate)
+}
+
+/// Refresh the credentials used for a rejected API request, or adopt a
+/// concurrent winner already written to the profile. The rotated token is
+/// persisted with the profile's refresh-token compare-and-swap before it is
+/// returned to the caller.
+pub(crate) async fn refresh_profile_tokens(
+    alias: &str,
+    profile_path: &Path,
+    expected: &ProfileTokens,
+) -> Result<ProfileTokens> {
+    let (current_auth, current) = read_profile_tokens(profile_path)?;
+    ensure_profile_identity(alias, expected, &current)?;
+    if profile_tokens_changed(&current, expected) {
+        return Ok(current);
+    }
+    let refresh_token = current
+        .refresh_token
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("{alias}: no refresh_token in profile"))?;
+    if let Some(known) = crate::cache::get_auth_failure_async(alias, refresh_token).await {
+        anyhow::bail!("{}", known.detail);
+    }
+
+    let client = auth::build_http_client()?;
+    let refreshed = match do_refresh_token(
+        alias,
+        &client,
+        current.id_token.as_deref(),
+        Some(&current.access_token),
+        refresh_token,
+    )
+    .await
+    {
+        Ok(refreshed) => refreshed,
+        Err(error) => {
+            // A second process may have rotated the same single-use token
+            // while this request was in flight. Adopt its persisted winner and
+            // never replay either credential from this call.
+            if let Ok((_, latest)) = read_profile_tokens(profile_path) {
+                ensure_profile_identity(alias, expected, &latest)?;
+                if profile_tokens_changed(&latest, &current) {
+                    return Ok(latest);
+                }
+            }
+            if let Some(terminal) = error.downcast_ref::<TerminalAuthError>() {
+                let failure = UsageError {
+                    summary: terminal.summary(),
+                    detail: format!("{error:#}"),
+                };
+                remember_terminal_verdict(alias, &terminal.code, Some(refresh_token), &failure)
+                    .await;
+            }
+            return Err(error);
+        }
+    };
+
+    let updated_auth = validate_refreshed_identity(alias, &current_auth, expected, &refreshed)?;
+    let persisted = crate::profile::update_profile_tokens_if_refresh_matches(
+        alias,
+        refresh_token,
+        &refreshed.id_token,
+        &refreshed.access_token,
+        &refreshed.refresh_token,
+    )
+    .map_err(|error| {
+        crate::usage::RefreshSafetyError::new(
+            UsageError::token_persist_failed(alias, &error).detail,
+        )
+    })?;
+    if persisted {
+        return profile_tokens_from_auth(&updated_auth).map_err(|error| {
+            crate::usage::RefreshSafetyError::new(format!(
+                "{alias}: token refresh succeeded and was persisted, but the stored credentials could not be used: {error:#}"
+            ))
+            .into()
+        });
+    }
+
+    // A different process won the CAS after our refresh response arrived. Its
+    // profile is authoritative; never use or persist this now-stale response.
+    let latest = read_profile_tokens(profile_path).map_err(|error| {
+        crate::usage::RefreshSafetyError::new(format!(
+            "{alias}: token refresh succeeded but the rotated credentials could not be reconciled with the profile: {error:#}"
+        ))
+    })?;
+    ensure_profile_identity(alias, expected, &latest.1)?;
+    if profile_tokens_changed(&latest.1, &current) {
+        return Ok(latest.1);
+    }
+    Err(crate::usage::RefreshSafetyError::new(format!(
+        "{alias}: token refresh succeeded but the profile credentials changed without a replacement; sign in again once the profile write problem is fixed"
+    ))
+    .into())
 }
 
 async fn fetch_usage_retried_inner(
@@ -933,20 +1112,23 @@ pub(crate) async fn do_refresh_token(
     refresh_token: &str,
 ) -> Result<RefreshedTokens> {
     let token_url = auth::token_url();
-    debug!("[{alias}] sending token refresh request to {token_url}");
+    debug!("[{alias}] sending token refresh request");
 
     let resp = build_refresh_request(client, &token_url, refresh_token)
         .send()
         .await
-        .map_err(|e| format_reqwest_error("token refresh request failed", &e))?;
+        .map_err(|error| auth::format_auth_reqwest_error("token refresh request failed", error))?;
 
     let status = resp.status();
     debug!("[{alias}] token refresh response: HTTP {status}");
 
     // Read the body once for parsing, but never log its contents: unknown
     // server error bodies can carry credentials outside our known schema.
-    let body_text = resp.text().await.map_err(|e| {
-        anyhow::anyhow!("failed to read token refresh response body (HTTP {status}): {e}")
+    let body_text = resp.text().await.map_err(|error| {
+        auth::format_auth_reqwest_error(
+            &format!("failed to read token refresh response body (HTTP {status})"),
+            error,
+        )
     })?;
 
     let r: RefreshResponse = serde_json::from_str(&body_text).map_err(|e| {
@@ -1299,5 +1481,44 @@ mod tests {
         assert_eq!(refreshed.id_token, "existing-id");
         assert_eq!(refreshed.access_token, "new-access");
         assert_eq!(refreshed.refresh_token, "existing-refresh");
+    }
+
+    #[test]
+    fn refresh_errors_do_not_surface_server_descriptions_or_credentials() {
+        let refresh_secret = "refresh-token-secret";
+        let error = resolve_refreshed_tokens(
+            RefreshResponse {
+                id_token: None,
+                access_token: None,
+                refresh_token: None,
+                error: Some(RefreshError::Detail {
+                    code: Some("refresh_token_reused".to_string()),
+                    message: Some(format!("credential rejected: {refresh_secret}")),
+                    kind: None,
+                }),
+                error_description: Some(format!("request body echoed {refresh_secret}")),
+            },
+            reqwest::StatusCode::BAD_REQUEST,
+            Some("id-token-secret"),
+            Some("access-token-secret"),
+            refresh_secret,
+        )
+        .err()
+        .expect("the auth server rejected the refresh token");
+
+        let detail = format!("{error:#}");
+        assert!(detail.contains("refresh_token_reused"));
+        for secret in [
+            refresh_secret,
+            "id-token-secret",
+            "access-token-secret",
+            "credential rejected",
+            "request body echoed",
+        ] {
+            assert!(
+                !detail.contains(secret),
+                "refresh diagnostics exposed untrusted response data {secret:?}: {detail}"
+            );
+        }
     }
 }

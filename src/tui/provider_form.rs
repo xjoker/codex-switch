@@ -23,7 +23,8 @@ use super::popup::{self, PopupState};
 use super::theme::{C_GREEN, C_RED, base, dim, header, key};
 use crate::provider::{
     ProviderModel, ProviderProfile, RemoteModel, SMALL_REMOTE_CATALOG_LIMIT, apply_fetched_models,
-    apply_picked_models, chat_slugs_from_gateway, fetch_gateway_models_blocking,
+    apply_picked_models, chat_slugs_from_gateway, derive_env_key,
+    fetch_gateway_models_overrides_blocking, sanitize_provider_id,
 };
 
 /// Reasoning-effort presets. Index 0 skips the override; the rest are saved as
@@ -668,7 +669,27 @@ impl ProviderFormState {
             self.error = Some("API key cannot be empty".into());
             return;
         };
-        match fetch_gateway_models_blocking(url, key, !self.require_https) {
+        let alias = self.alias.trim();
+        let env_key = if self.env_key.trim().is_empty() {
+            derive_env_key(alias)
+        } else {
+            self.env_key.trim().to_string()
+        };
+        let config = parse_extra_sets(&self.extra_sets);
+        let wire_api = if self.wire_api.trim().is_empty() {
+            "responses"
+        } else {
+            self.wire_api.trim()
+        };
+        match fetch_gateway_models_overrides_blocking(
+            url,
+            key,
+            &env_key,
+            !self.require_https,
+            wire_api,
+            &sanitize_provider_id(alias),
+            &config,
+        ) {
             Ok(remote) => self.ingest_remote(&remote),
             Err(err) => self.error = Some(format!("Fetch models failed: {err}")),
         }
@@ -2214,6 +2235,7 @@ mod tests {
                 description: None,
                 context_window: Some(1_048_576),
                 input_modalities: vec![],
+                catalog_entry: None,
             },
             crate::provider::RemoteModel {
                 slug: "Qwen/Qwen3-Embedding-0.6B".into(),
@@ -2221,6 +2243,7 @@ mod tests {
                 description: None,
                 context_window: Some(8_192),
                 input_modalities: vec![],
+                catalog_entry: None,
             },
             crate::provider::RemoteModel {
                 slug: "gemini-3-flash".into(),
@@ -2228,6 +2251,7 @@ mod tests {
                 description: None,
                 context_window: Some(8_192),
                 input_modalities: vec![],
+                catalog_entry: None,
             },
         ])
         .expect("gateway chat slugs");
@@ -2251,6 +2275,7 @@ mod tests {
             description: None,
             context_window: None,
             input_modalities: vec![],
+            catalog_entry: None,
         }
     }
 

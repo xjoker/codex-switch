@@ -1,15 +1,23 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::http_retry::{self, ReplaySafety};
 
 const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
+const MODEL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone)]
+struct CachedWarmupModels {
+    models: Vec<String>,
+    fetched_at: Instant,
+}
 
 fn responses_url() -> String {
     std::env::var("CS_RESPONSES_URL").unwrap_or_else(|_| RESPONSES_URL.to_string())
@@ -19,7 +27,6 @@ fn models_url() -> String {
     std::env::var("CS_MODELS_URL").unwrap_or_else(|_| MODELS_URL.to_string())
 }
 
-static CODEX_VERSION: OnceCell<String> = OnceCell::const_new();
 /// The models one warmup should touch, keyed by account *and* by the quota
 /// pools that produced the selection (see [`warmup_cache_key`]).
 ///
@@ -27,52 +34,35 @@ static CODEX_VERSION: OnceCell<String> = OnceCell::const_new();
 /// request and the additional-pool requests are answered by a single `/models`
 /// response, so caching only the first one made every warmup fetch that
 /// response twice — and with no additional pools, threw the second away.
-static MODEL_CACHE: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
+static MODEL_CACHE: LazyLock<Mutex<HashMap<String, CachedWarmupModels>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 // Serialize duplicate fetches for the same account without blocking unrelated accounts.
 static MODEL_FETCH_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn model_cache_get(cache: &HashMap<String, Vec<String>>, key: &str) -> Option<Vec<String>> {
-    cache.get(key).cloned()
+fn model_cache_get(cache: &HashMap<String, CachedWarmupModels>, key: &str) -> Option<Vec<String>> {
+    cache
+        .get(key)
+        .filter(|cached| cached.fetched_at.elapsed() < MODEL_CACHE_TTL)
+        .map(|cached| cached.models.clone())
 }
 
-fn model_cache_set(cache: &mut HashMap<String, Vec<String>>, key: &str, models: Vec<String>) {
-    cache.insert(key.to_string(), models);
+fn model_cache_set(
+    cache: &mut HashMap<String, CachedWarmupModels>,
+    key: &str,
+    models: Vec<String>,
+) {
+    cache.insert(
+        key.to_string(),
+        CachedWarmupModels {
+            models,
+            fetched_at: Instant::now(),
+        },
+    );
 }
 
-fn model_cache_invalidate(cache: &mut HashMap<String, Vec<String>>, key: &str) {
+fn model_cache_invalidate(cache: &mut HashMap<String, CachedWarmupModels>, key: &str) {
     cache.remove(key);
-}
-
-/// Detects the local `codex` CLI version. Runs the subprocess probe on a
-/// blocking thread pool so it never stalls a tokio worker thread.
-async fn detect_codex_version() -> &'static str {
-    CODEX_VERSION
-        .get_or_init(|| async {
-            tokio::task::spawn_blocking(|| {
-                std::process::Command::new("codex")
-                    .arg("--version")
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .and_then(|s| parse_codex_version(&s))
-                    .unwrap_or_else(|| crate::auth::ALIGNED_CODEX_VERSION.to_string())
-            })
-            .await
-            .unwrap_or_else(|_| crate::auth::ALIGNED_CODEX_VERSION.to_string())
-        })
-        .await
-}
-
-/// Pick the version token out of `codex --version` output. Output shapes vary
-/// (`codex-cli 0.144.1`, `codex-cli 0.1.0 (build abc)`), so take the first
-/// dotted token that starts with a digit rather than the last token.
-fn parse_codex_version(stdout: &str) -> Option<String> {
-    stdout
-        .split_whitespace()
-        .find(|t| t.starts_with(|c: char| c.is_ascii_digit()) && t.contains('.'))
-        .map(|v| v.to_string())
 }
 
 fn build_models_request(
@@ -126,10 +116,14 @@ fn parse_models_body(body: &serde_json::Value) -> Result<Vec<ModelEntry>> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("no models array in response"))?;
 
+    let mut seen = HashSet::new();
     Ok(models
         .iter()
         .filter_map(|m| {
-            let slug = m["slug"].as_str()?.to_string();
+            let slug = m["slug"].as_str()?.trim().to_string();
+            if slug.is_empty() || !seen.insert(slug.clone()) {
+                return None;
+            }
             let string_list = |key: &str| {
                 m.get(key)
                     .and_then(serde_json::Value::as_array)
@@ -217,7 +211,7 @@ pub(crate) async fn fetch_models(
     account_id: Option<&str>,
     is_fedramp: bool,
 ) -> Result<Vec<ModelEntry>> {
-    let version = detect_codex_version().await;
+    let version = crate::auth::codex_cli_version();
     for attempt in 1..=3 {
         let response = http_retry::send(
             build_models_request(client, access_token, account_id, is_fedramp, version),
@@ -233,7 +227,7 @@ pub(crate) async fn fetch_models(
                 let status = resp.status;
                 let retryable = status.is_server_error();
                 if !retryable || attempt == 3 {
-                    bail!("models endpoint returned {status}");
+                    return Err(ModelsHttpError(status).into());
                 }
                 debug!("models fetch attempt {attempt}/3 returned {status}; retrying");
             }
@@ -249,16 +243,71 @@ pub(crate) async fn fetch_models(
     unreachable!("models fetch loop always returns")
 }
 
+#[derive(Debug)]
+struct ModelsHttpError(reqwest::StatusCode);
+
+impl std::fmt::Display for ModelsHttpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "models endpoint returned {}", self.0)
+    }
+}
+
+impl std::error::Error for ModelsHttpError {}
+
+fn is_models_auth_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ModelsHttpError>()
+        .is_some_and(|error| error.0 == reqwest::StatusCode::UNAUTHORIZED)
+}
+
 /// Resolve every model this warmup should touch, from one `/models` response:
 /// the main-pool model first, then one per additional quota pool.
 async fn fetch_warmup_models(
+    alias: &str,
+    profile_path: &Path,
     client: &reqwest::Client,
-    access_token: &str,
-    account_id: Option<&str>,
-    is_fedramp: bool,
+    profile_tokens: &mut crate::usage::ProfileTokens,
+    refresh_attempted: &mut bool,
     additional_limits: &[crate::usage::AdditionalRateLimit],
 ) -> Result<Vec<String>> {
-    let models = fetch_models(client, access_token, account_id, is_fedramp).await?;
+    let models = match fetch_models(
+        client,
+        &profile_tokens.access_token,
+        profile_tokens.account_id.as_deref(),
+        profile_tokens.is_fedramp,
+    )
+    .await
+    {
+        Ok(models) => models,
+        Err(error) if is_models_auth_error(&error) => {
+            let expected = profile_tokens.clone();
+            if *refresh_attempted {
+                *profile_tokens =
+                    crate::usage::reload_profile_tokens_if_changed(alias, profile_path, &expected)?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "{alias}: /models returned HTTP 401 after the token refresh attempt"
+                            )
+                        })?;
+            } else {
+                *refresh_attempted = true;
+                *profile_tokens =
+                    crate::usage::refresh_profile_tokens(alias, profile_path, &expected)
+                        .await
+                        .with_context(|| {
+                            format!("{alias}: recovering authentication for /models")
+                        })?;
+            }
+            fetch_models(
+                client,
+                &profile_tokens.access_token,
+                profile_tokens.account_id.as_deref(),
+                profile_tokens.is_fedramp,
+            )
+            .await?
+        }
+        Err(error) => return Err(error),
+    };
     let selected = select_warmup_models(&models, additional_limits)?;
     if selected.is_empty() {
         return require_official_model(Err(anyhow::anyhow!(
@@ -290,9 +339,21 @@ fn normalized_pool_name(value: &str) -> String {
 /// errors, so nothing invalidates the entry either.
 ///
 /// Only the pools `select_warmup_models` acts on take part, and they are sorted,
-/// so an upstream reordering does not needlessly discard a good entry.
+/// so an upstream reordering does not needlessly discard a good entry. Identity
+/// and FedRAMP routing also participate because the returned catalog is scoped
+/// to the account and request route.
 fn warmup_cache_key(
     alias: &str,
+    additional_limits: &[crate::usage::AdditionalRateLimit],
+) -> String {
+    warmup_cache_key_for_identity(alias, None, None, false, additional_limits)
+}
+
+fn warmup_cache_key_for_identity(
+    alias: &str,
+    account_id: Option<&str>,
+    email: Option<&str>,
+    is_fedramp: bool,
     additional_limits: &[crate::usage::AdditionalRateLimit],
 ) -> String {
     let mut pools: Vec<String> = additional_limits
@@ -303,7 +364,14 @@ fn warmup_cache_key(
     pools.sort_unstable();
     // Unit separator: cannot appear in an alias or a normalized pool name, so
     // no pool list can be confused with a different account's key.
-    format!("{alias}\u{1f}{}", pools.join("\u{1e}"))
+    let account_id = account_id.unwrap_or_default();
+    let email = email.unwrap_or_default().to_lowercase();
+    format!(
+        "{alias}\u{1f}{}:{account_id}\u{1f}{}:{email}\u{1f}fedramp:{is_fedramp}\u{1f}{}",
+        account_id.len(),
+        email.len(),
+        pools.join("\u{1e}")
+    )
 }
 
 fn is_model_quota_limit(limit: &crate::usage::AdditionalRateLimit) -> bool {
@@ -380,9 +448,7 @@ fn select_warmup_models(
     let main_candidates: Vec<&ModelEntry> = visible
         .iter()
         .copied()
-        .filter(|model| {
-            model.supported_in_api != Some(false) && !additional_slugs.contains(model.slug.as_str())
-        })
+        .filter(|model| !additional_slugs.contains(model.slug.as_str()))
         .collect();
 
     // Prefer Luna for minimal warmups, keep mini for older catalogs, then use
@@ -411,12 +477,13 @@ fn select_warmup_models(
     Ok(selected)
 }
 
-async fn resolve_warmup_models(
+async fn resolve_warmup_models_for_profile(
     cache_key: &str,
+    alias: &str,
+    profile_path: &Path,
     client: &reqwest::Client,
-    access_token: &str,
-    account_id: Option<&str>,
-    is_fedramp: bool,
+    profile_tokens: &mut crate::usage::ProfileTokens,
+    refresh_attempted: &mut bool,
     additional_limits: &[crate::usage::AdditionalRateLimit],
 ) -> Result<Vec<String>> {
     if let Some(models) = model_cache_get(&*MODEL_CACHE.lock().await, cache_key) {
@@ -436,15 +503,46 @@ async fn resolve_warmup_models(
     }
 
     let models = fetch_warmup_models(
+        alias,
+        profile_path,
         client,
-        access_token,
-        account_id,
-        is_fedramp,
+        profile_tokens,
+        refresh_attempted,
         additional_limits,
     )
     .await?;
     model_cache_set(&mut *MODEL_CACHE.lock().await, cache_key, models.clone());
     Ok(models)
+}
+
+#[cfg(test)]
+async fn resolve_warmup_models(
+    cache_key: &str,
+    client: &reqwest::Client,
+    access_token: &str,
+    account_id: Option<&str>,
+    is_fedramp: bool,
+    additional_limits: &[crate::usage::AdditionalRateLimit],
+) -> Result<Vec<String>> {
+    let mut profile_tokens = crate::usage::ProfileTokens {
+        id_token: None,
+        access_token: access_token.to_string(),
+        refresh_token: None,
+        account_id: account_id.map(str::to_string),
+        email: None,
+        is_fedramp,
+    };
+    let mut refresh_attempted = false;
+    resolve_warmup_models_for_profile(
+        cache_key,
+        "warmup-test",
+        Path::new("warmup-test-auth.json"),
+        client,
+        &mut profile_tokens,
+        &mut refresh_attempted,
+        additional_limits,
+    )
+    .await
 }
 
 /// Split a resolved set into the main-pool model and the additional-pool ones.
@@ -599,56 +697,6 @@ async fn warmup_additional_models(
     Ok(())
 }
 
-/// Write credentials the auth server just rotated back to the profile.
-///
-/// OpenAI's `refresh_token` is single-use: the previous one is already dead
-/// server-side the moment these arrive, so a failed write leaves the only
-/// credential the server still accepts in this process's memory. Finishing the
-/// warmup (or the `/models` fetch) with it would exit successfully and hand the
-/// user a profile that silently stops working at the next start, which makes
-/// this a reportable failure rather than something to warn about and walk past.
-///
-/// The wording is shared with the usage path's [`crate::usage::UsageError::token_persist_failed`]
-/// so the report stays distinguishable from a *rejected* refresh: here the
-/// tokens are valid and the local write needs fixing, there the profile needs a
-/// new sign-in.
-///
-/// Each caller owns a single account, so propagating this aborts that account
-/// only — batch drivers keep processing the rest.
-fn persist_refreshed_tokens(
-    alias: &str,
-    presented_refresh_token: &str,
-    refreshed: &crate::usage::RefreshedTokens,
-) -> Result<()> {
-    let persisted = crate::profile::update_profile_tokens_if_refresh_matches(
-        alias,
-        presented_refresh_token,
-        &refreshed.id_token,
-        &refreshed.access_token,
-        &refreshed.refresh_token,
-    )
-    .map_err(|err| {
-        anyhow::anyhow!(
-            "{}",
-            crate::usage::UsageError::token_persist_failed(alias, &err).detail
-        )
-    })?;
-    if !persisted {
-        // Deliberately weaker than the usage path, which answers the same race
-        // by re-reading the profile and retrying (`reload_rotated_credentials`).
-        // Losing the CAS means a peer already wrote a newer credential, so the
-        // profile is healthy and warmup has nothing left to do — warmup only
-        // opens a quota window, and the next one will use the stored token.
-        // Adding a recovery round here would buy nothing and duplicate the
-        // hardest logic in the codebase.
-        debug!(
-            "[{alias}] skipped stale refreshed tokens because another process replaced the \
-             presented refresh token"
-        );
-    }
-    Ok(())
-}
-
 /// Result of one account warmup. `SkippedNoFiveHour` means usage data showed
 /// only a 7-day window (typically a free plan) so no ping was sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -695,49 +743,43 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
         .map_err(|e| anyhow::anyhow!("{alias}: cannot read auth: {e}"))?;
 
     let (at, rt) = crate::auth::extract_tokens(&val);
-    let mut id_token = crate::auth::extract_id_token(&val);
-    let mut access_token = at
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("{alias}: no access_token in profile"))?;
-    let mut refresh_token = rt.filter(|s| !s.is_empty());
-
-    let info = crate::auth::read_account_info(profile_path);
-    let account_id = info.account_id;
-    let is_fedramp = info.is_fedramp;
+    let info = crate::jwt::parse_account_info(&val);
+    let mut profile_tokens = crate::usage::ProfileTokens {
+        id_token: crate::auth::extract_id_token(&val),
+        access_token: at
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{alias}: no access_token in profile"))?,
+        refresh_token: rt.filter(|s| !s.is_empty()),
+        account_id: info.account_id,
+        email: info.email.map(|email| email.to_lowercase()),
+        is_fedramp: info.is_fedramp,
+    };
 
     let client = crate::auth::build_http_client()?;
 
     // Set when the pre-warmup proactive refresh below is rejected by the auth
     // server outright (e.g. `refresh_token_reused`): that refresh_token is now
-    // permanently dead, so a later 401/403 must not spend a second round trip
+    // permanently dead, so a later 401 must not spend a second round trip
     // replaying it — it can only re-trigger reuse detection.
     let mut rejected_refresh: Option<anyhow::Error> = None;
+    let mut refresh_attempted = false;
 
     // Pre-refresh: if token is about to expire, refresh proactively
-    if let Some(ref rt) = refresh_token
-        && crate::jwt::is_token_expiring(&access_token, 60) == Some(true)
+    if profile_tokens.refresh_token.is_some()
+        && crate::jwt::is_token_expiring(&profile_tokens.access_token, 60) == Some(true)
     {
+        // One refresh per warmup flow. A later 401 can only adopt credentials
+        // another process has already persisted for this same identity.
+        refresh_attempted = true;
         tracing::info!(
             action = "token_refresh",
             alias,
             trigger = "warmup_expiry",
             "token refresh started"
         );
-        match crate::usage::do_refresh_token(
-            alias,
-            &client,
-            id_token.as_deref(),
-            Some(&access_token),
-            rt,
-        )
-        .await
-        {
-            Ok(refreshed) => {
-                persist_refreshed_tokens(alias, rt, &refreshed)?;
-                access_token = refreshed.access_token;
-                id_token = Some(refreshed.id_token);
-                refresh_token = Some(refreshed.refresh_token);
-            }
+        match crate::usage::refresh_profile_tokens(alias, profile_path, &profile_tokens).await {
+            Ok(refreshed) => profile_tokens = refreshed,
+            Err(error) if crate::usage::is_refresh_safety_error(&error) => return Err(error),
             Err(e) => {
                 if let Some(terminal) = e.downcast_ref::<crate::usage::TerminalAuthError>() {
                     warn!(
@@ -755,13 +797,20 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
 
     // One `/models` answer covers both the main-pool request below and every
     // additional-pool request after it.
-    let cache_key = warmup_cache_key(alias, &additional_limits);
-    let selected_models = resolve_warmup_models(
+    let cache_key = warmup_cache_key_for_identity(
+        alias,
+        profile_tokens.account_id.as_deref(),
+        profile_tokens.email.as_deref(),
+        profile_tokens.is_fedramp,
+        &additional_limits,
+    );
+    let selected_models = resolve_warmup_models_for_profile(
         &cache_key,
+        alias,
+        profile_path,
         &client,
-        &access_token,
-        account_id.as_deref(),
-        is_fedramp,
+        &mut profile_tokens,
+        &mut refresh_attempted,
         &additional_limits,
     )
     .await
@@ -774,9 +823,9 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
 
     let resp = make_request(
         &client,
-        &access_token,
-        account_id.as_deref(),
-        is_fedramp,
+        &profile_tokens.access_token,
+        profile_tokens.account_id.as_deref(),
+        profile_tokens.is_fedramp,
         &body,
     )
     .send()
@@ -793,9 +842,9 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                 .with_context(|| format!("{alias}: warmup did not complete"))?;
             warmup_additional_models(
                 &client,
-                &access_token,
-                account_id.as_deref(),
-                is_fedramp,
+                &profile_tokens.access_token,
+                profile_tokens.account_id.as_deref(),
+                profile_tokens.is_fedramp,
                 additional_models,
             )
             .await
@@ -809,12 +858,13 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                     "[{alias}] model {model:?} not supported, refreshing model cache and retrying"
                 );
                 model_cache_invalidate(&mut *MODEL_CACHE.lock().await, &cache_key);
-                let refreshed_models = resolve_warmup_models(
+                let refreshed_models = resolve_warmup_models_for_profile(
                     &cache_key,
+                    alias,
+                    profile_path,
                     &client,
-                    &access_token,
-                    account_id.as_deref(),
-                    is_fedramp,
+                    &mut profile_tokens,
+                    &mut refresh_attempted,
                     &additional_limits,
                 )
                 .await
@@ -828,9 +878,9 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                 let retry_body = build_body(new_model);
                 let retry_resp = make_request(
                     &client,
-                    &access_token,
-                    account_id.as_deref(),
-                    is_fedramp,
+                    &profile_tokens.access_token,
+                    profile_tokens.account_id.as_deref(),
+                    profile_tokens.is_fedramp,
                     &retry_body,
                 )
                 .send()
@@ -843,9 +893,9 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                         .with_context(|| format!("{alias}: warmup retry did not complete"))?;
                     return warmup_additional_models(
                         &client,
-                        &access_token,
-                        account_id.as_deref(),
-                        is_fedramp,
+                        &profile_tokens.access_token,
+                        profile_tokens.account_id.as_deref(),
+                        profile_tokens.is_fedramp,
                         new_additional_models,
                     )
                     .await
@@ -855,7 +905,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
             }
             bail!("{alias}: HTTP 400")
         }
-        401 | 403 => {
+        401 => {
             // The pre-warmup proactive refresh already got a terminal rejection
             // from the auth server for this same refresh_token — retrying here
             // would just replay a dead credential and burn another round trip.
@@ -864,51 +914,57 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                     "{alias}: authentication failed (HTTP {status}) after proactive token refresh was already rejected"
                 )));
             }
-            // Retry once with refreshed token
-            if let Some(ref rt) = refresh_token {
+            // Retry once with refreshed credentials. If this flow already
+            // used its refresh opportunity, only adopt a concurrent winner.
+            if profile_tokens.refresh_token.is_some() {
                 debug!("[{alias}] got {status}, attempting token refresh and retry");
-                match crate::usage::do_refresh_token(
-                    alias,
-                    &client,
-                    id_token.as_deref(),
-                    Some(&access_token),
-                    rt,
-                )
-                .await
-                {
-                    Ok(refreshed) => {
-                        persist_refreshed_tokens(alias, rt, &refreshed)?;
-                        let retry_resp = make_request(
-                            &client,
-                            &refreshed.access_token,
-                            account_id.as_deref(),
-                            is_fedramp,
-                            &body,
-                        )
-                        .send()
+                let expected = profile_tokens.clone();
+                profile_tokens = if refresh_attempted {
+                    crate::usage::reload_profile_tokens_if_changed(alias, profile_path, &expected)?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "{alias}: authentication failed after the token refresh attempt"
+                            )
+                        })?
+                } else {
+                    crate::usage::refresh_profile_tokens(alias, profile_path, &expected)
                         .await
                         .map_err(|e| {
-                            crate::auth::format_reqwest_error("warmup retry failed", &e)
-                        })?;
-                        let retry_status = retry_resp.status();
-                        if retry_status.is_success() {
-                            await_warmup_completion(retry_resp).await.with_context(|| {
-                                format!("{alias}: warmup retry did not complete")
-                            })?;
-                            return warmup_additional_models(
-                                &client,
-                                &refreshed.access_token,
-                                account_id.as_deref(),
-                                is_fedramp,
-                                additional_models,
-                            )
-                            .await
-                            .map(|()| WarmupOutcome::Warmed);
-                        }
-                        bail!("{alias}: HTTP {retry_status} after token refresh retry")
-                    }
-                    Err(e) => bail!("{alias}: authentication failed and token refresh failed: {e}"),
+                            if crate::usage::is_refresh_safety_error(&e) {
+                                e
+                            } else {
+                                e.context(format!(
+                                    "{alias}: authentication failed and token refresh failed"
+                                ))
+                            }
+                        })?
+                };
+                let retry_resp = make_request(
+                    &client,
+                    &profile_tokens.access_token,
+                    profile_tokens.account_id.as_deref(),
+                    profile_tokens.is_fedramp,
+                    &body,
+                )
+                .send()
+                .await
+                .map_err(|e| crate::auth::format_reqwest_error("warmup retry failed", &e))?;
+                let retry_status = retry_resp.status();
+                if retry_status.is_success() {
+                    await_warmup_completion(retry_resp)
+                        .await
+                        .with_context(|| format!("{alias}: warmup retry did not complete"))?;
+                    return warmup_additional_models(
+                        &client,
+                        &profile_tokens.access_token,
+                        profile_tokens.account_id.as_deref(),
+                        profile_tokens.is_fedramp,
+                        additional_models,
+                    )
+                    .await
+                    .map(|()| WarmupOutcome::Warmed);
                 }
+                bail!("{alias}: HTTP {retry_status} after token refresh retry")
             }
             bail!(
                 "{alias}: authentication failed — token may be expired (run `codex-switch list` to refresh)"
@@ -930,36 +986,28 @@ pub(crate) async fn fetch_models_for_profile(
         .map_err(|e| anyhow::anyhow!("{alias}: cannot read auth: {e}"))?;
 
     let (at, rt) = crate::auth::extract_tokens(&val);
-    let id_token = crate::auth::extract_id_token(&val);
-    let mut access_token = at
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("{alias}: no access_token in profile"))?;
-    let refresh_token = rt.filter(|s| !s.is_empty());
-
-    let info = crate::auth::read_account_info(profile_path);
-    let account_id = info.account_id;
-    let is_fedramp = info.is_fedramp;
+    let info = crate::jwt::parse_account_info(&val);
+    let mut profile_tokens = crate::usage::ProfileTokens {
+        id_token: crate::auth::extract_id_token(&val),
+        access_token: at
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{alias}: no access_token in profile"))?,
+        refresh_token: rt.filter(|s| !s.is_empty()),
+        account_id: info.account_id,
+        email: info.email.map(|email| email.to_lowercase()),
+        is_fedramp: info.is_fedramp,
+    };
 
     let client = crate::auth::build_http_client()?;
+    let mut refresh_attempted = false;
 
-    if let Some(ref rt) = refresh_token
-        && crate::jwt::is_token_expiring(&access_token, 60) == Some(true)
+    if profile_tokens.refresh_token.is_some()
+        && crate::jwt::is_token_expiring(&profile_tokens.access_token, 60) == Some(true)
     {
-        match crate::usage::do_refresh_token(
-            alias,
-            &client,
-            id_token.as_deref(),
-            Some(&access_token),
-            rt,
-        )
-        .await
-        {
-            Ok(refreshed) => {
-                // No degrade here: the refresh *worked*, so the old token this
-                // would fall back to has already been invalidated server-side.
-                persist_refreshed_tokens(alias, rt, &refreshed)?;
-                access_token = refreshed.access_token;
-            }
+        refresh_attempted = true;
+        match crate::usage::refresh_profile_tokens(alias, profile_path, &profile_tokens).await {
+            Ok(refreshed) => profile_tokens = refreshed,
+            Err(error) if crate::usage::is_refresh_safety_error(&error) => return Err(error),
             // Deliberate degrade: fall through and try /models with the
             // existing (possibly expiring) token rather than failing here.
             // Still worth a diagnosable trace — silently swallowing this
@@ -981,7 +1029,39 @@ pub(crate) async fn fetch_models_for_profile(
         }
     }
 
-    fetch_models(&client, &access_token, account_id.as_deref(), is_fedramp).await
+    match fetch_models(
+        &client,
+        &profile_tokens.access_token,
+        profile_tokens.account_id.as_deref(),
+        profile_tokens.is_fedramp,
+    )
+    .await
+    {
+        Ok(models) => Ok(models),
+        Err(error) if is_models_auth_error(&error) => {
+            let expected = profile_tokens.clone();
+            profile_tokens = if refresh_attempted {
+                crate::usage::reload_profile_tokens_if_changed(alias, profile_path, &expected)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{alias}: /models returned HTTP 401 after the token refresh attempt"
+                        )
+                    })?
+            } else {
+                crate::usage::refresh_profile_tokens(alias, profile_path, &expected)
+                    .await
+                    .with_context(|| format!("{alias}: recovering authentication for /models"))?
+            };
+            fetch_models(
+                &client,
+                &profile_tokens.access_token,
+                profile_tokens.account_id.as_deref(),
+                profile_tokens.is_fedramp,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -1028,7 +1108,7 @@ mod tests {
 
     #[test]
     fn test_model_cache_keys_are_isolated_per_account() {
-        let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+        let mut cache: HashMap<String, CachedWarmupModels> = HashMap::new();
         model_cache_set(&mut cache, "account-a", vec!["model-a".to_string()]);
 
         assert_eq!(
@@ -1040,7 +1120,7 @@ mod tests {
 
     #[test]
     fn test_model_cache_invalidation_only_affects_target_key() {
-        let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+        let mut cache: HashMap<String, CachedWarmupModels> = HashMap::new();
         model_cache_set(&mut cache, "account-a", vec!["model-a".to_string()]);
         model_cache_set(&mut cache, "account-b", vec!["model-b".to_string()]);
 
@@ -1058,7 +1138,7 @@ mod tests {
     /// to retrieve it is unnecessary.
     #[test]
     fn test_model_cache_round_trips_the_whole_selected_set() {
-        let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+        let mut cache: HashMap<String, CachedWarmupModels> = HashMap::new();
         let selected = vec!["gpt-5-mini".to_string(), "gpt-5-spark".to_string()];
         model_cache_set(&mut cache, "account-a", selected.clone());
 
@@ -1067,6 +1147,16 @@ mod tests {
 
         assert_eq!(main, "gpt-5-mini");
         assert_eq!(additional, ["gpt-5-spark".to_string()]);
+    }
+
+    #[test]
+    fn model_cache_entries_expire_after_the_short_ttl() {
+        let mut cache: HashMap<String, CachedWarmupModels> = HashMap::new();
+        model_cache_set(&mut cache, "account-a", vec!["model-a".to_string()]);
+        cache.get_mut("account-a").unwrap().fetched_at =
+            Instant::now() - MODEL_CACHE_TTL - Duration::from_millis(1);
+
+        assert_eq!(model_cache_get(&cache, "account-a"), None);
     }
 
     #[test]
@@ -1234,6 +1324,22 @@ mod tests {
         let body = serde_json::json!({"models": []});
         let models = parse_models_body(&body).unwrap();
         assert!(models.is_empty());
+    }
+
+    #[test]
+    fn model_parser_omits_blank_and_duplicate_slugs() {
+        let models = parse_models_body(&serde_json::json!({"models": [
+            {"slug": ""}, {"slug": " "}, {"slug": "first"},
+            {"slug": "first"}, {"slug": " second "}, {}
+        ]}))
+        .unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
     }
 
     #[test]
@@ -1572,17 +1678,57 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_codex_version_picks_semver_token() {
+    fn warmup_uses_chatgpt_models_marked_unsupported_for_api_key_auth() {
+        let models = vec![ModelEntry {
+            slug: "gpt-6-chatgpt-only".to_string(),
+            supported_in_api: Some(false),
+            ..Default::default()
+        }];
+
         assert_eq!(
-            parse_codex_version("codex-cli 0.144.1\n"),
-            Some("0.144.1".to_string())
+            select_warmup_models(&models, &[]).unwrap(),
+            vec!["gpt-6-chatgpt-only"]
         );
-        assert_eq!(
-            parse_codex_version("codex-cli 0.1.0 (build abc)\n"),
-            Some("0.1.0".to_string())
+    }
+
+    #[test]
+    fn cache_key_separates_profiles_that_reuse_an_alias() {
+        assert_ne!(
+            warmup_cache_key_for_identity(
+                "alice",
+                Some("acct-one"),
+                Some("a@example.com"),
+                false,
+                &[],
+            ),
+            warmup_cache_key_for_identity(
+                "alice",
+                Some("acct-two"),
+                Some("b@example.com"),
+                false,
+                &[],
+            )
         );
-        assert_eq!(parse_codex_version("0.5.0\n"), Some("0.5.0".to_string()));
-        assert_eq!(parse_codex_version("command not found\n"), None);
+    }
+
+    #[test]
+    fn cache_key_separates_fedramp_routing() {
+        assert_ne!(
+            warmup_cache_key_for_identity(
+                "alice",
+                Some("acct-one"),
+                Some("a@example.com"),
+                false,
+                &[],
+            ),
+            warmup_cache_key_for_identity(
+                "alice",
+                Some("acct-one"),
+                Some("a@example.com"),
+                true,
+                &[],
+            )
+        );
     }
 
     #[test]
@@ -1651,6 +1797,7 @@ mod tests {
     mod refresh_short_circuit {
         use super::*;
         use axum::http::StatusCode;
+        use axum::response::IntoResponse;
         use axum::routing::{get, post};
         use axum::{Json, Router};
         use std::sync::Arc;
@@ -1796,6 +1943,215 @@ mod tests {
                 warmup_account(alias, &profile_path).await.is_err(),
                 "HTTP 200 without response.completed must not report a successful warmup"
             );
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn models_401_refreshes_once_persists_and_retries() {
+            let _lock = ENV_LOCK.lock().await;
+            let _profile_env_lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = tempfile::tempdir().unwrap();
+            let _codex_switch_home =
+                EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
+            let alias = "models-401-refresh-once";
+            crate::cache::put(alias, &crate::usage::UsageInfo::default());
+            let profile_path = stage_writable_profile(home.path(), alias, &live_access_token());
+
+            let token_calls = Arc::new(AtomicUsize::new(0));
+            let token_counter = Arc::clone(&token_calls);
+            let model_calls = Arc::new(AtomicUsize::new(0));
+            let model_counter = Arc::clone(&model_calls);
+            let app = Router::new()
+                .route(
+                    "/oauth/token",
+                    post(move || {
+                        let calls = Arc::clone(&token_counter);
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Json(serde_json::json!({
+                                "id_token": make_jwt(&serde_json::json!({})),
+                                "access_token": live_access_token(),
+                                "refresh_token": "refresh-token-next"
+                            }))
+                        }
+                    }),
+                )
+                .route(
+                    "/codex/models",
+                    get(move || {
+                        let calls = Arc::clone(&model_counter);
+                        async move {
+                            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                                StatusCode::UNAUTHORIZED.into_response()
+                            } else {
+                                Json(serde_json::json!({
+                                    "models": [{"slug": "gpt-5-mini", "supported_in_api": false}]
+                                }))
+                                .into_response()
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/codex/responses",
+                    post(|| async { (StatusCode::OK, MOCK_COMPLETED_SSE) }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let _guards = [
+                EnvVarGuard::set("CS_TOKEN_URL", &format!("http://{addr}/oauth/token")),
+                EnvVarGuard::set("CS_MODELS_URL", &format!("http://{addr}/codex/models")),
+                EnvVarGuard::set(
+                    "CS_RESPONSES_URL",
+                    &format!("http://{addr}/codex/responses"),
+                ),
+            ];
+
+            assert_eq!(
+                warmup_account(alias, &profile_path).await.unwrap(),
+                WarmupOutcome::Warmed
+            );
+            assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(token_calls.load(Ordering::SeqCst), 1);
+            let stored = crate::auth::read_auth(&profile_path).unwrap();
+            assert_eq!(
+                crate::auth::extract_tokens(&stored).1.as_deref(),
+                Some("refresh-token-next")
+            );
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn models_403_does_not_spend_a_refresh_token() {
+            let _lock = ENV_LOCK.lock().await;
+            let _profile_env_lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = tempfile::tempdir().unwrap();
+            let _codex_switch_home =
+                EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
+            let alias = "models-403-no-refresh";
+            crate::cache::put(alias, &crate::usage::UsageInfo::default());
+            let profile_path = stage_writable_profile(home.path(), alias, &live_access_token());
+
+            let token_calls = Arc::new(AtomicUsize::new(0));
+            let token_counter = Arc::clone(&token_calls);
+            let app = Router::new()
+                .route(
+                    "/oauth/token",
+                    post(move || {
+                        let calls = Arc::clone(&token_counter);
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        }
+                    }),
+                )
+                .route("/codex/models", get(|| async { StatusCode::FORBIDDEN }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let _guards = [
+                EnvVarGuard::set("CS_TOKEN_URL", &format!("http://{addr}/oauth/token")),
+                EnvVarGuard::set("CS_MODELS_URL", &format!("http://{addr}/codex/models")),
+            ];
+
+            assert!(warmup_account(alias, &profile_path).await.is_err());
+            assert_eq!(token_calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn models_refresh_rejection_adopts_a_concurrent_profile_winner() {
+            let _lock = ENV_LOCK.lock().await;
+            let _profile_env_lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = tempfile::tempdir().unwrap();
+            let _codex_switch_home =
+                EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
+            let alias = "models-refresh-concurrent-winner";
+            crate::cache::put(alias, &crate::usage::UsageInfo::default());
+            let profile_path = stage_writable_profile(home.path(), alias, &live_access_token());
+
+            let token_calls = Arc::new(AtomicUsize::new(0));
+            let token_counter = Arc::clone(&token_calls);
+            let winner_profile = profile_path.clone();
+            let model_calls = Arc::new(AtomicUsize::new(0));
+            let model_counter = Arc::clone(&model_calls);
+            let app = Router::new()
+                .route(
+                    "/oauth/token",
+                    post(move || {
+                        let calls = Arc::clone(&token_counter);
+                        let profile = winner_profile.clone();
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            write_test_auth(&profile, "winner-access", "winner-refresh");
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({
+                                    "error": {
+                                        "code": "refresh_token_reused",
+                                        "message": "another process already rotated this token"
+                                    }
+                                })),
+                            )
+                        }
+                    }),
+                )
+                .route(
+                    "/codex/models",
+                    get(move |headers: axum::http::HeaderMap| {
+                        let calls = Arc::clone(&model_counter);
+                        async move {
+                            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                            if attempt == 0 {
+                                return StatusCode::UNAUTHORIZED.into_response();
+                            }
+                            let authorization = headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok());
+                            if authorization == Some("Bearer winner-access") {
+                                Json(serde_json::json!({
+                                    "models": [{"slug": "gpt-5-mini", "supported_in_api": true}]
+                                }))
+                                .into_response()
+                            } else {
+                                StatusCode::UNAUTHORIZED.into_response()
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/codex/responses",
+                    post(|| async { (StatusCode::OK, MOCK_COMPLETED_SSE) }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let _guards = [
+                EnvVarGuard::set("CS_TOKEN_URL", &format!("http://{addr}/oauth/token")),
+                EnvVarGuard::set("CS_MODELS_URL", &format!("http://{addr}/codex/models")),
+                EnvVarGuard::set(
+                    "CS_RESPONSES_URL",
+                    &format!("http://{addr}/codex/responses"),
+                ),
+            ];
+
+            assert_eq!(
+                warmup_account(alias, &profile_path).await.unwrap(),
+                WarmupOutcome::Warmed
+            );
+            assert_eq!(token_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+            let stored = crate::auth::read_auth(&profile_path).unwrap();
+            let (access_token, refresh_token) = crate::auth::extract_tokens(&stored);
+            assert_eq!(access_token.as_deref(), Some("winner-access"));
+            assert_eq!(refresh_token.as_deref(), Some("winner-refresh"));
         }
 
         #[allow(clippy::await_holding_lock)]
@@ -2158,7 +2514,12 @@ mod tests {
             (token_calls, guards)
         }
 
-        fn assert_reports_persist_failure(detail: &str) {
+        fn assert_reports_persist_failure(error: &anyhow::Error) {
+            assert!(
+                crate::usage::is_refresh_safety_error(error),
+                "a rotated-token safety failure must be non-degradable: {error:#}"
+            );
+            let detail = format!("{error:#}");
             assert!(
                 detail.contains(PERSIST_FAILURE_MARKER),
                 "a rotated credential that never reached disk must be reported as a local \
@@ -2169,6 +2530,47 @@ mod tests {
                 "the report must stay distinguishable from the auth server rejecting the \
                  refresh — that one needs a re-login, this one needs the write fixed. \
                  Got: {detail}"
+            );
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn proactive_refresh_identity_change_is_fatal() {
+            let _lock = ENV_LOCK.lock().await;
+            let _profile_env_lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = tempfile::tempdir().unwrap();
+            let _codex_switch_home =
+                EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
+            let alias = "refresh-identity-change";
+            crate::cache::put(alias, &crate::usage::UsageInfo::default());
+            let profile_path = stage_writable_profile(home.path(), alias, &expired_access_token());
+            let rotated_id = make_jwt(&serde_json::json!({ "email": "different@example.com" }));
+
+            let (token_calls, _guards) = start_mock_server(
+                StatusCode::OK,
+                serde_json::json!({
+                    "id_token": rotated_id,
+                    "access_token": live_access_token(),
+                    "refresh_token": "rotated-refresh-token",
+                }),
+                StatusCode::OK,
+                MOCK_COMPLETED_SSE,
+            )
+            .await;
+
+            let error = warmup_account(alias, &profile_path)
+                .await
+                .expect_err("a successful refresh for a different identity must abort warmup");
+            assert!(crate::usage::is_refresh_safety_error(&error));
+            assert!(format!("{error:#}").contains("account changed during token refresh"));
+            assert_eq!(token_calls.load(Ordering::SeqCst), 1);
+            let stored = crate::auth::read_auth(&profile_path).unwrap();
+            assert_eq!(
+                crate::auth::extract_tokens(&stored).1.as_deref(),
+                Some("refresh-token-live"),
+                "a response that changes account identity must not be persisted"
             );
         }
 
@@ -2197,7 +2599,7 @@ mod tests {
                 "the pre-warmup refresh rotated the credential and the write back failed, so \
                  the warmup must not report success with a token that only exists in memory",
             );
-            assert_reports_persist_failure(&format!("{error:#}"));
+            assert_reports_persist_failure(&error);
         }
 
         #[allow(clippy::await_holding_lock)]
@@ -2228,7 +2630,7 @@ mod tests {
                 "the 401 retry refreshed and rotated the credential; a failed write back must \
                  abort rather than let the retry succeed on an unsaved token",
             );
-            assert_reports_persist_failure(&format!("{error:#}"));
+            assert_reports_persist_failure(&error);
         }
 
         #[allow(clippy::await_holding_lock)]
@@ -2250,11 +2652,11 @@ mod tests {
 
             let result = fetch_models_for_profile(alias, &profile_path).await;
 
-            let error = result.map(|models| format!("{models:?}")).expect_err(
+            let error = result.expect_err(
                 "degrading to the old token is only correct when the refresh was refused; a \
                  refresh that succeeded and then failed to save must abort instead",
             );
-            assert_reports_persist_failure(&format!("{error:#}"));
+            assert_reports_persist_failure(&error);
         }
 
         #[allow(clippy::await_holding_lock)]
@@ -2299,7 +2701,7 @@ mod tests {
                 .remove(broken)
                 .expect("the broken profile must produce an outcome")
                 .expect_err("the profile whose rotated tokens could not be saved must report");
-            assert_reports_persist_failure(&format!("{broken_error:#}"));
+            assert_reports_persist_failure(&broken_error);
 
             let healthy_result = outcomes
                 .remove(healthy)

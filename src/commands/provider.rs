@@ -78,8 +78,14 @@ async fn add(
     let mut fetched_default = None;
     let mut fetched_catalog = None;
     if fetch_models {
-        let remote =
-            provider::fetch_gateway_models_at(&base_url, &api_key, allow_insecure_http).await?;
+        let mut fetch_profile = ProviderProfile::build(&alias, &base_url, Vec::new(), &api_key);
+        fetch_profile.allow_insecure_http = allow_insecure_http;
+        if let Some(env_key) = &env_key {
+            fetch_profile.env_key = env_key.clone();
+        }
+        fetch_profile.wire_api = wire_api.clone();
+        fetch_profile.codex_config = set.clone();
+        let remote = provider::fetch_gateway_models_for_profile(&fetch_profile).await?;
         let default_hint = models.first().map(|model| model.id.clone());
         let (merged, default) =
             provider::apply_fetched_models(&[], default_hint.as_deref(), &remote, &models)?;

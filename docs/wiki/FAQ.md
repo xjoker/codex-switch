@@ -10,7 +10,7 @@ Partly. Codex 0.157 and newer runs interactive sessions through a shared app-ser
 
 ## Where is account data stored?
 
-Saved profiles and application state default to `~/.codex-switch`; the live Codex file defaults to `~/.codex/auth.json`. Custom API providers live under `~/.codex-switch/providers/<alias>/` (`provider.toml`, generated `models.json`). Provider `launch` uses a per-run Codex home that links prompts/skills/`AGENTS.md` from that `$CODEX_HOME` and merges MCP back on exit; only model and endpoint change for the request. `CODEX_SWITCH_HOME` and `CODEX_HOME` relocate them independently.
+Saved profiles and application state default to `~/.codex-switch`; the live Codex file defaults to `~/.codex/auth.json`. Custom API providers live under `~/.codex-switch/providers/<alias>/` (`provider.toml`, generated `models.json`). Provider `launch` selects a native `cs-*.config.toml` profile in the shared `$CODEX_HOME`, retaining live MCP servers, skills, plugins, hooks and sessions. The default ChatGPT configuration and authentication stay intact. `CODEX_SWITCH_HOME` and `CODEX_HOME` relocate application state and Codex state independently.
 
 ## Can I point Codex at DeepSeek (or another Chat Completions API) directly?
 

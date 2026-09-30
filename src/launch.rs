@@ -181,7 +181,11 @@ async fn launch_interactive(
     }
 
     let codex_command = ensure_codex_available()?;
-    let forwarded = embedded_codex_argv(codex_supports_no_daemon(&codex_command), forwarded);
+    let forwarded = if codex_argv_selects_server(&forwarded) {
+        forwarded
+    } else {
+        embedded_codex_argv(codex_supports_no_daemon(&codex_command)?, forwarded)
+    };
 
     let codex_auth = auth::codex_auth_path()?;
     // Unique per-invocation backup name (PID + timestamp): prevents two
@@ -400,28 +404,42 @@ pub(crate) fn chatgpt_codex_argv(
 /// An argv that already picks its server (`--no-daemon`, `--remote`, or the
 /// daemon-only `agents` command) is left alone.
 pub(crate) fn embedded_codex_argv(supports_no_daemon: bool, mut argv: Vec<String>) -> Vec<String> {
-    if supports_no_daemon && !argv.iter().any(|arg| picks_app_server(arg)) {
+    if supports_no_daemon && !codex_argv_selects_server(&argv) {
         argv.insert(0, "--no-daemon".to_string());
     }
     argv
 }
 
-fn picks_app_server(arg: &str) -> bool {
-    arg == "--no-daemon" || arg == "--remote" || arg.starts_with("--remote=") || arg == "agents"
+fn codex_argv_selects_server(argv: &[String]) -> bool {
+    codex_syntax_indices(argv).into_iter().any(|index| {
+        let arg = argv[index].as_str();
+        arg == "--no-daemon" || arg == "--remote" || arg.starts_with("--remote=")
+    }) || codex_subcommand_index(argv).is_some_and(|index| argv[index] == "agents")
 }
 
 /// `--no-daemon` exists since Codex 0.156; an older Codex rejects unknown
 /// options, so its root help decides whether the flag can be passed.
-fn codex_supports_no_daemon(command: &std::path::Path) -> bool {
-    std::process::Command::new(command)
+fn codex_supports_no_daemon(command: &std::path::Path) -> Result<bool> {
+    let mut probe = std::process::Command::new(command);
+    probe
         .arg("--help")
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .is_ok_and(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout).contains("--no-daemon")
-        })
+        .stderr(std::process::Stdio::null());
+    let output = crate::app_server::output_with_timeout(probe, std::time::Duration::from_secs(2))
+        .context(
+        "could not determine Codex account routing from --help; refusing to stage credentials",
+    )?;
+    no_daemon_support_from_help(output.status.success(), &output.stdout)
+}
+
+fn no_daemon_support_from_help(success: bool, stdout: &[u8]) -> Result<bool> {
+    let help = String::from_utf8_lossy(stdout);
+    if !success || !help.contains("Usage:") {
+        anyhow::bail!(
+            "Codex --help did not return usable help; refusing to stage credentials because account routing is unknown"
+        );
+    }
+    Ok(help.contains("--no-daemon"))
 }
 
 /// Codex argv for a provider `launch`. Codex 0.149 applies `-c` on the
@@ -440,17 +458,7 @@ pub(crate) fn provider_codex_argv(overrides: Vec<String>, passthrough: Vec<Strin
 }
 
 fn splice_after_subcommand(overrides: Vec<String>, passthrough: Vec<String>) -> Vec<String> {
-    let mut cmd_at = None;
-    for (i, arg) in passthrough.iter().enumerate() {
-        if arg == "--" {
-            break;
-        }
-        if crate::cli::is_codex_subcommand(arg) {
-            cmd_at = Some(i);
-            break;
-        }
-    }
-    let Some(idx) = cmd_at else {
+    let Some(idx) = codex_subcommand_index(&passthrough) else {
         let mut argv = overrides;
         argv.extend(passthrough);
         return argv;
@@ -467,6 +475,42 @@ fn splice_after_subcommand(overrides: Vec<String>, passthrough: Vec<String>) -> 
             .filter_map(|(i, arg)| (i != idx).then_some(arg)),
     );
     argv
+}
+
+/// Exclude option values and everything after `--` before recognizing syntax.
+/// A model, directory or prompt named `resume`/`agents` is not a subcommand.
+fn codex_syntax_indices(args: &[String]) -> Vec<usize> {
+    let mut indices = Vec::new();
+    let mut skip_next = false;
+    let mut images = false;
+    for (index, arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--" {
+            break;
+        }
+        if images && !arg.starts_with('-') {
+            continue;
+        }
+        images = matches!(arg.as_str(), "-i" | "--image");
+        indices.push(index);
+        skip_next = !arg.contains('=')
+            && (resume_option_takes_value(arg)
+                || matches!(
+                    arg.as_str(),
+                    "--color" | "--output-schema" | "--output-last-message" | "-o"
+                ));
+    }
+    indices
+}
+
+fn codex_subcommand_index(args: &[String]) -> Option<usize> {
+    let index = codex_syntax_indices(args)
+        .into_iter()
+        .find(|&index| !args[index].starts_with('-'))?;
+    crate::cli::is_codex_subcommand(&args[index]).then_some(index)
 }
 
 fn passthrough_sets_model(args: &[String]) -> bool {
@@ -622,6 +666,27 @@ fn terminate_child(child: &mut std::process::Child, pipes: CodexPipes) {
     let _ = child.kill();
     let _ = child.wait();
     let _ = join_codex_pipes(pipes);
+}
+
+fn finish_provider_child_recording(
+    child: &mut std::process::Child,
+    recorded: Result<()>,
+) -> Result<()> {
+    if let Err(err) = recorded {
+        // Keep the run lease and recoverable session files while stopping an
+        // untracked child. Do not wait indefinitely if termination itself fails.
+        if let Err(kill_error) = child.kill()
+            && child.try_wait()?.is_none()
+        {
+            return Err(err).context(format!("recording provider run child pid; could not stop Codex: {kill_error}; retained session state"));
+        }
+        child
+            .wait()
+            .context("reaping Codex after its run metadata could not be saved")?;
+        return Err(err)
+            .context("recording provider run child pid; stopped Codex and retained session state");
+    }
+    Ok(())
 }
 
 struct CapturedCodexIo {
@@ -890,8 +955,7 @@ async fn launch_provider(
                     args.clone(),
                 ),
             };
-            let mut runtime_profile = profile.clone();
-            runtime_profile.provider_id = session.runtime_provider_id.clone();
+            let runtime_profile = profile.for_runtime_provider_id(&session.runtime_provider_id);
             let mut overrides = runtime_profile.codex_config_args_from_saved_catalog_at(
                 Some(&selected.id),
                 reasoning.clone(),
@@ -960,9 +1024,8 @@ async fn launch_provider(
     // next resume attempt can refuse to double a still-running Codex.
     if let Some(session) = native_session.as_mut() {
         session.disarm();
-        session
-            .set_child_pid(&profile, &selected.id, child.id())
-            .context("recording provider run child pid")?;
+        let recorded = session.set_child_pid(&profile, &selected.id, child.id());
+        finish_provider_child_recording(&mut child, recorded)?;
     }
     let pipes = take_codex_pipes(&mut child, json);
 
@@ -1054,7 +1117,21 @@ fn provider_resume_target(
     args: &[String],
     profile: &ProviderProfile,
 ) -> Result<Option<(provider::ProviderSession, Vec<String>)>> {
-    let Some(resume_at) = args.iter().position(|arg| arg == "resume") else {
+    let Some(command_at) = codex_subcommand_index(args) else {
+        return Ok(None);
+    };
+    let resume_at = if args[command_at] == "resume" {
+        command_at
+    } else if args[command_at] == "exec" {
+        let Some(nested) = codex_subcommand_index(&args[command_at + 1..]) else {
+            return Ok(None);
+        };
+        let nested = command_at + 1 + nested;
+        if args[nested] != "resume" {
+            return Ok(None);
+        }
+        nested
+    } else {
         return Ok(None);
     };
     let root = auth::app_home()?.join("provider-runs");
@@ -1488,6 +1565,58 @@ mod tests {
     use super::{CodexPipes, backup_launch_auth, terminate_child};
 
     #[test]
+    fn unknown_daemon_support_cannot_silently_stage_an_account() {
+        assert!(super::no_daemon_support_from_help(false, b"Usage: codex --no-daemon").is_err());
+        assert!(super::no_daemon_support_from_help(true, b"").is_err());
+        assert!(super::no_daemon_support_from_help(true, b"wrapper failed").is_err());
+        assert!(
+            !super::no_daemon_support_from_help(
+                true,
+                b"Usage: codex [OPTIONS]\nOptions:\n --model"
+            )
+            .unwrap()
+        );
+        assert!(
+            super::no_daemon_support_from_help(
+                true,
+                b"Usage: codex [OPTIONS]\nOptions:\n --no-daemon"
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn failed_provider_pid_recording_stops_and_reaps_the_spawned_child() {
+        #[cfg(windows)]
+        let mut command = {
+            let windows = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+            let mut command = std::process::Command::new(
+                std::path::PathBuf::from(windows)
+                    .join("System32/WindowsPowerShell/v1.0/powershell.exe"),
+            );
+            command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+            command
+        };
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = std::process::Command::new("/bin/sleep");
+            command.arg("30");
+            command
+        };
+        let mut child = command.spawn().unwrap();
+        let err = super::finish_provider_child_recording(
+            &mut child,
+            Err(anyhow::anyhow!("metadata write denied")),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("metadata write denied"));
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "an unrecorded process must not survive launch failure"
+        );
+    }
+
+    #[test]
     fn embedded_argv_runs_codex_without_the_shared_daemon() {
         let argv = ["exec", "--json", "review"].map(str::to_string).to_vec();
         assert_eq!(
@@ -1517,6 +1646,43 @@ mod tests {
             embedded_codex_argv(true, vec!["list agents".to_string()]),
             ["--no-daemon", "list agents"].map(str::to_string)
         );
+    }
+
+    #[test]
+    fn codex_syntax_does_not_treat_values_or_prompts_as_commands() {
+        for raw in [
+            vec!["--model", "resume"],
+            vec!["-C", "exec", "review this"],
+            vec!["review this", "exec"],
+            vec!["--", "resume"],
+        ] {
+            let args = raw.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(super::codex_subcommand_index(&args), None);
+            let mut expected = vec!["-c".into(), "model=test".into()];
+            expected.extend(args.clone());
+            assert_eq!(
+                provider_codex_argv(vec!["-c".into(), "model=test".into()], args.clone()),
+                if args.first().is_some_and(|arg| arg == "--model") {
+                    args
+                } else {
+                    expected
+                }
+            );
+        }
+        for raw in [
+            vec!["exec", "agents"],
+            vec!["--model", "agents"],
+            vec!["--", "--remote"],
+        ] {
+            let args = raw.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let mut expected = vec!["--no-daemon".to_string()];
+            expected.extend(args.clone());
+            assert_eq!(embedded_codex_argv(true, args), expected);
+        }
+        let args = ["--model", "exec", "resume", "session"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(super::codex_subcommand_index(&args), Some(2));
     }
 
     #[test]

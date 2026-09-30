@@ -441,7 +441,7 @@ async fn provider_responses_handler(
     (
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({
-            "error": {"type": "invalid_request_error", "message": "input required"},
+            "error": {"type": "invalid_request_error", "code": "missing_required_parameter", "message": "Missing required parameter: input"},
         })),
     )
 }
@@ -879,12 +879,13 @@ fn provider_sync_is_persisted_and_launch_stays_offline() {
         "launch must not replace fetched metadata with local defaults"
     );
     let path = home.join(".codex-switch/providers/openrouter/provider.toml");
-    let unsupported = fs::read_to_string(&path).unwrap().replace(
-        "\"openai/gpt-5.3-codex\" = true",
-        "\"openai/gpt-5.3-codex\" = false",
-    );
-    assert!(unsupported.contains("\"openai/gpt-5.3-codex\" = false"));
-    fs::write(path, unsupported).unwrap();
+    let mut unsupported: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let record = &mut unsupported["responses_support"]["openai/gpt-5.3-codex"];
+    assert_eq!(record["support"].as_str(), Some("supported"));
+    assert!(!record["fingerprint"].as_str().unwrap().is_empty());
+    assert!(record["checked_at"].as_integer().unwrap() > 0);
+    record["support"] = toml::Value::String("unsupported".into());
+    fs::write(&path, toml::to_string(&unsupported).unwrap()).unwrap();
     let codex_launches = recorded_argv(&log).len();
 
     let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
@@ -908,6 +909,18 @@ fn provider_sync_is_persisted_and_launch_stays_offline() {
         "a saved unsupported verdict must also be enforced offline"
     );
     assert_eq!(recorded_argv(&log).len(), codex_launches);
+
+    // A boolean from an older version carries no connection identity or
+    // timestamp and must not preserve a permanent offline denial.
+    unsupported["responses_support"]["openai/gpt-5.3-codex"] = toml::Value::Boolean(false);
+    fs::write(path, toml::to_string(&unsupported).unwrap()).unwrap();
+    let legacy = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+    assert!(
+        legacy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&legacy.stderr)
+    );
+    assert_eq!(server.requests(), requests_before_launch);
     let _ = fs::remove_dir_all(home);
 }
 

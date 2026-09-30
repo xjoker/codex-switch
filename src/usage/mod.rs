@@ -7,7 +7,9 @@ mod parse;
 mod reset_credits;
 mod scoring;
 
-pub(crate) use api::{apply_account_routing_headers, do_refresh_token};
+pub(crate) use api::{
+    apply_account_routing_headers, refresh_profile_tokens, reload_profile_tokens_if_changed,
+};
 pub use api::{
     fetch_usage_retried, fetch_usage_retried_force, fetch_usage_retried_unattended,
     refresh_expiring_tokens, validate_import_auth,
@@ -259,6 +261,19 @@ pub struct RefreshedTokens {
     pub refresh_token: String,
 }
 
+/// Credentials currently stored for a profile. Kept separate from
+/// `RefreshedTokens` because the existing auth file may not have an id or
+/// refresh token yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProfileTokens {
+    pub id_token: Option<String>,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub account_id: Option<String>,
+    pub email: Option<String>,
+    pub is_fedramp: bool,
+}
+
 /// A refresh the auth server rejected outright (bad/consumed credential).
 ///
 /// OpenAI rotates `refresh_token` on every use and answers replays with
@@ -291,6 +306,34 @@ impl std::fmt::Display for TerminalAuthError {
 }
 
 impl std::error::Error for TerminalAuthError {}
+
+/// The server issued or the profile already adopted credentials that do not
+/// match the caller's expected account, or a rotated credential could not be
+/// safely persisted. Callers must abort instead of degrading to old tokens.
+#[derive(Debug)]
+pub(crate) struct RefreshSafetyError {
+    detail: String,
+}
+
+impl RefreshSafetyError {
+    pub(crate) fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for RefreshSafetyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for RefreshSafetyError {}
+
+pub(crate) fn is_refresh_safety_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<RefreshSafetyError>().is_some()
+}
 
 /// Outcome of one usage fetch attempt.
 ///

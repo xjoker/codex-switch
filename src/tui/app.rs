@@ -104,6 +104,8 @@ pub enum ModelStatus {
     Error(String),
 }
 
+const MODEL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
 #[derive(Debug)]
 enum SwitchCompletion {
     Succeeded {
@@ -280,9 +282,10 @@ pub struct App {
     last_list_click: Option<(Tab, String, Instant)>,
     /// Regions from the last drawn frame, used for mouse hit-testing.
     pub hitmap: super::hitmap::HitMap,
-    /// Session-level per-alias model list cache (no TTL). Populated lazily
+    /// Per-alias model list cache, refreshed after five minutes. Populated lazily
     /// for the selected account or when its account details are opened.
     pub model_cache: HashMap<String, ModelStatus>,
+    model_cached_at: HashMap<String, Instant>,
     /// Active model-list request ID per alias. Late responses from a request
     /// invalidated by an explicit refresh must not replace newer data.
     model_requests: HashMap<String, u64>,
@@ -359,6 +362,7 @@ impl App {
             last_list_click: None,
             hitmap: super::hitmap::HitMap::default(),
             model_cache: HashMap::new(),
+            model_cached_at: HashMap::new(),
             model_requests: HashMap::new(),
             model_next_id: 0,
             pending_models: model_rx,
@@ -370,14 +374,20 @@ impl App {
     }
 
     /// Kick off a model-list fetch for `alias` if the detail panel needs it
-    /// and it has not already loaded, failed, or started a request. Idempotent
-    /// — safe to call every frame; explicit refresh clears a failed entry.
+    /// and it has no fresh result or pending request. Both successes and errors
+    /// expire, without retrying a failure on every rendered frame.
     pub fn ensure_models_loaded(&mut self, alias: &str) {
-        if matches!(
-            self.model_cache.get(alias),
-            Some(ModelStatus::Loaded(_)) | Some(ModelStatus::Loading) | Some(ModelStatus::Error(_))
-        ) {
+        if matches!(self.model_cache.get(alias), Some(ModelStatus::Loading)) {
             return;
+        }
+        if self.model_cache.contains_key(alias) {
+            let fetched_at = self
+                .model_cached_at
+                .entry(alias.to_string())
+                .or_insert_with(Instant::now);
+            if fetched_at.elapsed() < MODEL_CACHE_TTL {
+                return;
+            }
         }
         let path = match profile_auth_path(alias) {
             Ok(p) => p,
@@ -422,6 +432,7 @@ impl App {
                 continue;
             }
             self.model_requests.remove(&alias);
+            self.model_cached_at.insert(alias.clone(), Instant::now());
             refresh_open_account |= matches!(
                 self.menu.as_ref(),
                 Some(super::menu::MenuState::Account { info, .. }) if info.alias == alias
@@ -932,6 +943,7 @@ impl App {
 
     fn invalidate_model_request(&mut self, alias: &str) {
         self.model_cache.remove(alias);
+        self.model_cached_at.remove(alias);
         self.model_requests.remove(alias);
     }
 
@@ -4853,6 +4865,51 @@ mod tests {
             app.model_cache.get("account"),
             Some(ModelStatus::Error(error)) if error == "previous model request failed"
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_detail_cache_expires_without_duplicate_requests() {
+        let _home = EnvHome::new();
+        let path = crate::profile::profile_auth_path("account").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        for previous in [
+            ModelStatus::Loaded(vec![]),
+            ModelStatus::Error("temporary failure".into()),
+        ] {
+            let mut app = App::new();
+            // Prevent this state-machine check from making a network request.
+            app.usage_limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+            app.model_cache.insert("account".into(), previous);
+            app.model_cached_at.insert(
+                "account".into(),
+                std::time::Instant::now() - super::MODEL_CACHE_TTL,
+            );
+            app.ensure_models_loaded("account");
+            let request = app.model_requests["account"];
+            assert!(matches!(
+                app.model_cache.get("account"),
+                Some(ModelStatus::Loading)
+            ));
+            app.ensure_models_loaded("account");
+            assert_eq!(app.model_requests["account"], request);
+            app.model_sender
+                .try_send((
+                    "account".into(),
+                    request,
+                    Ok(vec![ModelEntry {
+                        slug: "new-model".into(),
+                        ..ModelEntry::default()
+                    }]),
+                ))
+                .unwrap();
+            app.poll_model_results();
+            app.ensure_models_loaded("account");
+            assert!(
+                matches!(app.model_cache.get("account"), Some(ModelStatus::Loaded(models)) if models[0].slug == "new-model")
+            );
+            assert!(!app.model_requests.contains_key("account"));
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
