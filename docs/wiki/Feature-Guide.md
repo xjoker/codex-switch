@@ -124,7 +124,7 @@ codex-switch warmup
 codex-switch warmup work
 ```
 
-Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Accounts with only a 7-day window (free plans), already-active 5h pools, and unavailable pools are skipped. In the TUI, use the selected account menu's `w` for a one-time warmup; the batch menu's `w` warms marked accounts that have a 5h window. The old `W` automatic-warmup shortcut and daemon schedule are removed. Press `t` on the Accounts page to toggle session-only automatic usage refresh.
+Model names are discovered at runtime rather than maintained as a hardcoded compatibility list. Warmup prefers an available Luna model for its main request, falls back to mini for older catalogs, then to the model with the highest API priority. It reads the full response stream and requires a completed response event; HTTP 200 alone does not count as success. A tiny completed request may still display 0% usage. A fresh usage sample showing that its 5h reset timer has been running for at least five minutes counts as an active window. Accounts with only a 7-day window (free plans), already-active 5h pools, and unavailable pools are skipped. In the TUI, use the selected account menu's `w` for a one-time warmup; the batch menu's `w` warms marked accounts that have a 5h window. The old `W` automatic-warmup shortcut and daemon schedule are removed. Press `t` on the Accounts page to toggle session-only automatic usage refresh.
 
 ## Optional OS scheduling
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Warmup waits for a completed response and prefers Luna** — A 200 OK ping could close after the first stream chunk before generation finished, report success, and leave the 5h reset timer moving. Warmup now reads the full stream and requires a completed response event; failed or truncated streams are reported. Model selection prefers an available Luna, retains mini as a fallback for older catalogs, then uses API priority. A fixed 5h reset can count as active even when the tiny request rounds to 0% usage, and CLI warmup refreshes expired usage data before skipping a profile.
 - **Modal TUI forms accept mouse input** — Provider add/edit fields, HTTPS toggle, model rows, launch-picker models/reasoning/args, confirmation `y`/`n`, and the remaining account menus now respond to clicks. The wheel moves modal lists. Clicks still do not pass through to the page behind a modal.
 
 ## v20260909.4.0 (candidate) — 2026-09-09

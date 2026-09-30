@@ -157,16 +157,27 @@ pub(crate) async fn warmup_cmd(alias: Option<&str>, json: bool) -> Result<()> {
 
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(aliases.len());
 
-    // Filter out accounts whose usage data proves an active rate-limit window.
-    // A window that appears "just started" (elapsed < 5 min) likely means the previous warmup
-    // ping didn't consume real quota — allow the user to retry.
-    let now = auth::now_unix_secs();
+    // A stale reset timestamp can make a no-op ping look like an opened window.
+    // Refresh expired cache entries before deciding whether to skip a profile.
+    let current = profile::read_current();
     let mut to_warmup = Vec::new();
     for alias in &aliases {
-        let skip_reason = cache::get(alias).as_ref().and_then(|u| {
+        let usage_snapshot = match cache::get(alias) {
+            Some(cached) => Some(cached),
+            None => match profile::profile_auth_path(alias) {
+                Ok(path) => usage::fetch_usage_retried_unattended(alias, &path, &current)
+                    .await
+                    .ok(),
+                Err(error) => {
+                    tracing::warn!("[{alias}] cannot check warmup window: {error}");
+                    None
+                }
+            },
+        };
+        let skip_reason = usage_snapshot.as_ref().and_then(|u| {
             if !usage::usage_has_five_hour_warmup_target(u) {
                 Some("no 5h window, skipped")
-            } else if usage::usage_has_active_warmup_window(u, now) {
+            } else if usage::usage_has_active_warmup_window(u, auth::now_unix_secs()) {
                 Some("already active, skipped")
             } else {
                 None

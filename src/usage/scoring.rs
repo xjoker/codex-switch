@@ -5,16 +5,14 @@ use super::{
     UsageInfo, WINDOW_5H_SECS, WindowUsage,
 };
 
-/// Returns true only when usage data proves a warmup-opened window is active.
-pub fn warmup_window_active(w: &WindowUsage, window_secs: i64, now: i64) -> bool {
+/// At the time of observation, the remaining time must be at least five minutes
+/// shorter than a full window. Tiny warmups can still round to 0% used.
+pub fn warmup_window_active(w: &WindowUsage, window_secs: i64, observed_at: i64) -> bool {
     let resets_at = match w.resets_at {
-        Some(t) if t > now => t,
+        Some(t) if t > observed_at => t,
         _ => return false,
     };
-    if w.used_percent.unwrap_or(0.0) <= 0.0 {
-        return false;
-    }
-    let elapsed = window_secs - (resets_at - now);
+    let elapsed = window_secs - (resets_at - observed_at);
     elapsed >= MIN_WARMUP_ELAPSED_SECS
 }
 
@@ -51,17 +49,18 @@ pub fn usage_has_active_warmup_window(u: &UsageInfo, now: i64) -> bool {
     let Some(w) = u.primary.as_ref() else {
         return false;
     };
-    let main_active = warmup_window_active(w, WINDOW_5H_SECS, now);
+    // Cached 0%-used cold windows must not become active merely as the cache ages.
+    let observed_at = u.fetched_at.filter(|&ts| ts <= now).unwrap_or(now);
+    let active = |window: &WindowUsage| {
+        window.resets_at.is_some_and(|reset| reset > now)
+            && warmup_window_active(window, WINDOW_5H_SECS, observed_at)
+    };
+    let main_active = active(w);
     let additional_active = u
         .additional_limits
         .iter()
         .filter(|limit| is_five_hour_warmup_pool(limit))
-        .all(|limit| {
-            limit
-                .primary
-                .as_ref()
-                .is_some_and(|w| warmup_window_active(w, WINDOW_5H_SECS, now))
-        });
+        .all(|limit| limit.primary.as_ref().is_some_and(&active));
     main_active && additional_active
 }
 
@@ -852,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn test_warmup_window_active_requires_real_usage() {
+    fn test_warmup_window_active_accepts_fixed_reset_with_zero_usage() {
         let now = 1_000_000i64;
         let no_usage = WindowUsage {
             used_percent: Some(0.0),
@@ -865,8 +864,44 @@ mod tests {
             window_minutes: None,
         };
 
-        assert!(!warmup_window_active(&no_usage, WINDOW_5H_SECS, now));
+        assert!(warmup_window_active(&no_usage, WINDOW_5H_SECS, now));
         assert!(!warmup_window_active(&no_reset, WINDOW_5H_SECS, now));
+    }
+
+    #[test]
+    fn test_cached_cold_window_does_not_age_into_active() {
+        let observed_at = 1_000_000i64;
+        let usage = UsageInfo {
+            fetched_at: Some(observed_at),
+            primary: Some(WindowUsage {
+                used_percent: Some(0.0),
+                resets_at: Some(observed_at + WINDOW_5H_SECS),
+                window_minutes: Some(300),
+            }),
+            ..Default::default()
+        };
+
+        assert!(!usage_has_active_warmup_window(
+            &usage,
+            observed_at + MIN_WARMUP_ELAPSED_SECS
+        ));
+        assert!(!usage_has_active_warmup_window(&usage, observed_at + 600));
+    }
+
+    #[test]
+    fn test_fresh_zero_usage_with_fixed_reset_is_active() {
+        let now = 1_000_600i64;
+        let usage = UsageInfo {
+            fetched_at: Some(now),
+            primary: Some(WindowUsage {
+                used_percent: Some(0.0),
+                resets_at: Some(1_000_000 + WINDOW_5H_SECS),
+                window_minutes: Some(300),
+            }),
+            ..Default::default()
+        };
+
+        assert!(usage_has_active_warmup_window(&usage, now));
     }
 
     #[test]

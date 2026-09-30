@@ -385,11 +385,13 @@ fn select_warmup_models(
         })
         .collect();
 
-    // Prefer mini (lightest), fall back to highest priority (lowest number).
+    // Prefer Luna for minimal warmups, keep mini for older catalogs, then use
+    // the highest API priority (lowest number).
     // Models mapped to additional pools must not replace the main-pool request.
     let main = main_candidates
         .iter()
-        .find(|m| m.slug.contains("mini"))
+        .find(|m| m.slug.contains("luna"))
+        .or_else(|| main_candidates.iter().find(|m| m.slug.contains("mini")))
         .or_else(|| {
             main_candidates
                 .iter()
@@ -492,6 +494,81 @@ fn make_request(
     .json(body)
 }
 
+/// HTTP 200 only means the request was accepted. Keep the stream open until
+/// generation finishes, then require a complete success event.
+async fn await_warmup_completion(resp: reqwest::Response) -> Result<()> {
+    let body = resp
+        .text()
+        .await
+        .context("reading complete warmup response")?;
+    verify_warmup_stream(&body)
+}
+
+fn warmup_event(frame: &str) -> Result<Option<(String, serde_json::Value)>> {
+    let mut event_name = None;
+    let mut data = String::new();
+    for line in frame.lines() {
+        if let Some(event) = line.strip_prefix("event:") {
+            event_name = Some(event.trim());
+        }
+        if let Some(value) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.trim_start());
+        }
+    }
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(None);
+    }
+    let payload: serde_json::Value =
+        serde_json::from_str(&data).context("parsing warmup SSE event")?;
+    let event_type = payload
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("warmup SSE event has no type"))?;
+    if event_name.is_some_and(|name| name != event_type) {
+        bail!("warmup SSE event name does not match its data type");
+    }
+    Ok(Some((event_type.to_string(), payload)))
+}
+
+fn verify_warmup_stream(body: &str) -> Result<()> {
+    let normalized = body.replace("\r\n", "\n");
+    let (frames, tail) = normalized
+        .rsplit_once("\n\n")
+        .ok_or_else(|| anyhow::anyhow!("warmup response stream ended with an incomplete event"))?;
+    if !tail.trim().is_empty() {
+        bail!("warmup response stream ended with an incomplete event");
+    }
+    let mut completed = false;
+    for frame in frames.split("\n\n") {
+        let Some((event_type, payload)) = warmup_event(frame)? else {
+            continue;
+        };
+        match event_type.as_str() {
+            "response.completed" => {
+                if payload
+                    .pointer("/response/status")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("completed")
+                {
+                    bail!("warmup completion event has no completed response status");
+                }
+                completed = true;
+            }
+            "response.failed" | "response.incomplete" | "error" => {
+                bail!("warmup response stream reported {event_type}")
+            }
+            _ => {}
+        }
+    }
+    if !completed {
+        bail!("warmup response stream ended without response.completed");
+    }
+    Ok(())
+}
+
 /// Warm one request per additional quota pool.
 ///
 /// Takes the models already resolved for this warmup rather than fetching the
@@ -507,7 +584,7 @@ async fn warmup_additional_models(
     for model in additional_models {
         let body = build_body(model);
         debug!("warmup additional pool POST → {RESPONSES_URL} (model={model})");
-        let mut resp = make_request(client, access_token, account_id, is_fedramp, &body)
+        let resp = make_request(client, access_token, account_id, is_fedramp, &body)
             .send()
             .await
             .map_err(|e| crate::auth::format_reqwest_error("additional warmup failed", &e))?;
@@ -515,7 +592,9 @@ async fn warmup_additional_models(
             let status = resp.status();
             bail!("additional model {model}: HTTP {status}");
         }
-        let _ = resp.chunk().await;
+        await_warmup_completion(resp)
+            .await
+            .with_context(|| format!("additional model {model}: warmup did not complete"))?;
     }
     Ok(())
 }
@@ -580,10 +659,10 @@ pub enum WarmupOutcome {
 
 /// Send a minimal completion request to trigger the 5h quota window countdown.
 ///
-/// The 5-hour window only starts after the first real API call. This sends the
-/// lightest valid request ("ping") and discards the response body, which is
-/// enough for the server to stamp the window start time. Accounts whose usage
-/// shows only a 7-day window are skipped — there is no 5h countdown to open.
+/// The 5-hour window only starts after the first real API call. This sends a
+/// minimal request ("ping") and waits for the complete response stream before
+/// reporting success. Accounts whose usage shows only a 7-day window are
+/// skipped — there is no 5h countdown to open.
 pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOutcome> {
     let usage = match crate::cache::get(alias) {
         Some(usage) => Some(usage),
@@ -693,7 +772,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
 
     debug!("[{alias}] warmup POST → {RESPONSES_URL} (model={model})");
 
-    let mut resp = make_request(
+    let resp = make_request(
         &client,
         &access_token,
         account_id.as_deref(),
@@ -709,9 +788,9 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
 
     match status.as_u16() {
         200 => {
-            // Quota window is triggered server-side on request receipt.
-            // Read one chunk to confirm streaming started, then drop.
-            let _ = resp.chunk().await;
+            await_warmup_completion(resp)
+                .await
+                .with_context(|| format!("{alias}: warmup did not complete"))?;
             warmup_additional_models(
                 &client,
                 &access_token,
@@ -747,7 +826,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                         format!("{alias}: failed to refresh the supported warmup model")
                     })?;
                 let retry_body = build_body(new_model);
-                let mut retry_resp = make_request(
+                let retry_resp = make_request(
                     &client,
                     &access_token,
                     account_id.as_deref(),
@@ -759,7 +838,9 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                 .map_err(|e| crate::auth::format_reqwest_error("warmup retry failed", &e))?;
                 let retry_status = retry_resp.status();
                 if retry_status.is_success() {
-                    let _ = retry_resp.chunk().await;
+                    await_warmup_completion(retry_resp)
+                        .await
+                        .with_context(|| format!("{alias}: warmup retry did not complete"))?;
                     return warmup_additional_models(
                         &client,
                         &access_token,
@@ -797,7 +878,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                 {
                     Ok(refreshed) => {
                         persist_refreshed_tokens(alias, rt, &refreshed)?;
-                        let mut retry_resp = make_request(
+                        let retry_resp = make_request(
                             &client,
                             &refreshed.access_token,
                             account_id.as_deref(),
@@ -811,7 +892,9 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
                         })?;
                         let retry_status = retry_resp.status();
                         if retry_status.is_success() {
-                            let _ = retry_resp.chunk().await;
+                            await_warmup_completion(retry_resp).await.with_context(|| {
+                                format!("{alias}: warmup retry did not complete")
+                            })?;
                             return warmup_additional_models(
                                 &client,
                                 &refreshed.access_token,
@@ -904,6 +987,44 @@ pub(crate) async fn fetch_models_for_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MOCK_COMPLETED_SSE: &str = "event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n";
+
+    #[test]
+    fn warmup_stream_requires_a_complete_success_event() {
+        assert!(verify_warmup_stream(MOCK_COMPLETED_SSE).is_ok());
+        assert!(verify_warmup_stream(&MOCK_COMPLETED_SSE.replace('\n', "\r\n")).is_ok());
+        assert!(verify_warmup_stream("event: response.created\n\n").is_err());
+        assert!(verify_warmup_stream("").is_err());
+        assert!(verify_warmup_stream("event: response.completed\ndata: {").is_err());
+        assert!(verify_warmup_stream("event: response.completed\n\n").is_err());
+        assert!(
+            verify_warmup_stream(
+                "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+            )
+            .is_err()
+        );
+        assert!(verify_warmup_stream("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"failed\"}}\n\n").is_err());
+        assert!(
+            verify_warmup_stream(
+                "event: response.completed\ndata: {\"type\":\"response.failed\"}\n\n"
+            )
+            .is_err()
+        );
+        assert!(
+            verify_warmup_stream(
+                "event: response.incomplete\ndata: {\"type\":\"response.incomplete\"}\n\n"
+            )
+            .is_err()
+        );
+        assert!(
+            verify_warmup_stream(
+                "event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n"
+            )
+            .is_err()
+        );
+        assert!(verify_warmup_stream("event: error\ndata: {\"type\":\"error\"}\n\n").is_err());
+    }
 
     #[test]
     fn test_model_cache_keys_are_isolated_per_account() {
@@ -1155,6 +1276,43 @@ mod tests {
     #[test]
     fn test_sorted_models_for_display_empty_list() {
         assert!(sorted_models_for_display(&[]).is_empty());
+    }
+
+    #[test]
+    fn warmup_prefers_luna_then_mini_then_api_priority() {
+        let models = vec![
+            ModelEntry {
+                slug: "gpt-6-astra".to_string(),
+                priority: Some(1),
+                supported_in_api: Some(true),
+                ..Default::default()
+            },
+            ModelEntry {
+                slug: "gpt-5.4-mini".to_string(),
+                priority: Some(2),
+                supported_in_api: Some(true),
+                ..Default::default()
+            },
+            ModelEntry {
+                slug: "gpt-6-luna".to_string(),
+                priority: Some(3),
+                supported_in_api: Some(true),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            select_warmup_models(&models, &[]).unwrap(),
+            vec!["gpt-6-luna"]
+        );
+        assert_eq!(
+            select_warmup_models(&models[..2], &[]).unwrap(),
+            vec!["gpt-5.4-mini"]
+        );
+        assert_eq!(
+            select_warmup_models(&models[..1], &[]).unwrap(),
+            vec!["gpt-6-astra"]
+        );
     }
 
     #[test]
@@ -1557,6 +1715,7 @@ mod tests {
             token_status: StatusCode,
             token_body: serde_json::Value,
             responses_status: StatusCode,
+            responses_body: &'static str,
         ) -> (Arc<AtomicUsize>, Vec<EnvVarGuard>) {
             let token_calls = Arc::new(AtomicUsize::new(0));
             let counter = token_calls.clone();
@@ -1586,7 +1745,7 @@ mod tests {
                 )
                 .route(
                     "/codex/responses",
-                    post(move || async move { (responses_status, "") }),
+                    post(move || async move { (responses_status, responses_body) }),
                 );
 
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1604,6 +1763,39 @@ mod tests {
                 ),
             ];
             (token_calls, guards)
+        }
+
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn http_200_without_completed_event_is_not_warmed() {
+            let _lock = ENV_LOCK.lock().await;
+            let _profile_env_lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = tempfile::tempdir().unwrap();
+            let _codex_switch_home =
+                EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
+
+            let alias = "warmup-created-only";
+            crate::cache::put(alias, &crate::usage::UsageInfo::default());
+            let profile_path = home.path().join("auth.json");
+            write_test_auth(
+                &profile_path,
+                &make_jwt(&serde_json::json!({ "exp": crate::auth::now_unix_secs() + 3600 })),
+                "refresh-token-live",
+            );
+            let (_token_calls, _guards) = start_mock_server(
+                StatusCode::OK,
+                serde_json::json!({}),
+                StatusCode::OK,
+                "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+            )
+            .await;
+
+            assert!(
+                warmup_account(alias, &profile_path).await.is_err(),
+                "HTTP 200 without response.completed must not report a successful warmup"
+            );
         }
 
         #[allow(clippy::await_holding_lock)]
@@ -1731,6 +1923,7 @@ mod tests {
                     }
                 }),
                 StatusCode::UNAUTHORIZED,
+                "",
             )
             .await;
 
@@ -1802,6 +1995,7 @@ mod tests {
                     }
                 }),
                 StatusCode::UNAUTHORIZED,
+                "",
             )
             .await;
 
@@ -1935,7 +2129,14 @@ mod tests {
                                 .copied()
                                 .or_else(|| statuses.last().copied())
                                 .unwrap_or(StatusCode::OK);
-                            (status, "")
+                            (
+                                status,
+                                if status == StatusCode::OK {
+                                    MOCK_COMPLETED_SSE
+                                } else {
+                                    ""
+                                },
+                            )
                         }
                     }),
                 );
@@ -2142,7 +2343,10 @@ mod tests {
                         }
                     }),
                 )
-                .route("/codex/responses", post(|| async { (StatusCode::OK, "") }));
+                .route(
+                    "/codex/responses",
+                    post(|| async { (StatusCode::OK, MOCK_COMPLETED_SSE) }),
+                );
 
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
@@ -2278,7 +2482,7 @@ mod tests {
                         let counter = responses_counter.clone();
                         async move {
                             counter.fetch_add(1, Ordering::SeqCst);
-                            (StatusCode::OK, "")
+                            (StatusCode::OK, MOCK_COMPLETED_SSE)
                         }
                     }),
                 );
