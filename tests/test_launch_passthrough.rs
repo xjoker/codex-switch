@@ -84,7 +84,21 @@ data.append({
     "pid": os.getpid(),
     "codex_home": os.environ.get("CODEX_HOME"),
 })
-open(path, "w", encoding="utf-8").write(json.dumps(data))
+# Write to a temp file and rename it into place so a concurrent reader never
+# sees a truncated, half-written log.
+tmp_path = "%s.%d.tmp" % (path, os.getpid())
+with open(tmp_path, "w", encoding="utf-8") as tmp:
+    tmp.write(json.dumps(data))
+for attempt in range(50):
+    try:
+        os.replace(tmp_path, path)
+        break
+    except PermissionError:
+        # Windows refuses the rename while a reader briefly holds the target.
+        import time
+        time.sleep(0.02)
+else:
+    os.replace(tmp_path, path)
 
 argv = sys.argv[1:]
 if argv == ["--version"]:
@@ -238,6 +252,19 @@ struct FakeLaunch {
 fn recorded_launches(log: &Path) -> Vec<FakeLaunch> {
     let raw = fs::read_to_string(log).unwrap();
     let data: Vec<Value> = serde_json::from_str(&raw).unwrap();
+    launches_from_entries(data)
+}
+
+/// Like [`recorded_launches`] for a log that a fake Codex may be rewriting
+/// right now: an unreadable or unparsable snapshot is "not yet" rather than a
+/// failure, so a poll loop retries until its own deadline.
+fn try_recorded_launches(log: &Path) -> Option<Vec<FakeLaunch>> {
+    let raw = fs::read_to_string(log).ok()?;
+    let data: Vec<Value> = serde_json::from_str(&raw).ok()?;
+    Some(launches_from_entries(data))
+}
+
+fn launches_from_entries(data: Vec<Value>) -> Vec<FakeLaunch> {
     data.into_iter()
         .filter_map(|entry| {
             let argv: Vec<String> = entry["argv"]
@@ -1533,14 +1560,13 @@ fn provider_survives_launcher_crash_with_json_output() {
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        if log.exists() && !recorded_launches(&log).is_empty() {
-            break;
+    let launched = loop {
+        if let Some(launch) = try_recorded_launches(&log).and_then(|mut all| all.pop()) {
+            break launch;
         }
         assert!(Instant::now() < deadline, "Codex child did not start");
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let launched = recorded_launches(&log).pop().unwrap();
+    };
     launcher.kill().unwrap();
     launcher.wait().unwrap();
     while !done.exists() && Instant::now() < deadline {
