@@ -614,16 +614,21 @@ mod tests {
     }
 
     #[test]
-    fn requirements_path_matches_codex_platform_location() {
+    fn unix_requirements_path_matches_codex_platform_location() {
+        assert_eq!(
+            system_requirements_path(None, "linux"),
+            Some(PathBuf::from("/etc/codex/requirements.toml"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_requirements_path_matches_codex_platform_location() {
         assert_eq!(
             system_requirements_path(Some(r"C:\ProgramData"), "windows"),
             Some(PathBuf::from(
                 r"C:\ProgramData\OpenAI\Codex\requirements.toml"
             ))
-        );
-        assert_eq!(
-            system_requirements_path(None, "linux"),
-            Some(PathBuf::from("/etc/codex/requirements.toml"))
         );
     }
 

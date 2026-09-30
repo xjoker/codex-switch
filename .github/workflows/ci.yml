@@ -73,7 +73,23 @@ jobs:
             exit 1
           }
       - name: Run tests
-        run: cargo test --all
+        shell: pwsh
+        run: |
+          $logPath = Join-Path $env:RUNNER_TEMP ("codex-switch-cargo-test-{0}.log" -f [guid]::NewGuid())
+          & cargo test --all 2>&1 | Tee-Object -FilePath $logPath
+          $cargoExitCode = $LASTEXITCODE
+          if ($cargoExitCode -ne 0) {
+            $tailLines = @(Get-Content -LiteralPath $logPath -Tail 100 -Encoding utf8)
+            $message = [string]::Join("`n", $tailLines)
+            if ($message.Length -gt 18000) {
+              $start = $message.Length - 18000
+              if ([char]::IsLowSurrogate($message[$start])) { $start++ }
+              $message = "[Earlier output truncated]`n" + $message.Substring($start)
+            }
+            $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error::cargo test --all failed with exit code $cargoExitCode. Last test output: $message"
+          }
+          exit $cargoExitCode
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Build debug binary

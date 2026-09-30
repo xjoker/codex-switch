@@ -37,7 +37,7 @@
 
 首次统编曾被并行未完成的 test 接口阻挡，不将这种编译失败记作语义型 fail-before。基线的 WIF、provider conflict 和 URL 路由已有上文独立复现证据。整合阶段实际出现的 identity、live-I/O 和重复 persist 回归已修复，最终全量测试覆盖这些契约；交叉独立复核未发现遗留 CRITICAL/HIGH。
 
-证据仍限于 Windows 本地。macOS native MDM/CFPreferences 与 Linux/macOS 整体行为需要跨平台 CI；实际企业策略部署、真实账号 quota、桌面 UI/daemon 和发布包尚未实测。以上工作尚未推送或发布。
+上述验证记录来自 Windows 本地。首次推送 `334ff14` 后，三平台 CI 的测试步骤均失败；后续修复将 Windows 路径分隔符断言限制到 Windows，并拆分 Unix 路径测试，本地全量通过 907 项（725 unit、182 integration）。CI 增加失败摘要注释，以便读取后续失败诊断。发布必须以候选提交的三平台 CI 和 Release workflow 结果为准；实际企业策略部署、真实账号 quota、桌面 UI/daemon 尚未实测。
 
 ## 已复现 / 代码确定的问题（基线，现已修复）
 
