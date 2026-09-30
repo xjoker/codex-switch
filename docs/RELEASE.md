@@ -96,6 +96,7 @@ GitHub Actions Release builds are the only distribution source of truth; do not 
 
 - Linux / macOS: `.tar.gz` archives named `cs-{linux,darwin}-{amd64,arm64}.tar.gz` plus `.sha256`
 - Windows: `.zip` archives named `cs-windows-{amd64,arm64}.zip` plus `.sha256`
+- Every archive contains the binary (`codex-switch` or `codex-switch.exe`) at its root, the project `LICENSE`, and `THIRD-PARTY-LICENSES/upstream-codex/{LICENSE,NOTICE.md}` (the Apache-2.0 license and notice for the upstream Codex text embedded in the binary). Installers and `self-update` select the binary by name and ignore the other entries.
 - Build provenance: `codex-switch-build-provenance.json`, covering every release archive
 - `install.sh` / `install.ps1`
 - User update path: `codex-switch self-update --dev`
