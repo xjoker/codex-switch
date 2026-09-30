@@ -555,6 +555,28 @@ pub fn extract_identity(auth: &serde_json::Value) -> AccountIdentity {
     }
 }
 
+/// Whether two views of one profile's identity could belong to the same
+/// account. Only a positive contradiction counts: a claim that one side simply
+/// lacks (an older id_token without an email, a refresh that starts carrying
+/// the account id) is compatible. `email` is the fallback identity and only
+/// applies when neither side has an `account_id`, because an email can be
+/// changed by the user while the account id cannot.
+pub(crate) fn identities_compatible(
+    left_account_id: Option<&str>,
+    left_email: Option<&str>,
+    right_account_id: Option<&str>,
+    right_email: Option<&str>,
+) -> bool {
+    match (left_account_id, right_account_id) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => match (left_email, right_email) {
+            (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
 fn ensure_same_account_identity(
     alias: &str,
     existing: &serde_json::Value,

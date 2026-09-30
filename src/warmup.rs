@@ -2432,6 +2432,122 @@ mod tests {
             path
         }
 
+        fn identity_jwt(email: Option<&str>, account_id: Option<&str>) -> String {
+            let mut claims = serde_json::json!({});
+            if let Some(email) = email {
+                claims["email"] = serde_json::json!(email);
+            }
+            if let Some(account_id) = account_id {
+                claims["https://api.openai.com/auth"] =
+                    serde_json::json!({ "chatgpt_account_id": account_id });
+            }
+            make_jwt(&claims)
+        }
+
+        /// Stage a writable profile with an expired access token and the given
+        /// id_token, so the pre-warmup refresh always fires.
+        fn stage_profile_with_id_token(
+            home: &std::path::Path,
+            alias: &str,
+            id_token: &str,
+        ) -> std::path::PathBuf {
+            let path = home.join("profiles").join(alias).join("auth.json");
+            let val = serde_json::json!({
+                "tokens": {
+                    "id_token": id_token,
+                    "access_token": expired_access_token(),
+                    "refresh_token": "refresh-token-live",
+                }
+            });
+            crate::auth::write_auth(&path, &val).unwrap();
+            path
+        }
+
+        /// Warm an account whose stored id_token carries `stored` identity claims
+        /// while the refresh response carries `rotated`. Returns the warmup result
+        /// and the refresh token left on disk.
+        #[allow(clippy::await_holding_lock)]
+        async fn warmup_with_identities(
+            alias: &str,
+            stored: (Option<&str>, Option<&str>),
+            rotated: (Option<&str>, Option<&str>),
+        ) -> (Result<()>, Option<String>) {
+            let _lock = ENV_LOCK.lock().await;
+            let _profile_env_lock = crate::profile::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = tempfile::tempdir().unwrap();
+            let _codex_switch_home =
+                EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
+            crate::cache::put(alias, &crate::usage::UsageInfo::default());
+            let profile_path =
+                stage_profile_with_id_token(home.path(), alias, &identity_jwt(stored.0, stored.1));
+            let (_token_calls, _guards) = start_mock_server(
+                StatusCode::OK,
+                serde_json::json!({
+                    "id_token": identity_jwt(rotated.0, rotated.1),
+                    "access_token": live_access_token(),
+                    "refresh_token": "rotated-refresh-token",
+                }),
+                StatusCode::OK,
+                MOCK_COMPLETED_SSE,
+            )
+            .await;
+            let result = warmup_account(alias, &profile_path).await.map(|_| ());
+            let stored_refresh =
+                crate::auth::extract_tokens(&crate::auth::read_auth(&profile_path).unwrap()).1;
+            (result, stored_refresh)
+        }
+
+        #[tokio::test]
+        async fn refresh_accepts_email_that_was_missing_from_the_stored_token() {
+            let (result, refresh) = warmup_with_identities(
+                "identity-email-gained",
+                (None, None),
+                (Some("user@example.com"), None),
+            )
+            .await;
+            result.expect("a claim the stored token lacked is not an account change");
+            assert_eq!(refresh.as_deref(), Some("rotated-refresh-token"));
+        }
+
+        #[tokio::test]
+        async fn refresh_accepts_account_id_that_was_missing_from_the_stored_token() {
+            let (result, refresh) = warmup_with_identities(
+                "identity-account-gained",
+                (Some("user@example.com"), None),
+                (Some("user@example.com"), Some("acct-1")),
+            )
+            .await;
+            result.expect("a newly present account id is not an account change");
+            assert_eq!(refresh.as_deref(), Some("rotated-refresh-token"));
+        }
+
+        #[tokio::test]
+        async fn refresh_accepts_changed_email_for_the_same_account_id() {
+            let (result, refresh) = warmup_with_identities(
+                "identity-email-changed",
+                (Some("old@example.com"), Some("acct-1")),
+                (Some("new@example.com"), Some("acct-1")),
+            )
+            .await;
+            result.expect("the account id is the identity; an email change must not lose tokens");
+            assert_eq!(refresh.as_deref(), Some("rotated-refresh-token"));
+        }
+
+        #[tokio::test]
+        async fn refresh_refuses_a_different_account_id() {
+            let (result, refresh) = warmup_with_identities(
+                "identity-account-changed",
+                (Some("user@example.com"), Some("acct-1")),
+                (Some("user@example.com"), Some("acct-2")),
+            )
+            .await;
+            let error = result.expect_err("a different account id is a different account");
+            assert!(crate::usage::is_refresh_safety_error(&error));
+            assert_eq!(refresh.as_deref(), Some("refresh-token-live"));
+        }
+
         /// Mock server whose `/oauth/token` always rotates successfully, so the
         /// only thing that can go wrong is the write back. `/codex/responses`
         /// walks `responses_statuses` one entry per request and repeats the last
@@ -2545,8 +2661,12 @@ mod tests {
                 EnvVarGuard::set("CODEX_SWITCH_HOME", &home.path().display().to_string());
             let alias = "refresh-identity-change";
             crate::cache::put(alias, &crate::usage::UsageInfo::default());
-            let profile_path = stage_writable_profile(home.path(), alias, &expired_access_token());
-            let rotated_id = make_jwt(&serde_json::json!({ "email": "different@example.com" }));
+            let profile_path = stage_profile_with_id_token(
+                home.path(),
+                alias,
+                &identity_jwt(Some("original@example.com"), None),
+            );
+            let rotated_id = identity_jwt(Some("different@example.com"), None);
 
             let (token_calls, _guards) = start_mock_server(
                 StatusCode::OK,

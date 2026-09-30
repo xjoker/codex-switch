@@ -406,7 +406,12 @@ fn profile_tokens_changed(left: &ProfileTokens, right: &ProfileTokens) -> bool {
 }
 
 fn same_profile_identity(left: &ProfileTokens, right: &ProfileTokens) -> bool {
-    left.account_id == right.account_id && left.email == right.email
+    crate::profile::identities_compatible(
+        left.account_id.as_deref(),
+        left.email.as_deref(),
+        right.account_id.as_deref(),
+        right.email.as_deref(),
+    )
 }
 
 fn ensure_profile_identity(
@@ -456,11 +461,18 @@ fn validate_refreshed_identity(
     })?;
     let existing = crate::profile::extract_identity(current_auth);
     let incoming = crate::profile::extract_identity(&candidate);
-    if existing.account_id != expected.account_id
-        || incoming.account_id != expected.account_id
-        || existing.email != expected.email
-        || incoming.email != expected.email
-    {
+    // Refuse only a genuine account change. The server has already rotated the
+    // refresh token, so rejecting a response that merely gained (or lost) an
+    // email/account claim would discard the only live credential.
+    let compatible = |identity: &crate::profile::AccountIdentity| {
+        crate::profile::identities_compatible(
+            expected.account_id.as_deref(),
+            expected.email.as_deref(),
+            identity.account_id.as_deref(),
+            identity.email.as_deref(),
+        )
+    };
+    if !compatible(&existing) || !compatible(&incoming) {
         return Err(crate::usage::RefreshSafetyError::new(format!(
             "{alias}: authenticated account changed during token refresh; refusing to save or use rotated credentials"
         ))
