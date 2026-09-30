@@ -6,6 +6,7 @@
 - **Release archives carry license notices** — Every release archive now includes the project `LICENSE` and the Apache-2.0 license and notice for the upstream Codex text embedded in the binary (`THIRD-PARTY-LICENSES/upstream-codex/`). The README documents the third-party notice.
 - **401 recovery after a failed pre-refresh** — A warmup or model fetch whose proactive refresh failed for a transient reason (for example a network error) no longer uses up its one recovery refresh, so a following 401 can still be recovered. A terminal rejection such as `refresh_token_invalidated` still stops without replaying the credential.
 - **Model-not-supported retry picks another model** — When a warmup is rejected with HTTP 400 "not supported", the single retry after refreshing the model list now excludes the rejected model instead of possibly selecting it again.
+- **Non-ASCII provider header values** — Provider `http_headers` and `env_http_headers` values that contain non-ASCII characters no longer make connection resolution fail, which had broken model fetch, probes and fingerprinting for that provider.
 
 ## v20260930.2.0 (candidate) — 2026-09-30
 

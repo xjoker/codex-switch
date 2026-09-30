@@ -1266,13 +1266,17 @@ fn resolve_provider_connection_from_parts(
     }
     let api_key = api_key.or_else(|| experimental_bearer.map(str::to_string));
 
+    // Keep the configured string once `HeaderValue::try_from` has accepted it.
+    // Reading it back with `HeaderValue::to_str` would reject the non-ASCII
+    // (obs-text) values that `try_from` allows, and `provider_http_headers`
+    // rebuilds the value from this same string.
     let mut headers = BTreeMap::new();
     for (name, value) in static_headers {
-        if let (Ok(name), Ok(value)) = (
+        if let (Ok(name), Ok(_)) = (
             reqwest::header::HeaderName::try_from(name.as_str()),
             reqwest::header::HeaderValue::try_from(value.as_str()),
         ) {
-            headers.insert(name.as_str().to_string(), value.to_str()?.to_string());
+            headers.insert(name.as_str().to_string(), value);
         }
     }
     for (name, env_name) in env_headers {
@@ -1283,26 +1287,21 @@ fn resolve_provider_connection_from_parts(
         };
         if let Some(value) = value
             && !value.trim().is_empty()
-            && let (Ok(name), Ok(header_value)) = (
+            && let (Ok(name), Ok(_)) = (
                 reqwest::header::HeaderName::try_from(name.as_str()),
                 reqwest::header::HeaderValue::try_from(value.as_str()),
             )
         {
-            headers.insert(
-                name.as_str().to_string(),
-                header_value.to_str()?.to_string(),
-            );
+            headers.insert(name.as_str().to_string(), value);
         }
     }
     // EndpointSession applies its AuthProvider after provider headers, so the
     // configured env key is authoritative when both define Authorization.
     if let Some(key) = &api_key {
-        let value = reqwest::header::HeaderValue::try_from(format!("Bearer {key}"))
+        let value = format!("Bearer {key}");
+        reqwest::header::HeaderValue::try_from(value.as_str())
             .context("provider API key cannot be used as an HTTP header")?;
-        headers.insert(
-            reqwest::header::AUTHORIZATION.as_str().to_string(),
-            value.to_str()?.to_string(),
-        );
+        headers.insert(reqwest::header::AUTHORIZATION.as_str().to_string(), value);
     }
 
     Ok(ProviderHttpConfig {
@@ -7397,6 +7396,28 @@ api_key = "sk-legacy-key"
         assert_eq!(profile.responses_support_for("model-x"), Some(false));
         profile.record_responses_probes(&[probe]);
         assert_eq!(profile.responses_support_for("model-x"), None);
+    }
+
+    #[test]
+    fn non_ascii_header_values_resolve_and_reach_the_request_headers() {
+        // `HeaderValue::try_from(&str)` accepts obs-text bytes that `to_str`
+        // rejects; resolving such a provider must not fail.
+        let config =
+            vec!["model_providers.provider.http_headers={\"X-Tenant\"=\"caf\u{e9}\"}".to_string()];
+        let connection = resolve_provider_connection_from_parts(
+            "https://gateway.example/v1",
+            "stored-key",
+            "CODEX_SWITCH_PROVIDER_KEY",
+            false,
+            "responses",
+            "provider",
+            &config,
+        )
+        .expect("a non-ASCII header value must not break connection resolution");
+        assert_eq!(connection.headers["x-tenant"], "caf\u{e9}");
+        assert!(!connection.fingerprint().is_empty());
+        let headers = provider_http_headers(&connection, false).unwrap();
+        assert_eq!(headers["x-tenant"].as_bytes(), "caf\u{e9}".as_bytes());
     }
 
     #[test]
