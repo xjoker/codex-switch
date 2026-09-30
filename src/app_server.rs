@@ -9,6 +9,7 @@
 
 use std::io::{self, Read};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Upper bound for each `codex app-server daemon …` call. A switch must not
@@ -56,16 +57,21 @@ impl DaemonRestart {
     }
 }
 
-/// Content hash of the live `auth.json`, taken before a credential change.
+/// Canonical content hash of the live `auth.json`, taken before a credential
+/// change. It hashes the parsed JSON, so a rewrite in another formatting (for
+/// example by Codex's own token refresh) still counts as the same credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveAuthSnapshot(Option<String>);
 
 pub fn snapshot_live_auth() -> LiveAuthSnapshot {
-    LiveAuthSnapshot(
-        crate::auth::codex_auth_path()
-            .ok()
-            .and_then(|path| crate::auth::sha256_file(&path)),
-    )
+    match crate::auth::codex_auth_path() {
+        Ok(path) => snapshot_of(&path),
+        Err(_) => LiveAuthSnapshot(None),
+    }
+}
+
+fn snapshot_of(path: &std::path::Path) -> LiveAuthSnapshot {
+    LiveAuthSnapshot(crate::profile::canonical_auth_hash(path))
 }
 
 /// Restart the managed app-server daemon when one is running and the live
@@ -101,7 +107,11 @@ fn restart_daemon_if_running(allow_restart: bool) -> DaemonRestart {
 }
 
 /// `Command::output` with a deadline: the child is killed once `timeout`
-/// passes and the call returns `TimedOut`.
+/// passes and the call returns `TimedOut`. The deadline also covers collecting
+/// the output: a daemon that outlives the direct child can inherit the pipe
+/// write handles (on Windows, through the node process behind `codex.cmd`),
+/// so EOF may never arrive. The exit status is what matters then, so whatever
+/// was not delivered in time is dropped.
 fn output_with_timeout(mut command: Command, timeout: Duration) -> io::Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
@@ -109,15 +119,18 @@ fn output_with_timeout(mut command: Command, timeout: Duration) -> io::Result<Ou
         .stderr(Stdio::piped())
         .spawn()?;
     // Drain both pipes on their own threads so a chatty child cannot block
-    // on a full pipe while it is being waited on.
+    // on a full pipe while it is being waited on. The threads are never
+    // joined: a reader stuck on a pipe that stays open is left to detach.
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut pipe) = pipe {
                 let _ = pipe.read_to_end(&mut buf);
             }
-            buf
-        })
+            let _ = tx.send(buf);
+        });
+        rx
     };
     let stdout = drain(
         child
@@ -146,10 +159,14 @@ fn output_with_timeout(mut command: Command, timeout: Duration) -> io::Result<Ou
         }
         std::thread::sleep(Duration::from_millis(25));
     };
+    let collect = |rx: mpsc::Receiver<Vec<u8>>| {
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or_default()
+    };
     Ok(Output {
         status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
+        stdout: collect(stdout),
+        stderr: collect(stderr),
     })
 }
 
@@ -205,6 +222,7 @@ fn failure_detail(output: &Output) -> String {
 mod tests {
     use super::{
         DaemonRestart, LiveAuthSnapshot, live_auth_unchanged, output_with_timeout, restart_with,
+        snapshot_of,
     };
     use std::cell::RefCell;
     use std::io;
@@ -411,6 +429,72 @@ mod tests {
         let err = output_with_timeout(command, Duration::from_millis(300)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn output_returns_promptly_when_a_grandchild_keeps_the_pipe_open() {
+        // The direct child exits at once but leaves a grandchild holding the
+        // inherited pipe write handles, so the readers never see EOF.
+        let command = if cfg!(windows) {
+            let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+            let system32 = std::path::PathBuf::from(root).join("System32");
+            let mut c = Command::new(system32.join("cmd.exe"));
+            c.arg("/c").arg(format!(
+                "start /b {} -NoProfile -Command Start-Sleep 8",
+                system32
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("powershell.exe")
+                    .display()
+            ));
+            c
+        } else {
+            let mut c = Command::new("/bin/sh");
+            c.args(["-c", "sleep 8 & exit 0"]);
+            c
+        };
+        let started = Instant::now();
+        let output = output_with_timeout(command, Duration::from_millis(1500)).unwrap();
+        assert!(output.status.success());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "collecting output must not outlive the deadline: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn live_auth_is_compared_semantically() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            snapshot_of(&path)
+        };
+        let compact = write(
+            "a.json",
+            r#"{"tokens":{"id_token":"x","access_token":"y"},"k":1}"#,
+        );
+        let pretty = write(
+            "b.json",
+            "{
+  \"k\": 1,
+  \"tokens\": {
+    \"access_token\": \"y\",
+    \"id_token\": \"x\"
+  }
+}
+",
+        );
+        let other = write(
+            "c.json",
+            r#"{"tokens":{"id_token":"x","access_token":"z"},"k":1}"#,
+        );
+        let garbage = write("d.json", "not json");
+        assert!(live_auth_unchanged(&compact, &pretty));
+        assert!(!live_auth_unchanged(&compact, &other));
+        assert!(!live_auth_unchanged(&garbage, &garbage));
+        assert!(!live_auth_unchanged(&compact, &garbage));
     }
 
     #[test]

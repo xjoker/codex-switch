@@ -494,7 +494,7 @@ pub fn replace_profile_auth_and_live_if_current(
 /// A canonical (formatting-free) hash of an auth.json. `use` rewrites the
 /// live file with pretty-printing, so byte identity is not a stable match
 /// key: the same credentials must still resolve to their profile.
-fn canonical_auth_hash(path: &Path) -> Option<String> {
+pub(crate) fn canonical_auth_hash(path: &Path) -> Option<String> {
     let val = crate::auth::read_auth(path).ok()?;
     let canonical = serde_json::to_string(&val).ok()?;
     use sha2::Digest;
