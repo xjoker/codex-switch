@@ -2158,7 +2158,8 @@ fn doctor_reports_path_and_explicit_desktop_engine_versions_as_json() {
     );
     assert!(
         output.status.success(),
-        "{}",
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -86,8 +86,23 @@ jobs:
               if ([char]::IsLowSurrogate($message[$start])) { $start++ }
               $message = "[Earlier output truncated]`n" + $message.Substring($start)
             }
-            $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-            Write-Output "::error::cargo test --all failed with exit code $cargoExitCode. Last test output: $message"
+            $chunks = [System.Collections.Generic.List[string]]::new()
+            $offset = 0
+            while ($offset -lt $message.Length) {
+              $length = [Math]::Min(900, $message.Length - $offset)
+              if (($offset + $length) -lt $message.Length -and
+                  [char]::IsHighSurrogate($message[$offset + $length - 1])) {
+                $length--
+              }
+              $chunks.Add($message.Substring($offset, $length))
+              $offset += $length
+            }
+            if ($chunks.Count -eq 0) { $chunks.Add('(no test output captured)') }
+            for ($index = 0; $index -lt $chunks.Count; $index++) {
+              $part = $index + 1
+              $escaped = $chunks[$index].Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error::cargo test --all failed with exit code $cargoExitCode (part $part/$($chunks.Count)): $escaped"
+            }
           }
           exit $cargoExitCode
       - name: Run Clippy
