@@ -10,6 +10,8 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+#[cfg(any(unix, windows))]
+use std::sync::OnceLock;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -184,18 +186,96 @@ sys.exit(0)
 
 const ARGV_EDGE_CASE: &str = "review with spaces 世界 & echo should-not-run";
 
+#[cfg(unix)]
+fn locate_python3() -> &'static Path {
+    static PYTHON3: OnceLock<PathBuf> = OnceLock::new();
+    PYTHON3.get_or_init(|| {
+        let paths = std::env::var_os("PATH").unwrap_or_default();
+        let python = std::env::split_paths(&paths)
+            .map(|dir| dir.join("python3"))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| panic!("Unix launch tests require python3 on the test runner PATH"))
+            .canonicalize()
+            .unwrap_or_else(|error| panic!("resolving the test runner's python3: {error}"));
+
+        // Resolve and start the test interpreter before launching codex-switch:
+        // the CLI's first version probe has a strict four-second deadline.
+        let output = Command::new(&python)
+            .args(["-c", "pass"])
+            .output()
+            .unwrap_or_else(|error| panic!("starting the test runner's python3: {error}"));
+        assert!(
+            output.status.success(),
+            "test runner python3 prewarm failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        python
+    })
+}
+
+#[cfg(unix)]
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+}
+
 #[cfg(windows)]
-fn locate_python() -> PathBuf {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path) {
-        for name in ["python.exe", "python3.exe", "py.exe"] {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return candidate;
-            }
+fn locate_python() -> &'static Path {
+    static PYTHON: OnceLock<PathBuf> = OnceLock::new();
+    PYTHON.get_or_init(|| {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let candidate = std::env::split_paths(&path)
+            .flat_map(|dir| ["python.exe", "python3.exe", "py.exe"].map(|name| dir.join(name)))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| {
+                panic!("Windows launch tests require an existing Python executable on PATH")
+            });
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|error| {
+                    panic!("resolving the test runner's current directory: {error}")
+                })
+                .join(candidate)
+        }
+    })
+}
+
+fn warm_fake_codex(home: &Path, fake_bin: &Path, log: &Path) {
+    #[cfg(unix)]
+    let mut command = Command::new(fake_bin.join("codex"));
+    #[cfg(unix)]
+    command.arg("--version");
+    #[cfg(windows)]
+    let mut command = Command::new(fake_bin.join("codex.cmd"));
+    #[cfg(windows)]
+    command.arg("--version");
+    command
+        .env("HOME", home)
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("CODEX_SWITCH_HOME", home.join(".codex-switch"));
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("CS_FAKE_CODEX_")
+        {
+            command.env_remove(name);
         }
     }
-    panic!("Windows launch tests require an existing Python executable on PATH");
+    command
+        .env("CS_FAKE_CODEX_LOG", log)
+        .env("CS_FAKE_CODEX_VERSION", "0.159.2");
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("warming fake Codex executable: {error}"));
+    assert!(
+        output.status.success(),
+        "fake Codex warmup failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::write(log, "[]").unwrap();
 }
 
 fn install_fake_codex(home: &Path) -> (PathBuf, PathBuf) {
@@ -205,8 +285,19 @@ fn install_fake_codex(home: &Path) -> (PathBuf, PathBuf) {
     fs::write(&log, "[]").unwrap();
     #[cfg(unix)]
     {
+        let python = locate_python3();
+        let fake_script = bin_dir.join("fake_codex.py");
+        fs::write(&fake_script, FAKE_CODEX_PY).unwrap();
         let script = bin_dir.join("codex");
-        fs::write(&script, format!("#!/usr/bin/env python3\n{FAKE_CODEX_PY}")).unwrap();
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nexec {} {} \"$@\"\n",
+                shell_quote(python),
+                shell_quote(&fake_script)
+            ),
+        )
+        .unwrap();
         let mut perms = fs::metadata(&script).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&script, perms).unwrap();
@@ -223,6 +314,7 @@ fn install_fake_codex(home: &Path) -> (PathBuf, PathBuf) {
         )
         .unwrap();
     }
+    warm_fake_codex(home, &bin_dir, &log);
     (bin_dir, log)
 }
 

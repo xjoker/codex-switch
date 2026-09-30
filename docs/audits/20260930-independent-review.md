@@ -39,6 +39,8 @@
 
 上述验证记录来自 Windows 本地。首次推送 `334ff14` 后，三平台 CI 的测试步骤均失败；后续修复将 Windows 路径分隔符断言限制到 Windows，并拆分 Unix 路径测试，本地全量通过 907 项（725 unit、182 integration）。CI 增加失败摘要注释，以便读取后续失败诊断。发布必须以候选提交的三平台 CI 和 Release workflow 结果为准；实际企业策略部署、真实账号 quota、桌面 UI/daemon 尚未实测。
 
+后续 CI 的完整分片诊断确认 Windows/macOS 的 Python fake Codex 首次启动超过 4 秒，而同一路径第二次版本探测成功；macOS 的 SIGTERM 用例也在等待 fake 启动时超时。测试 fixture 改用宿主 PATH 上的绝对 Python 解释器，并在正式 CLI 测试前预热 fake executable、清空 probe log。生产 4 秒版本门禁保持不变，故意延迟/失败的回归用例仍在正式执行时设置。
+
 ## 已复现 / 代码确定的问题（基线，现已修复）
 
 ### [P2] `use` 可能在 Codex 无法读取认证文件时报告成功
