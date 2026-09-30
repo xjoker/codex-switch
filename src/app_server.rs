@@ -414,10 +414,25 @@ mod tests {
         );
     }
 
+    /// Other tests swap PATH concurrently, so Windows tools are spawned by
+    /// absolute path instead of being looked up.
+    #[cfg(windows)]
+    fn windows_system_tool(relative: &str) -> std::path::PathBuf {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        std::path::PathBuf::from(root)
+            .join("System32")
+            .join(relative)
+    }
+
+    #[cfg(windows)]
+    fn powershell_exe() -> std::path::PathBuf {
+        windows_system_tool(r"WindowsPowerShell\v1.0\powershell.exe")
+    }
+
     #[test]
     fn hung_codex_is_killed_at_the_deadline() {
         let command = if cfg!(windows) {
-            let mut c = Command::new("powershell.exe");
+            let mut c = Command::new(powershell_exe());
             c.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
             c
         } else {
@@ -436,16 +451,10 @@ mod tests {
         // The direct child exits at once but leaves a grandchild holding the
         // inherited pipe write handles, so the readers never see EOF.
         let command = if cfg!(windows) {
-            let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-            let system32 = std::path::PathBuf::from(root).join("System32");
-            let mut c = Command::new(system32.join("cmd.exe"));
+            let mut c = Command::new(windows_system_tool("cmd.exe"));
             c.arg("/c").arg(format!(
                 "start /b {} -NoProfile -Command Start-Sleep 8",
-                system32
-                    .join("WindowsPowerShell")
-                    .join("v1.0")
-                    .join("powershell.exe")
-                    .display()
+                powershell_exe().display()
             ));
             c
         } else {
