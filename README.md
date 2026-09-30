@@ -79,7 +79,7 @@ Requires Rust 1.88 or newer:
 ```bash
 cargo build
 cargo test --all
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets -- -D warnings
 ```
 
 See the [developer onboarding](https://github.com/xjoker/codex-switch/wiki/Developer-Onboarding) and [architecture](https://github.com/xjoker/codex-switch/wiki/Architecture-Overview) Wiki pages before changing authentication, storage, selection, or update behavior.
