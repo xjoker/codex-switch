@@ -62,9 +62,9 @@ pub const KEYMAP: &[Binding] = &[
         in_status_bar: true,
     },
     Binding {
-        keys: "tab",
+        keys: "tab / shift+tab",
         section: Section::Navigation,
-        label: "next tab (Accounts / Providers / Settings / Logs)",
+        label: "next / previous tab (Accounts / Providers / Settings / Logs)",
         in_status_bar: false,
     },
     Binding {
@@ -86,7 +86,9 @@ pub const KEYMAP: &[Binding] = &[
         label: "clear marks / search / popup",
         in_status_bar: false,
     },
-    // Account actions (Accounts list and the selected-account menu)
+    // Account actions. Only enter, o and u work directly on the list (r there
+    // refreshes all visible accounts, see Global below); the rest are keys of
+    // the selected-account menu that Enter opens.
     Binding {
         keys: "enter",
         section: Section::Account,
@@ -96,7 +98,7 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "r",
         section: Section::Account,
-        label: "refresh account details",
+        label: "refresh this account (in the Enter menu)",
         in_status_bar: false,
     },
     Binding {
@@ -114,31 +116,31 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         keys: "l",
         section: Section::Account,
-        label: "re-login",
+        label: "re-login (in the Enter menu)",
         in_status_bar: false,
     },
     Binding {
         keys: "n",
         section: Section::Account,
-        label: "rename",
+        label: "rename (in the Enter menu)",
         in_status_bar: false,
     },
     Binding {
         keys: "w",
         section: Section::Account,
-        label: "warmup",
+        label: "warmup (in the Enter menu)",
         in_status_bar: false,
     },
     Binding {
         keys: "c",
         section: Section::Account,
-        label: "confirm earliest reset card",
+        label: "use earliest reset card, asks to confirm (in the Enter menu)",
         in_status_bar: false,
     },
     Binding {
         keys: "d",
         section: Section::Account,
-        label: "delete",
+        label: "delete (in the Enter menu)",
         in_status_bar: false,
     },
     // Batch actions

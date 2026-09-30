@@ -1789,12 +1789,13 @@ fn short_label(label: &str) -> &str {
     match label {
         "move selection" => "nav",
         "search" => "search",
-        "open selected (Accounts: menu, Providers: launch picker)" => "menu",
+        "open selected account actions" => "menu",
+        "add new account" => "add",
         "refresh visible accounts" => "refresh",
-        "show / hide account detail panel" => "quota",
+        "show / hide account detail panel" => "detail",
         "use (switch to)" => "use",
-        "show this help" => "help",
-        "quit" => "quit",
+        "show this help (main view)" => "help",
+        "quit (main view)" => "quit",
         "launch Codex" => "launch",
         other => other,
     }
@@ -1957,13 +1958,44 @@ mod tests {
             "proxy.no_proxy",
             "cache.ttl",
             "network.max_concurrent",
-            "tui.auto_refresh_secs",
+            "tui.auto_refresh_interval_secs",
             "use.safety_margin_7d",
             "use.team_priority",
-            "restore_delay_secs",
+            "use.restart_app_server",
+            "launch.restore_delay_secs",
         ] {
             assert!(joined.contains(label), "missing {label}:\n{joined}");
         }
+    }
+
+    #[test]
+    fn settings_tab_explains_the_focused_field() {
+        let mut app = App::new();
+        app.active_tab = crate::tui::app::Tab::Settings;
+        let backend = TestBackend::new(120, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let joined = (0..50)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("--proxy and CS_PROXY override it"),
+            "the focused proxy.url field must show its explanation:\n{joined}"
+        );
+
+        for _ in 0..7 {
+            app.handle_settings_key(crossterm::event::KeyCode::Down);
+        }
+        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+        let joined = (0..50)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("restart a running Codex"),
+            "use.restart_app_server must explain itself when focused:\n{joined}"
+        );
     }
 
     #[test]

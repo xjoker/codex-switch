@@ -372,6 +372,32 @@ fn field_value(settings: &SettingsState, focus: Focus, value: &str) -> String {
     value.to_string()
 }
 
+/// Explanation of the focused field, shown under the field list. Lines are
+/// separated by `\n` and kept short because the panel does not wrap.
+fn field_hint(focus: Focus) -> &'static str {
+    match focus {
+        Focus::ProxyUrl => {
+            "Proxy for usage, login and provider requests (http, https, socks4, socks5, socks5h).\n--proxy and CS_PROXY override it; empty = none."
+        }
+        Focus::ProxyNoProxy => {
+            "Hosts that bypass the proxy, comma-separated (NO_PROXY syntax); empty = none."
+        }
+        Focus::CacheTtl => {
+            "Seconds a usage result is reused before it is fetched again (minimum 1)."
+        }
+        Focus::MaxConcurrent => "Maximum simultaneous usage requests (minimum 1).",
+        Focus::TuiRefresh => "Seconds between refreshes while `t` auto-refresh is on (minimum 30).",
+        Focus::SafetyMargin => "7d headroom % below which auto-select penalizes an account.",
+        Focus::TeamPriority => "Prefer Team-plan accounts when auto-selecting.",
+        Focus::RestartAppServer => {
+            "After the live auth.json changes (use, TUI u, login), restart a running Codex\napp-server daemon so new sessions use the account. Interrupts turns in progress.\noff = leave the daemon alone and only show the manual command."
+        }
+        Focus::RestoreDelay => {
+            "Seconds `launch` waits before restoring auth.json after starting Codex\n(minimum 1; 0 would restore it before Codex has read it)."
+        }
+    }
+}
+
 fn push_field(
     settings: &SettingsState,
     focus: Focus,
@@ -390,7 +416,7 @@ fn push_field(
         base()
     };
     lines.push(Line::from(vec![
-        Span::styled(format!("{name:<22}"), dim()),
+        Span::styled(format!("{name:<32}"), dim()),
         Span::styled(value, style),
     ]));
     line_focus.push(Some(focus));
@@ -475,7 +501,7 @@ pub fn render_settings_tab(
     push_field(
         settings,
         Focus::TuiRefresh,
-        "tui.auto_refresh_secs",
+        "tui.auto_refresh_interval_secs",
         field_value(
             settings,
             Focus::TuiRefresh,
@@ -527,7 +553,7 @@ pub fn render_settings_tab(
     push_field(
         settings,
         Focus::RestoreDelay,
-        "restore_delay_secs",
+        "launch.restore_delay_secs",
         field_value(
             settings,
             Focus::RestoreDelay,
@@ -549,8 +575,12 @@ pub fn render_settings_tab(
         )));
         line_focus.push(None);
     } else {
+        for hint_line in field_hint(settings.focus).lines() {
+            lines.push(Line::from(Span::styled(hint_line, dim())));
+            line_focus.push(None);
+        }
         lines.push(Line::from(Span::styled(
-            "click field  j/k move  enter edit/toggle  s save  esc cancel edit",
+            "click field  j/k move  enter/space edit or toggle  ←/→ toggle  s save  esc cancel edit",
             dim(),
         )));
         line_focus.push(None);

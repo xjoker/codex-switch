@@ -646,7 +646,7 @@ impl MenuState {
                 lines.extend(menu_items(&items, key_style, label_style));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, "re-Login", &lines, popup, area).map(|layout| MenuRender {
+                render_popup(f, "Re-login", &lines, popup, area).map(|layout| MenuRender {
                     panel: layout.panel,
                     actions: hits_for_menu_items(&layout, 4, &items),
                 })
@@ -657,7 +657,7 @@ impl MenuState {
                 let items = [
                     ("r", "Refresh selected"),
                     ("w", "Warmup selected"),
-                    ("l", "re-Login selected (sequential)"),
+                    ("l", "Re-login selected (sequential)"),
                     ("d", "Delete selected"),
                 ];
                 let mut lines: Vec<Line<'static>> = Vec::new();
@@ -687,7 +687,7 @@ impl MenuState {
                 lines.extend(menu_items(&items, key_style, label_style));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("esc / q to cancel", dim)));
-                render_popup(f, "Batch re-Login", &lines, popup, area).map(|layout| MenuRender {
+                render_popup(f, "Batch re-login", &lines, popup, area).map(|layout| MenuRender {
                     panel: layout.panel,
                     actions: hits_for_menu_items(&layout, 4, &items),
                 })

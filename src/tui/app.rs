@@ -2170,7 +2170,7 @@ impl App {
                     }
                     DaemonRestart::Disabled => {
                         status.push_str(
-                            "; app-server daemon still holds the previous account (auto-restart off) -- run `codex app-server daemon restart`",
+                            "; app-server daemon still holds the previous account (use.restart_app_server = false) -- run `codex app-server daemon restart`",
                         );
                         self.set_status(status, seconds.max(8));
                     }
