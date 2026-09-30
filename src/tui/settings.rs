@@ -21,6 +21,7 @@ enum Focus {
     TuiRefresh,
     SafetyMargin,
     TeamPriority,
+    RestartAppServer,
     RestoreDelay,
 }
 
@@ -32,6 +33,7 @@ const FOCUS_ORDER: &[Focus] = &[
     Focus::TuiRefresh,
     Focus::SafetyMargin,
     Focus::TeamPriority,
+    Focus::RestartAppServer,
     Focus::RestoreDelay,
 ];
 
@@ -206,6 +208,10 @@ impl SettingsState {
                 self.draft.use_cfg.team_priority = !self.draft.use_cfg.team_priority;
                 self.dirty = true;
             }
+            Focus::RestartAppServer => {
+                self.draft.use_cfg.restart_app_server = !self.draft.use_cfg.restart_app_server;
+                self.dirty = true;
+            }
             _ => self.begin_edit(),
         }
     }
@@ -214,6 +220,10 @@ impl SettingsState {
         match self.focus {
             Focus::TeamPriority if delta != 0 => {
                 self.draft.use_cfg.team_priority = !self.draft.use_cfg.team_priority;
+                self.dirty = true;
+            }
+            Focus::RestartAppServer if delta != 0 => {
+                self.draft.use_cfg.restart_app_server = !self.draft.use_cfg.restart_app_server;
                 self.dirty = true;
             }
             _ => {}
@@ -229,7 +239,7 @@ impl SettingsState {
             Focus::TuiRefresh => self.draft.tui.auto_refresh_interval_secs.to_string(),
             Focus::SafetyMargin => format_num(self.draft.use_cfg.safety_margin_7d),
             Focus::RestoreDelay => self.draft.launch.restore_delay_secs.to_string(),
-            Focus::TeamPriority => return,
+            Focus::TeamPriority | Focus::RestartAppServer => return,
         };
         self.input = value;
         self.cursor = self.input.chars().count();
@@ -260,7 +270,7 @@ impl SettingsState {
                 self.draft.launch.restore_delay_secs =
                     parse_u64(&raw, 1, "launch.restore_delay_secs")?;
             }
-            Focus::TeamPriority => {}
+            Focus::TeamPriority | Focus::RestartAppServer => {}
         }
         self.dirty = true;
         Ok(())
@@ -501,6 +511,15 @@ pub fn render_settings_tab(
         &mut line_focus,
         &mut focused_line,
     );
+    push_field(
+        settings,
+        Focus::RestartAppServer,
+        "use.restart_app_server",
+        bool_label(settings.draft.use_cfg.restart_app_server).to_string(),
+        &mut lines,
+        &mut line_focus,
+        &mut focused_line,
+    );
     lines.push(Line::from(""));
     line_focus.push(None);
     lines.push(Line::from(Span::styled("Launch", header())));
@@ -602,11 +621,12 @@ mod tests {
         let crate::config::UseConfig {
             safety_margin_7d: _,
             team_priority: _,
+            restart_app_server: _,
         } = use_cfg;
         let crate::config::LaunchConfig {
             restore_delay_secs: _,
         } = launch;
-        assert_eq!(FOCUS_ORDER.len(), 8);
+        assert_eq!(FOCUS_ORDER.len(), 9);
     }
 
     fn type_value(settings: &mut SettingsState, value: &str) {

@@ -105,6 +105,10 @@ pub struct UseConfig {
     pub safety_margin_7d: f64,
     /// Prioritize Team plan accounts (default: true)
     pub team_priority: bool,
+    /// Restart a running Codex app-server daemon after the live auth.json
+    /// changes, so new sessions use the switched account (default: true).
+    /// Restarting interrupts turns in progress in sessions attached to it.
+    pub restart_app_server: bool,
 }
 
 impl Default for UseConfig {
@@ -112,6 +116,7 @@ impl Default for UseConfig {
         Self {
             safety_margin_7d: 20.0,
             team_priority: true,
+            restart_app_server: true,
         }
     }
 }

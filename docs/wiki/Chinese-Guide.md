@@ -58,7 +58,7 @@ codex-switch import ~/auth-backups
 
 - `use` 和 Accounts 页的 `u` 切换 ChatGPT 的 `$CODEX_HOME/auth.json`，并将用户 `config.toml` 顶层及其默认 `profile` 中已有的 `model_provider` 选择改回 `openai`；保留模型、提供方定义、MCP 和注释。**不能**用提供方别名执行 `use`。
 - 若另行启动仍请求第三方地址，检查启动参数、项目 `.codex/config.toml`、额外指定的 Codex profile，以及 `openai_base_url` / `OPENAI_BASE_URL` 地址覆盖；这些不由账号切换修改。
-- `use` 不会后台自动换号。Codex 0.157 起交互会话挂在共享的 app-server daemon 上，它只在启动时读一次 `auth.json`，所以 daemon 在运行时 `use` / `login` 会自动执行 `codex app-server daemon restart`（挂在上面的会话会重连到新账号，进行中的回合会被打断）；`codex exec` 或 `--no-daemon` 的进程不会读取新的 `auth.json`，需重启 Codex，或用 `launch` 开新进程（Codex 支持时 launch 会自动加 `--no-daemon`）。
+- `use` 不会后台自动换号。Codex 0.157 起交互会话挂在共享的 app-server daemon 上，它只在启动时读一次 `auth.json`，所以 daemon 在运行时 `use` / `login` 会自动执行 `codex app-server daemon restart`（挂在上面的会话会重连到新账号，进行中的回合会被打断；每次 daemon 调用最多等 15 秒，超时按重启失败提示。不想被打断可在 `config.toml` 设 `[use] restart_app_server = false` 或在 TUI 设置页关闭，此时只提示手动命令）；`codex exec` 或 `--no-daemon` 的进程不会读取新的 `auth.json`，需重启 Codex，或用 `launch` 开新进程（Codex 支持时 launch 会自动加 `--no-daemon`）。
 - Codex 参数写在 `--` 后面：`codex-switch launch work -- exec --json "…"`。`exec` / `resume` 等 Codex 子命令也可以直接跟在 `launch` 后面，不必再写 `--`。`--` 两侧的参数都会保留。prompt 看起来像别名时仍须 `--`。
 - 当前 Codex 没有 `--full-auto`；用 `-a never`、`--sandbox` 或 `--dangerously-bypass-approvals-and-sandbox`。
 - 池子耗尽时，交互式 `use` / `launch` 可提示消耗重置卡；脚本须显式加 `--consume-card`。

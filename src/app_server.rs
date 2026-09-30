@@ -7,8 +7,14 @@
 //! until the daemon is restarted. `codex exec` and `codex --no-daemon` run in
 //! process and read the file at startup, so they are not affected.
 
-use std::io;
+use std::io::{self, Read};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// Upper bound for each `codex app-server daemon …` call. A switch must not
+/// hang on a daemon that stops answering; the restart is then reported as
+/// failed with the manual command.
+const DAEMON_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What happened to the managed app-server daemon after the live `auth.json`
 /// changed.
@@ -20,6 +26,9 @@ pub enum DaemonRestart {
     /// change, so the daemon already holds it.
     Unchanged,
     Restarted,
+    /// The daemon is running but `use.restart_app_server = false` keeps it
+    /// untouched, so it still holds the previous account.
+    Disabled,
     /// The daemon is running but did not restart. The live `auth.json` is
     /// already switched, so this is a warning rather than a failed switch.
     Failed(String),
@@ -32,6 +41,9 @@ impl DaemonRestart {
             Self::NotRunning | Self::Unchanged => None,
             Self::Restarted => Some(format!(
                 "Restarted the Codex app-server daemon; new and reconnecting Codex sessions use '{alias}'."
+            )),
+            Self::Disabled => Some(format!(
+                "Note: the running Codex app-server daemon still holds the previous account (use.restart_app_server = false). Run `codex app-server daemon restart` so Codex sessions use '{alias}'."
             )),
             Self::Failed(detail) => Some(format!(
                 "Warning: the Codex app-server daemon still holds the previous account ({detail}). Run `codex app-server daemon restart` so Codex sessions use '{alias}'."
@@ -64,7 +76,7 @@ pub fn restart_daemon_if_live_auth_changed(before: &LiveAuthSnapshot) -> DaemonR
     if live_auth_unchanged(before, &snapshot_live_auth()) {
         return DaemonRestart::Unchanged;
     }
-    restart_daemon_if_running()
+    restart_daemon_if_running(crate::config::get().use_cfg.restart_app_server)
 }
 
 /// A missing or unreadable file before the change gives no evidence of what
@@ -76,20 +88,72 @@ fn live_auth_unchanged(before: &LiveAuthSnapshot, after: &LiveAuthSnapshot) -> b
 /// Restart the managed app-server daemon when one is running, so the next
 /// Codex session reads the switched `auth.json`. A daemon that is not running
 /// is left alone: Codex starts one on demand and it then loads the current file.
-fn restart_daemon_if_running() -> DaemonRestart {
+fn restart_daemon_if_running(allow_restart: bool) -> DaemonRestart {
     let Some(codex) = crate::launch::command_on_path("codex") else {
         tracing::debug!("codex not found in PATH; skipping app-server daemon restart");
         return DaemonRestart::NotRunning;
     };
-    restart_with(|args| {
-        Command::new(&codex)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
+    restart_with(allow_restart, |args| {
+        let mut command = Command::new(&codex);
+        command.args(args);
+        output_with_timeout(command, DAEMON_COMMAND_TIMEOUT)
     })
 }
 
-fn restart_with<F>(mut run_codex: F) -> DaemonRestart
+/// `Command::output` with a deadline: the child is killed once `timeout`
+/// passes and the call returns `TimedOut`.
+fn output_with_timeout(mut command: Command, timeout: Duration) -> io::Result<Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Drain both pipes on their own threads so a chatty child cannot block
+    // on a full pipe while it is being waited on.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("codex did not answer within {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+fn restart_with<F>(allow_restart: bool, mut run_codex: F) -> DaemonRestart
 where
     F: FnMut(&[&str]) -> io::Result<Output>,
 {
@@ -106,6 +170,9 @@ where
             tracing::debug!("could not query the Codex app-server daemon: {err}");
             return DaemonRestart::NotRunning;
         }
+    }
+    if !allow_restart {
+        return DaemonRestart::Disabled;
     }
 
     match run_codex(&["app-server", "daemon", "restart"]) {
@@ -136,10 +203,13 @@ fn failure_detail(output: &Output) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DaemonRestart, LiveAuthSnapshot, live_auth_unchanged, restart_with};
+    use super::{
+        DaemonRestart, LiveAuthSnapshot, live_auth_unchanged, output_with_timeout, restart_with,
+    };
     use std::cell::RefCell;
     use std::io;
-    use std::process::{ExitStatus, Output};
+    use std::process::{Command, ExitStatus, Output};
+    use std::time::{Duration, Instant};
 
     fn exit_status(code: i32) -> ExitStatus {
         #[cfg(unix)]
@@ -203,7 +273,7 @@ mod tests {
             Ok(output(0, r#"{"status":"restarted"}"#, "")),
         ]);
         assert_eq!(
-            restart_with(|args| codex.run(args)),
+            restart_with(true, |args| codex.run(args)),
             DaemonRestart::Restarted
         );
         assert_eq!(
@@ -220,7 +290,7 @@ mod tests {
             "Error: failed to connect to /home/u/.codex/app-server-control/app-server-control.sock",
         ))]);
         assert_eq!(
-            restart_with(|args| codex.run(args)),
+            restart_with(true, |args| codex.run(args)),
             DaemonRestart::NotRunning
         );
         assert_eq!(codex.calls(), vec![VERSION_ARGS.to_vec()]);
@@ -234,7 +304,7 @@ mod tests {
             "error: unrecognized subcommand 'daemon'",
         ))]);
         assert_eq!(
-            restart_with(|args| codex.run(args)),
+            restart_with(true, |args| codex.run(args)),
             DaemonRestart::NotRunning
         );
         assert_eq!(codex.calls(), vec![VERSION_ARGS.to_vec()]);
@@ -244,12 +314,12 @@ mod tests {
     fn version_that_does_not_report_running_is_left_alone() {
         let codex = FakeCodex::new(vec![Ok(output(0, r#"{"status":"notRunning"}"#, ""))]);
         assert_eq!(
-            restart_with(|args| codex.run(args)),
+            restart_with(true, |args| codex.run(args)),
             DaemonRestart::NotRunning
         );
         let codex = FakeCodex::new(vec![Ok(output(0, "not json", ""))]);
         assert_eq!(
-            restart_with(|args| codex.run(args)),
+            restart_with(true, |args| codex.run(args)),
             DaemonRestart::NotRunning
         );
     }
@@ -258,7 +328,7 @@ mod tests {
     fn unspawnable_codex_is_left_alone() {
         let codex = FakeCodex::new(vec![Err(io::Error::from(io::ErrorKind::NotFound))]);
         assert_eq!(
-            restart_with(|args| codex.run(args)),
+            restart_with(true, |args| codex.run(args)),
             DaemonRestart::NotRunning
         );
         assert_eq!(codex.calls(), vec![VERSION_ARGS.to_vec()]);
@@ -275,7 +345,7 @@ mod tests {
             )),
         ]);
         assert_eq!(
-            restart_with(|args| codex.run(args)),
+            restart_with(true, |args| codex.run(args)),
             DaemonRestart::Failed(
                 "Error: app server is running but is not managed by codex app-server daemon".into()
             )
@@ -289,7 +359,7 @@ mod tests {
     #[test]
     fn failed_restart_without_stderr_reports_the_exit_status() {
         let codex = FakeCodex::new(vec![Ok(output(0, RUNNING, "")), Ok(output(3, "", "  \n"))]);
-        let DaemonRestart::Failed(detail) = restart_with(|args| codex.run(args)) else {
+        let DaemonRestart::Failed(detail) = restart_with(true, |args| codex.run(args)) else {
             panic!("a failed restart must be reported");
         };
         assert!(detail.contains('3'), "{detail}");
@@ -301,7 +371,46 @@ mod tests {
             Ok(output(0, RUNNING, "")),
             Err(io::Error::from(io::ErrorKind::PermissionDenied)),
         ]);
-        assert!(restart_with(|args| codex.run(args)).is_failure());
+        assert!(restart_with(true, |args| codex.run(args)).is_failure());
+    }
+
+    #[test]
+    fn disabled_restart_only_probes_the_daemon() {
+        let codex = FakeCodex::new(vec![Ok(output(0, RUNNING, ""))]);
+        assert_eq!(
+            restart_with(false, |args| codex.run(args)),
+            DaemonRestart::Disabled
+        );
+        assert_eq!(codex.calls(), vec![VERSION_ARGS.to_vec()]);
+        let note = DaemonRestart::Disabled.message("work").unwrap();
+        assert!(note.contains("codex app-server daemon restart"), "{note}");
+        assert!(!DaemonRestart::Disabled.is_failure());
+    }
+
+    #[test]
+    fn stopped_daemon_is_not_reported_when_restart_is_disabled() {
+        let codex = FakeCodex::new(vec![Ok(output(1, "", "Error: failed to connect"))]);
+        assert_eq!(
+            restart_with(false, |args| codex.run(args)),
+            DaemonRestart::NotRunning
+        );
+    }
+
+    #[test]
+    fn hung_codex_is_killed_at_the_deadline() {
+        let command = if cfg!(windows) {
+            let mut c = Command::new("powershell.exe");
+            c.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+            c
+        } else {
+            let mut c = Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        let started = Instant::now();
+        let err = output_with_timeout(command, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

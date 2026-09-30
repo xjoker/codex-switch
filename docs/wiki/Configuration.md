@@ -64,10 +64,13 @@ auto_refresh_interval_secs = 300   # minimum 30; lower values are raised to 30
 [use]
 safety_margin_7d = 20              # 7d headroom % below which scoring penalizes
 team_priority = true               # prefer Team-plan accounts during selection
+restart_app_server = true          # restart a running Codex app-server daemon after the live auth.json changes
 
 [launch]
 restore_delay_secs = 3             # seconds before restoring auth.json after launch
 ```
+
+`use.restart_app_server` controls what `use`, `login`, and the TUI switch do when the live `auth.json` changed and a Codex app-server daemon (Codex 0.157+) is running. With `true`, codex-switch runs `codex app-server daemon restart` so new sessions use the switched account; sessions attached to the daemon reconnect, and a turn in progress is interrupted. With `false`, the daemon is left alone and a note shows the manual command. Each daemon call is bounded to 15 seconds; a daemon that does not answer is reported as a failed restart and never fails the switch.
 
 `launch.restore_delay_secs` is a compatibility delay, not a handshake; increase it only if the local Codex process reads authentication later than three seconds after launch.
 

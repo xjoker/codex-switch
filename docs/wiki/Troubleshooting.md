@@ -89,6 +89,8 @@ Codex 0.157 and newer attaches interactive sessions to a shared local app-server
 codex app-server daemon restart
 ```
 
+Set `use.restart_app_server = false` in `config.toml` (or toggle it in the TUI Settings tab) to keep switches from interrupting sessions attached to the daemon; the switch then only prints the manual command. A daemon command that does not answer within 15 seconds is reported as a failed restart.
+
 `codex --no-daemon` and `codex exec` run in process and read `auth.json` when they start. `codex app-server daemon version` shows whether a managed daemon is running.
 
 ## Report an issue

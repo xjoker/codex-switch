@@ -2156,6 +2156,12 @@ impl App {
                         status.push_str("; app-server daemon restarted");
                         self.set_status(status, seconds.max(5));
                     }
+                    DaemonRestart::Disabled => {
+                        status.push_str(
+                            "; app-server daemon still holds the previous account (auto-restart off) -- run `codex app-server daemon restart`",
+                        );
+                        self.set_status(status, seconds.max(8));
+                    }
                     DaemonRestart::Failed(detail) => {
                         tracing::warn!(
                             action = "switch",
