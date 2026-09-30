@@ -44,7 +44,7 @@ codex-switch launch       # 用最佳账号启动 Codex
 ## 功能一览
 
 - 保存、导入、重命名、切换和可恢复地删除 Codex 账号。
-- 保存自定义 API 提供方（OpenRouter 等兼容 Responses 协议的接口）：一个端点可配置多个模型，思考等级与 `web_search` 按模型保存；TUI Providers 页用同一张表单新增/编辑（`a` / `e`），`Enter` / `o` 启动 Codex。通过 `launch` 启动，不写入 `~/.codex`：
+- 保存自定义 API 提供方（OpenRouter 等兼容 Responses 协议的接口）：一个端点可配置多个模型，思考等级与 `web_search` 按模型保存；TUI Providers 页用同一张表单新增/编辑（`a` / `e`），`Enter` / `o` 启动 Codex。通过 `launch` 启动，使用 Codex 原生的每次运行独立 profile（`$CODEX_HOME` 中的 `cs-*.config.toml`），共享认证与 ChatGPT 配置保持不变：
 
   ```bash
   codex-switch provider add openrouter \
@@ -56,6 +56,7 @@ codex-switch launch       # 用最佳账号启动 Codex
   ```
 - CLI 与 TUI 展示主额度池和每个模型的独立额度池。
 - 自适应配速感知评分自动选号，并可直接用它启动 Codex。
+- 切换账号后（`use`、TUI 的 `u`，或会激活凭据的 `login`），若 Codex app-server daemon（Codex 0.157+）正在运行，会执行 `codex app-server daemon restart`，让新会话使用所选账号；可用 `[use] restart_app_server = false` 关闭。ChatGPT 的 `launch` 在 Codex 支持时改为附加 `--no-daemon`。
 - 支持重置卡、一次性配额预热（`warmup`）、强制刷新额度（`list -f`）、JSON 输出和代理。TUI 的 Accounts 页在未勾选账号时用 `u` 切换选中账号并显示进度，`t` 开启当前会话自动刷新，账号菜单中的 `w` 执行一次性预热；不运行常驻服务。
 - 自动刷新即将过期的 Token；直装版本自更新：`self-update`、`self-update --stable`、`self-update --version <VERSION>`，或用 `self-update --dev` 切换滚动开发通道 — 新装开发版使用 dev release 的 [install.sh](https://github.com/xjoker/codex-switch/releases/download/dev/install.sh) / [install.ps1](https://github.com/xjoker/codex-switch/releases/download/dev/install.ps1)。
 - 直装版 `self-update` 同时校验 SHA-256 与 GitHub 构建来源，执行时会调用 `gh attestation verify`；使用前需安装当前版 [GitHub CLI](https://cli.github.com/)。
