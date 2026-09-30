@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v20260930.4.0 (candidate) — 2026-09-30
+
+- **One CLI error per failure** — Failed commands retain a diagnostic event in the file log while printing the error only once to the terminal or JSON output, including with `--debug` or `RUST_LOG` enabled.
+- **Windows debug logging no longer hangs** — File-log permission checks no longer recursively log while holding the log writer lock, avoiding a deadlock with `--debug` or verbose `RUST_LOG`.
+- **Actionable credential-conflict recovery** — A conflicting local `auth.json` now suggests `use <alias>` to select the saved credentials or `login <alias>` to obtain new ones. It no longer recommends deleting a profile that may be active; active-profile deletion and credential rollback protections remain in place.
+- **Provider URL preflight** — `provider add` validates the base URL and HTTP opt-in before reading the API key, including when fetching models. The TUI applies the same URL check before checking the key.
+- **Lossless TUI config overrides** — Extra `-c` accepts a JSON array of `KEY=VALUE` strings, or one literal `KEY=VALUE` entry. Editing saved overrides preserves commas, equals signs, quotes and nested values; malformed arrays are rejected before save or model fetch. Multiple entries now use the array format instead of comma separation.
+
 ## v20260930.3.0 (candidate) — 2026-09-30
 
 - **Token refresh keeps rotated credentials** — The identity check after a token refresh now refuses only a different account. A refreshed token that gains an email or account id, or a changed email on the same account id, is persisted instead of discarded, so it no longer strands the already-rotated refresh token and forces a re-login.

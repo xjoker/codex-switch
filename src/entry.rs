@@ -5,6 +5,10 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+// These events retain command failures in file/TUI history. The CLI already
+// renders the same error as a human message or JSON, including in debug mode.
+const REPORTED_ERROR_TARGET: &str = "codex_switch::reported_error";
+
 struct LogFilters {
     stderr: EnvFilter,
     file: EnvFilter,
@@ -102,7 +106,10 @@ pub async fn run_cli() {
         let stderr_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(std::io::stderr)
-            .with_filter(filters.stderr);
+            .with_filter(filters.stderr)
+            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.target() != REPORTED_ERROR_TARGET
+            }));
         let file_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(file_writer)
@@ -116,7 +123,10 @@ pub async fn run_cli() {
         let stderr_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(std::io::stderr)
-            .with_filter(filters.stderr);
+            .with_filter(filters.stderr)
+            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.target() != REPORTED_ERROR_TARGET
+            }));
         tracing_subscriber::registry().with(stderr_layer).init();
     }
     for warning in config::startup_warnings() {
@@ -128,7 +138,7 @@ pub async fn run_cli() {
 
     if let Err(e) = result {
         if should_report_error(&e) {
-            tracing::error!(error = %format!("{e:#}"), "command failed");
+            tracing::error!(target: REPORTED_ERROR_TARGET, error = %format!("{e:#}"), "command failed");
             if use_json {
                 print_error(&format!("{e:#}"));
             } else {

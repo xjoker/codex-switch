@@ -766,7 +766,7 @@ impl ProviderProfile {
     }
 }
 
-fn validate_base_url(base_url: &str, allow_insecure_http: bool) -> Result<()> {
+pub(crate) fn validate_base_url(base_url: &str, allow_insecure_http: bool) -> Result<()> {
     let url = reqwest::Url::parse(base_url).context("base_url must be a valid URL")?;
     match url.scheme() {
         "https" => Ok(()),

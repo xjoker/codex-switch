@@ -119,6 +119,8 @@ Do not commit credentials in configuration files.
 
 Commands write best-effort diagnostic events to `$CODEX_SWITCH_HOME/logs/`, one file per calendar day, keeping 3 days and an approximately 10 MiB total target; concurrent processes can temporarily exceed that target. The TUI keeps `INFO` and above in its Logs tab and in its file log, while ordinary CLI stderr remains `ERROR` by default. `--debug` wins over `RUST_LOG`.
 
+Command failures are reported once: a human-readable error on stderr, or an error object on stdout with `--json`. The corresponding failure event stays in file logs and is excluded from CLI stderr even with `--debug` or `RUST_LOG`, so diagnostics do not duplicate the error message.
+
 ## Platform integration
 
 There is no project-managed service integration. A user may schedule `list --force`, `warmup`, or another explicit CLI operation with the platform scheduler; task installation, environment variables, output handling, and removal remain under the user's control. See the [OS scheduling examples](Feature-Guide#optional-os-scheduling).

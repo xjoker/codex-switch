@@ -73,6 +73,7 @@ async fn add(
         anyhow::bail!("pass --model ID or --fetch-models");
     }
 
+    provider::validate_base_url(&base_url, allow_insecure_http)?;
     let api_key = read_api_key(&alias, api_key_stdin)?;
 
     let mut fetched_default = None;

@@ -265,12 +265,19 @@ impl Write for LogFile {
         let now = Instant::now();
         let run_maintenance =
             maintenance_due(state.last_maintenance, now, state.bytes_since_maintenance);
-        append_log(
-            &state.dir,
-            Local::now().date_naive(),
-            retained,
-            run_maintenance,
-        )?;
+        // File maintenance can harden permissions through helpers that emit
+        // tracing events. Suppress those events here: this writer already holds
+        // its state lock, so dispatching them normally would re-enter this writer
+        // and deadlock before the original record can finish.
+        let no_dispatch = tracing::Dispatch::none();
+        tracing::dispatcher::with_default(&no_dispatch, || {
+            append_log(
+                &state.dir,
+                Local::now().date_naive(),
+                retained,
+                run_maintenance,
+            )
+        })?;
         if run_maintenance {
             state.last_maintenance = Some(now);
             state.bytes_since_maintenance = 0;

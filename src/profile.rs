@@ -889,14 +889,11 @@ impl std::fmt::Display for StaleLiveAuth {
         write!(
             f,
             "refusing to overwrite profile '{}': the incoming credentials carry a different \
-             refresh_token and cannot be shown to be the newer of the two \
-             (incoming: {}; profile: {}). Refresh tokens are single-use, so the older copy is \
-             already revoked and overwriting would destroy the working one. Choose a side \
-             explicitly: `codex-switch use {}` keeps the profile's credentials and pushes them \
-             back into the live auth.json, after which the two agree again; \
-             `codex-switch delete {}` followed by `codex-switch import <path to auth.json> {}` \
-             keeps the incoming ones.",
-            self.alias, self.live, self.profile, self.alias, self.alias, self.alias
+             refresh_token and cannot be shown to be newer (incoming: {}; profile: {}). The \
+             different tokens do not establish which credentials are usable, so overwriting \
+             could discard the working credentials. Recover by choosing the saved credentials \
+             with `codex-switch use {}`, or obtain new credentials with `codex-switch login {}`.",
+            self.alias, self.live, self.profile, self.alias, self.alias
         )
     }
 }
@@ -905,10 +902,10 @@ impl std::error::Error for StaleLiveAuth {}
 
 /// Refuse to replace a profile's `refresh_token` with one that cannot be proven newer.
 ///
-/// OpenAI rotates `refresh_token` on every use: of two different tokens for the
-/// same account, exactly one is still usable and the other is already dead.
-/// Picking wrong is unrecoverable without a full re-login, so the guard demands
-/// positive evidence before letting a rotation through.
+/// OpenAI may rotate `refresh_token` during refresh, but two different tokens
+/// alone do not establish which credentials remain usable. Picking wrong can
+/// lose working credentials, so the guard demands positive evidence before
+/// letting a rotation through.
 ///
 /// `last_refresh` is only weak evidence — it is wall-clock, second-resolution,
 /// and moves backwards on NTP corrections — so it is allowed to decide only when
@@ -2563,8 +2560,8 @@ mod tests {
             .unwrap_or_else(|| panic!("the refusal must stay downcastable, got: {err:#}"));
         assert_eq!(stale.alias, "alice");
         assert!(
-            err.to_string().contains("older"),
-            "error must explain the inverted direction, got: {err}"
+            err.to_string().contains("cannot be shown to be newer"),
+            "error must explain why the incoming credentials cannot replace the profile, got: {err}"
         );
         assert_eq!(profile_refresh_token("alice"), "ref_new");
         assert_eq!(
@@ -3169,6 +3166,44 @@ mod tests {
         let inferred = cmd_save(None).expect_err("the inferred target must not skip the guard");
         assert_rollback_refusal(&inferred);
         assert_eq!(profile_refresh_token("alice"), "ref_new");
+    }
+
+    #[test]
+    fn stale_active_profile_guidance_offers_working_recovery_commands() {
+        let _env = TestEnv::new();
+        seed_profile_ahead_of_live();
+        super::write_current("alice").unwrap();
+        let error = super::update_profile_from_live("alice").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("codex-switch use alice"), "{message}");
+        assert!(message.contains("codex-switch login alice"), "{message}");
+        assert!(!message.contains("codex-switch delete"), "{message}");
+        assert!(super::cmd_delete("alice").is_err());
+
+        // The suggested use path can recover the active profile without deleting it.
+        super::switch_profile("alice").unwrap();
+        assert!(matches!(
+            super::detect_auth_change(),
+            super::AuthChange::NoChange
+        ));
+        assert_eq!(profile_refresh_token("alice"), "ref_new");
+
+        // Re-login also replaces an active profile even when timestamps cannot be ordered.
+        seed_profile_ahead_of_live();
+        let fresh = stamped_auth_json(
+            "alice@example.com",
+            "acct_a",
+            "acc_login",
+            "ref_login",
+            None,
+        );
+        assert!(super::replace_profile_auth_and_live_if_current("alice", &fresh).unwrap());
+        assert_eq!(profile_refresh_token("alice"), "ref_login");
+        assert_eq!(
+            crate::auth::read_auth(&crate::auth::codex_auth_path().unwrap()).unwrap(),
+            fresh
+        );
+        assert_eq!(super::read_current(), "alice");
     }
 
     #[test]

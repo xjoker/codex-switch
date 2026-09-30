@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -160,6 +161,129 @@ fn run(home: &Path, args: &[&str]) -> Output {
     command(home, args).output().unwrap()
 }
 
+#[test]
+fn command_failure_is_reported_once_and_kept_in_file_logs() {
+    for json in [false, true] {
+        for logging in ["default", "debug", "rust-log"] {
+            let home = tempfile::tempdir().unwrap();
+            let mut args = vec!["--color", "never"];
+            if json {
+                args.push("--json");
+            }
+            if logging == "debug" {
+                args.push("--debug");
+            }
+            args.extend(["provider", "show", "missing"]);
+            let mut cmd = command(home.path(), &args);
+            cmd.env_remove("RUST_LOG");
+            if logging == "rust-log" {
+                cmd.env("RUST_LOG", "codex_switch=trace");
+            }
+            let output = output_with_timeout(&mut cmd, Duration::from_secs(15));
+            assert!(!output.status.success());
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let error = if json {
+                let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(report["ok"], false);
+                assert!(!stderr.contains("not found"), "{stderr}");
+                report["error"].as_str().unwrap().to_string()
+            } else {
+                assert!(output.stdout.is_empty());
+                assert_eq!(stderr.matches("Error: ").count(), 1, "{stderr}");
+                assert_eq!(stderr.matches("not found").count(), 1, "{stderr}");
+                stderr
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Error: "))
+                    .unwrap()
+                    .to_string()
+            };
+            assert!(!stderr.contains("command failed"), "{stderr}");
+            let logs = fs::read_dir(home.path().join(".codex-switch/logs"))
+                .unwrap()
+                .filter_map(|entry| fs::read_to_string(entry.unwrap().path()).ok())
+                .collect::<String>();
+            assert!(logs.contains("command failed"), "{logs}");
+            assert!(logs.contains(&error), "{logs}");
+        }
+    }
+}
+
+#[test]
+fn provider_add_validates_url_before_reading_the_key() {
+    for model_arg in ["--model", "--fetch-models"] {
+        for stdin_mode in [false, true] {
+            for (url, expected) in [
+                ("http://example.invalid/v1", "base_url must use https"),
+                ("not-a-url", "base_url must be a valid URL"),
+                (
+                    "ftp://example.invalid/v1",
+                    "base_url must use http or https",
+                ),
+            ] {
+                let home = tempfile::tempdir().unwrap();
+                let mut args = vec![
+                    "--json",
+                    "provider",
+                    "add",
+                    "demo",
+                    "--base-url",
+                    url,
+                    model_arg,
+                ];
+                if model_arg == "--model" {
+                    args.push("test-model");
+                }
+                if stdin_mode {
+                    args.push("--api-key-stdin");
+                }
+                let output = command(home.path(), &args)
+                    .stdin(Stdio::null())
+                    .output()
+                    .unwrap();
+                assert!(!output.status.success());
+                let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert!(
+                    report["error"].as_str().unwrap().contains(expected),
+                    "{report}"
+                );
+                assert!(!home.path().join(".codex-switch/providers/demo").exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn provider_add_with_http_opt_in_reaches_key_input() {
+    let home = tempfile::tempdir().unwrap();
+    let output = command(
+        home.path(),
+        &[
+            "--json",
+            "provider",
+            "add",
+            "demo",
+            "--base-url",
+            "http://example.invalid/v1",
+            "--model",
+            "test-model",
+            "--allow-insecure-http",
+            "--api-key-stdin",
+        ],
+    )
+    .stdin(Stdio::null())
+    .output()
+    .unwrap();
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("API key cannot be empty"),
+        "{report}"
+    );
+}
+
 fn run_with_env(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
     let mut cmd = command(home, args);
     for (key, value) in envs {
@@ -169,18 +293,39 @@ fn run_with_env(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
 }
 
 fn run_with_timeout(home: &Path, args: &[&str], timeout: Duration) -> Output {
-    let mut child = command(home, args).spawn().unwrap();
+    output_with_timeout(&mut command(home, args), timeout)
+}
+
+fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> Output {
+    let mut child = cmd.spawn().unwrap();
+    // Drain both pipes while waiting so verbose diagnostics cannot fill a pipe
+    // and make an otherwise healthy process appear to hang.
+    let read_pipe = |mut pipe: Box<dyn Read + Send>| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    };
+    let stdout = read_pipe(Box::new(child.stdout.take().unwrap()));
+    let stderr = read_pipe(Box::new(child.stderr.take().unwrap()));
     let start = std::time::Instant::now();
 
     loop {
-        if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
+        if let Some(status) = child.try_wait().unwrap() {
+            return Output {
+                status,
+                stdout: stdout.join().unwrap(),
+                stderr: stderr.join().unwrap(),
+            };
         }
 
         if start.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("command timed out: {:?}", args);
+            stdout.join().unwrap();
+            stderr.join().unwrap();
+            panic!("command timed out: {cmd:?}");
         }
 
         thread::sleep(Duration::from_millis(20));

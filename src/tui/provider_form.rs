@@ -7,8 +7,10 @@
 //! Long catalogs pin Alias…Extra and the help line; only the model viewport
 //! scrolls, and it follows the cursor.
 //! `+` adds and `d`/`-` remove from navigation mode. `f` GETs `{base_url}/models`
-//! and fills chat slugs (embedding/reranker omitted). Catalogs larger than 48
-//! open a picker (`space` toggle, `/` filter, Enter apply). Edit starts on Base URL
+//! and fills chat slugs (embedding/reranker omitted). Extra `-c` accepts one
+//! raw `KEY=VALUE` or a JSON string array for multiple overrides. Catalogs larger
+//! than 48 open a picker (`space` toggle, `/` filter, Enter apply). Edit starts
+//! on Base URL
 //! so `s` is save, not a character.
 
 use crossterm::event::KeyCode;
@@ -240,7 +242,11 @@ impl ProviderFormState {
             metadata_fallback: profile.metadata_fallback.clone(),
             env_key: profile.env_key.clone(),
             wire_api: profile.wire_api.clone(),
-            extra_sets: profile.codex_config.join(", "),
+            extra_sets: if profile.codex_config.is_empty() {
+                String::new()
+            } else {
+                serde_json::to_string(&profile.codex_config).expect("string overrides serialize")
+            },
             models: if models.is_empty() {
                 vec![empty_model_draft()]
             } else {
@@ -657,10 +663,17 @@ impl ProviderFormState {
 
     fn fetch_from_gateway(&mut self) {
         let url = self.base_url.trim();
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            self.error = Some("Base URL must start with http:// or https://".into());
+        if let Err(err) = crate::provider::validate_base_url(url, !self.require_https) {
+            self.error = Some(err.to_string());
             return;
         }
+        let config = match parse_extra_sets(&self.extra_sets) {
+            Ok(config) => config,
+            Err(err) => {
+                self.error = Some(err);
+                return;
+            }
+        };
         let key = if !self.api_key.trim().is_empty() {
             self.api_key.trim()
         } else if self.mode == FormMode::Edit && !self.original_key.trim().is_empty() {
@@ -675,7 +688,6 @@ impl ProviderFormState {
         } else {
             self.env_key.trim().to_string()
         };
-        let config = parse_extra_sets(&self.extra_sets);
         let wire_api = if self.wire_api.trim().is_empty() {
             "responses"
         } else {
@@ -1058,9 +1070,9 @@ impl ProviderFormState {
                 return Err(format!("'{alias}' already names a ChatGPT profile"));
             }
         }
-        if !(self.base_url.starts_with("http://") || self.base_url.starts_with("https://")) {
-            return Err("Base URL must start with http:// or https://".into());
-        }
+        crate::provider::validate_base_url(self.base_url.trim(), !self.require_https)
+            .map_err(|err| err.to_string())?;
+        let codex_config = parse_extra_sets(&self.extra_sets)?;
         let api_key = if self.api_key.trim().is_empty() {
             if self.mode == FormMode::Edit {
                 self.original_key.clone()
@@ -1104,7 +1116,7 @@ impl ProviderFormState {
         if !wire_api.is_empty() {
             profile.wire_api = wire_api.to_string();
         }
-        profile.codex_config = parse_extra_sets(&self.extra_sets);
+        profile.codex_config = codex_config;
         profile
             .validate()
             .map_err(|err| err.to_string())
@@ -1112,41 +1124,16 @@ impl ProviderFormState {
     }
 }
 
-fn parse_extra_sets(raw: &str) -> Vec<String> {
-    let mut entries = Vec::new();
-    let mut current = String::new();
-    for part in raw.split(',') {
-        let trimmed = part.trim();
-        if current.is_empty() {
-            if !trimmed.is_empty() {
-                current = trimmed.to_string();
-            }
-            continue;
-        }
-        if looks_like_override_start(trimmed) {
-            entries.push(std::mem::take(&mut current));
-            current = trimmed.to_string();
-        } else {
-            current.push(',');
-            current.push_str(part);
-        }
+fn parse_extra_sets(raw: &str) -> Result<Vec<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
     }
-    if !current.is_empty() {
-        entries.push(current);
+    if trimmed.starts_with('[') {
+        return serde_json::from_str::<Vec<String>>(trimmed)
+            .map_err(|err| format!("Extra -c must be a JSON array of strings: {err}"));
     }
-    entries
-}
-
-fn looks_like_override_start(s: &str) -> bool {
-    let Some((key, _)) = s.split_once('=') else {
-        return false;
-    };
-    let mut chars = key.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    Ok(vec![trimmed.to_string()])
 }
 
 fn char_to_byte(s: &str, char_pos: usize) -> usize {
@@ -1428,7 +1415,7 @@ pub fn render_provider_form(
             field_value(form, Focus::Extra, &form.extra_sets, false),
             extra_style,
         ),
-        Span::styled("  (KEY=VALUE, comma-separated)", dim()),
+        Span::styled("  (KEY=VALUE or JSON string array)", dim()),
     ]));
     hits.push(Some(OverlayClick::ProviderField(ProviderField::Extra)));
     lines.push(Line::from(""));
@@ -1718,7 +1705,7 @@ mod tests {
         assert!(
             form.error
                 .as_deref()
-                .is_some_and(|e| e.contains("http://") || e.contains("https://")),
+                .is_some_and(|e| e.contains("base_url must use http or https")),
             "error was {:?}",
             form.error
         );
@@ -1849,7 +1836,7 @@ mod tests {
         assert_eq!(tab.focus, Focus::WireApi);
         tab.handle_key(KeyCode::Tab);
         assert_eq!(tab.focus, Focus::Extra);
-        type_into(&mut tab, "temperature=0, foo=a, b");
+        type_into(&mut tab, r#"["temperature=0","foo=a, b"]"#);
         tab.handle_key(KeyCode::Tab);
         assert_eq!(tab.focus, Focus::Models);
         type_into(&mut tab, "m");
@@ -1866,15 +1853,58 @@ mod tests {
     }
 
     #[test]
-    fn parse_extra_sets_keeps_commas_inside_a_value() {
+    fn parse_extra_sets_accepts_json_array_or_single_override() {
         assert_eq!(
-            super::parse_extra_sets("temperature=0, foo=a, b, bar=1"),
+            super::parse_extra_sets(r#"["temperature=0","foo=a, b","bar=1"]"#).unwrap(),
             ["temperature=0", "foo=a, b", "bar=1"]
         );
-        assert_eq!(super::parse_extra_sets("  "), Vec::<String>::new());
+        assert_eq!(super::parse_extra_sets("  ").unwrap(), Vec::<String>::new());
         assert_eq!(
-            super::parse_extra_sets("sandbox_permissions=[\"a\",\"b\"]"),
-            [r#"sandbox_permissions=["a","b"]"#]
+            super::parse_extra_sets("instructions=first, second=value").unwrap(),
+            ["instructions=first, second=value"]
+        );
+        assert!(super::parse_extra_sets(r#"["ok", 1]"#).is_err());
+        assert!(super::parse_extra_sets("[broken").is_err());
+    }
+
+    #[test]
+    fn invalid_extra_json_blocks_save_and_gateway_fetch_before_key_check() {
+        let _home = EnvHome::new();
+        for invalid in ["[broken", r#"["ok", 1]"#] {
+            let mut form = ProviderFormState::add();
+            form.alias = "invalid-extra".into();
+            form.base_url = "https://example.invalid/v1".into();
+            form.extra_sets = invalid.into();
+
+            let save_error = form.build_profile().unwrap_err();
+            assert!(save_error.contains("JSON array of strings"), "{save_error}");
+
+            form.fetch_from_gateway();
+            assert!(
+                form.error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("JSON array of strings")),
+                "{:?}",
+                form.error
+            );
+        }
+    }
+
+    #[test]
+    fn http_is_rejected_before_empty_key_on_save_and_gateway_fetch() {
+        let _home = EnvHome::new();
+        let mut form = ProviderFormState::add();
+        form.alias = "insecure".into();
+        form.base_url = "http://example.invalid/v1".into();
+
+        let save_error = form.build_profile().unwrap_err();
+        assert!(save_error.contains("https"), "{save_error}");
+
+        form.fetch_from_gateway();
+        assert!(
+            form.error.as_deref().is_some_and(|e| e.contains("https")),
+            "{:?}",
+            form.error
         );
     }
 
@@ -2220,6 +2250,51 @@ mod tests {
     }
 
     #[test]
+    fn extra_overrides_round_trip_without_splitting_values() {
+        let _home = EnvHome::new();
+        let mut original = ProviderProfile::build(
+            "commas",
+            "https://example.invalid/v1",
+            vec![ProviderModel::from_id("m")],
+            "sk-test",
+        );
+        original.codex_config = vec![
+            "instructions=first, second=value, third=你好".into(),
+            r#"settings={ a = 1, b = ["x,y", "z=w"] }"#.into(),
+            "trailing=value, ".into(),
+            "quoted=\"line\\nwith \\\"quotes\\\"\"".into(),
+        ];
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Extra;
+        form.handle_key(KeyCode::Enter);
+        form.handle_key(KeyCode::Enter);
+        let FormOutcome::Saved { profile, .. } = form.handle_key(KeyCode::Char('s')) else {
+            panic!("edit should save; error={:?}", form.error);
+        };
+        assert_eq!(profile.codex_config, original.codex_config);
+    }
+
+    #[test]
+    fn extra_single_override_keeps_comma_followed_by_assignment() {
+        let _home = EnvHome::new();
+        let original = ProviderProfile::build(
+            "commas",
+            "https://example.invalid/v1",
+            vec![ProviderModel::from_id("m")],
+            "sk-test",
+        );
+        let mut form = ProviderFormState::edit(&original);
+        form.focus = Focus::Extra;
+        form.handle_key(KeyCode::Enter);
+        type_into(&mut form, "instructions=first, second=value");
+        form.handle_key(KeyCode::Enter);
+        let FormOutcome::Saved { profile, .. } = form.handle_key(KeyCode::Char('s')) else {
+            panic!("edit should save; error={:?}", form.error);
+        };
+        assert_eq!(profile.codex_config, ["instructions=first, second=value"]);
+    }
+
+    #[test]
     fn fetch_fills_chat_slugs_and_drops_embeddings() {
         let original = ProviderProfile::build(
             "demo",
@@ -2425,7 +2500,7 @@ mod tests {
         assert!(
             form.error
                 .as_deref()
-                .is_some_and(|e| e.contains("Base URL")),
+                .is_some_and(|e| e.contains("base_url")),
             "error was {:?}",
             form.error
         );
