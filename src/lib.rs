@@ -8,6 +8,7 @@
 mod entry;
 pub use entry::run_cli;
 
+pub mod app_server;
 pub mod auth;
 #[allow(dead_code)]
 mod cache;

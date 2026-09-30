@@ -181,6 +181,7 @@ async fn launch_interactive(
     }
 
     let codex_command = ensure_codex_available()?;
+    let forwarded = embedded_codex_argv(codex_supports_no_daemon(&codex_command), forwarded);
 
     let codex_auth = auth::codex_auth_path()?;
     // Unique per-invocation backup name (PID + timestamp): prevents two
@@ -388,6 +389,39 @@ pub(crate) fn chatgpt_codex_argv(
         }
     }
     splice_after_subcommand(extra, passthrough)
+}
+
+/// Keep a launched ChatGPT session on the staged `auth.json`.
+///
+/// Codex 0.157 and newer attaches an interactive session to the shared
+/// app-server daemon, which keeps the account it loaded when it started, so
+/// the staged credentials would never be read. `--no-daemon` runs the session
+/// in process instead. It is a root option, so it goes before any subcommand.
+/// An argv that already picks its server (`--no-daemon`, `--remote`, or the
+/// daemon-only `agents` command) is left alone.
+pub(crate) fn embedded_codex_argv(supports_no_daemon: bool, mut argv: Vec<String>) -> Vec<String> {
+    if supports_no_daemon && !argv.iter().any(|arg| picks_app_server(arg)) {
+        argv.insert(0, "--no-daemon".to_string());
+    }
+    argv
+}
+
+fn picks_app_server(arg: &str) -> bool {
+    arg == "--no-daemon" || arg == "--remote" || arg.starts_with("--remote=") || arg == "agents"
+}
+
+/// `--no-daemon` exists since Codex 0.156; an older Codex rejects unknown
+/// options, so its root help decides whether the flag can be passed.
+fn codex_supports_no_daemon(command: &std::path::Path) -> bool {
+    std::process::Command::new(command)
+        .arg("--help")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("--no-daemon")
+        })
 }
 
 /// Codex argv for a provider `launch`. Codex 0.149 applies `-c` on the
@@ -676,7 +710,7 @@ fn ensure_codex_available() -> Result<std::path::PathBuf> {
     })
 }
 
-fn command_on_path(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn command_on_path(name: &str) -> Option<std::path::PathBuf> {
     let paths = std::env::var_os("PATH")?;
     let candidates = if cfg!(windows) {
         vec![
@@ -1441,7 +1475,7 @@ mod tests {
     use std::sync::MutexGuard;
 
     use super::{
-        chatgpt_codex_argv, displayed_selection_index, ensure_codex_available,
+        chatgpt_codex_argv, displayed_selection_index, embedded_codex_argv, ensure_codex_available,
         passthrough_model_value, provider_codex_argv, restore_launch_auth,
         resume_flag_before_separator, resume_positional_indices, rewrite_provider_resume_args,
         shutdown_outcome,
@@ -1452,6 +1486,38 @@ mod tests {
     use super::spawn_codex;
     #[cfg(unix)]
     use super::{CodexPipes, backup_launch_auth, terminate_child};
+
+    #[test]
+    fn embedded_argv_runs_codex_without_the_shared_daemon() {
+        let argv = ["exec", "--json", "review"].map(str::to_string).to_vec();
+        assert_eq!(
+            embedded_codex_argv(true, argv.clone()),
+            ["--no-daemon", "exec", "--json", "review"].map(str::to_string)
+        );
+        assert_eq!(embedded_codex_argv(false, argv.clone()), argv);
+        assert_eq!(
+            embedded_codex_argv(true, Vec::new()),
+            ["--no-daemon"].map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn embedded_argv_respects_an_explicit_server_choice() {
+        for argv in [
+            vec!["--no-daemon", "exec", "review"],
+            vec!["--remote", "ws://127.0.0.1:1"],
+            vec!["--remote=ws://127.0.0.1:1"],
+            vec!["agents"],
+        ] {
+            let argv: Vec<String> = argv.into_iter().map(str::to_string).collect();
+            assert_eq!(embedded_codex_argv(true, argv.clone()), argv);
+        }
+        // A prompt that mentions agents is still a prompt.
+        assert_eq!(
+            embedded_codex_argv(true, vec!["list agents".to_string()]),
+            ["--no-daemon", "list agents"].map(str::to_string)
+        );
+    }
 
     #[test]
     fn provider_session_picker_uses_one_based_bounded_positions() {

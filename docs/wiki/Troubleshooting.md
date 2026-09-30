@@ -81,6 +81,16 @@ The base directory is `~/.codex-switch`, `%USERPROFILE%\.codex-switch` on Window
 
 If a reset-card request reports that consumption may have occurred, do not immediately retry. Refresh the account state and verify the card count and quota first. This warning means the request reached the service but the client could not prove the final result.
 
+## Codex keeps using the previous account after `use`
+
+Codex 0.157 and newer attaches interactive sessions to a shared local app-server daemon that loads `auth.json` once. `use` and `login` restart that daemon when it is running and print the outcome. If the restart was refused (for example, the running app server is not managed by `codex app-server daemon`), restart it yourself:
+
+```bash
+codex app-server daemon restart
+```
+
+`codex --no-daemon` and `codex exec` run in process and read `auth.json` when they start. `codex app-server daemon version` shows whether a managed daemon is running.
+
 ## Report an issue
 
 Include the operating system, terminal, `codex-switch --version`, exact command, expected behavior, actual behavior, and redacted diagnostic output. Use the [GitHub issue tracker](https://github.com/xjoker/codex-switch/issues).

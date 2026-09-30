@@ -70,7 +70,7 @@ Selection has two phases:
 
 If every account is ineligible, the best fallback is reported instead of pretending an account is healthy.
 
-Switching replaces the live `$CODEX_HOME/auth.json` atomically while holding a process lock. Restart Codex after a manual switch because Codex reads the file at startup.
+Switching replaces the live `$CODEX_HOME/auth.json` atomically while holding a process lock. Codex 0.157 and newer attaches interactive sessions to a shared local app-server daemon that loads `auth.json` once, so when a switch changes the file codex-switch restarts a running daemon (`codex app-server daemon restart`): new sessions and sessions that reconnect use the selected account, and a turn that was in progress is interrupted. A stopped daemon is left alone, `login` restarts it the same way when it activates new credentials, and an older Codex without the daemon reads the file at its next start.
 
 ## Launch Codex with a profile
 
@@ -87,7 +87,7 @@ codex-switch launch -- -s workspace-write -a never
 
 Arguments after `--` are Codex's, not codex-switch's. A known Codex subcommand (`exec`, `resume`, …) can start the argv without `--` (`codex-switch launch exec --json "…"`). Tokens on both sides of `--` are kept. The separator is still required when the Codex argv starts with a prompt that looks like an alias, or a flag that also exists on codex-switch (`--json`, `--color`, `--model`) immediately after the alias. Current Codex has no `--full-auto`; use `-a never`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox`. `--json launch` prints one JSON object after Codex exits and captures at most 1 MiB from each Codex output stream; the corresponding `*_truncated` fields report clipping.
 
-The launch lock serializes overlapping launch sessions. The restore delay is configurable (`launch.restore_delay_secs`) because Codex does not expose an authentication-read handshake.
+The launch lock serializes overlapping launch sessions. The restore delay is configurable (`launch.restore_delay_secs`) because Codex does not expose an authentication-read handshake. When the installed Codex lists `--no-daemon` (0.156 and newer), a ChatGPT launch adds it so the session reads the staged file instead of joining the shared app-server daemon, which would keep the account it already holds; an argv that already contains `--no-daemon`, `--remote`, or `agents` is passed through unchanged.
 
 ## Launch Codex with a custom API provider
 
@@ -128,7 +128,7 @@ Model names are discovered at runtime rather than maintained as a hardcoded comp
 
 ## Optional OS scheduling
 
-The binary no longer installs or owns a resident daemon, service, timer, or automatic account switcher. If periodic work is useful, install a user-level OS task yourself and invoke the one-time CLI operations. `list --force --json` refreshes usage, `warmup` activates quota windows, `use` without an alias selects and switches to the best eligible ChatGPT profile, and `launch` without an alias starts Codex with the best profile. Schedule `use` only when unattended credential changes are intended; a manual `use` affects the next Codex process, and an already-running Codex must be restarted.
+The binary no longer installs or owns a resident daemon, service, timer, or automatic account switcher. If periodic work is useful, install a user-level OS task yourself and invoke the one-time CLI operations. `list --force --json` refreshes usage, `warmup` activates quota windows, `use` without an alias selects and switches to the best eligible ChatGPT profile, and `launch` without an alias starts Codex with the best profile. Schedule `use` only when unattended credential changes are intended; a manual `use` affects the next Codex process and restarts a running Codex app-server daemon when the live file changed (re-selecting the profile that is already live does not), while an already-running `codex exec` or `codex --no-daemon` process must be restarted.
 
 The examples below schedule a one-time `warmup` every 30 minutes. These tasks run as your user; declare `CODEX_HOME` or `CODEX_SWITCH_HOME` in the task environment when you rely on non-default paths. Use `list --force --json` in the same task shape when you need a usage refresh instead.
 

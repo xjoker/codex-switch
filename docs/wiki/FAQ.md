@@ -6,7 +6,7 @@ No, and this is permanent by design. OS keyrings provide no locking or atomic-re
 
 ## Does switching affect an already-running Codex session?
 
-No. Codex reads authentication at startup. Restart Codex, or use `codex-switch launch` for a new process.
+Partly. Codex 0.157 and newer runs interactive sessions through a shared app-server daemon that loads authentication once; codex-switch restarts that daemon after a switch or login, so sessions attached to it reconnect on the new account (a turn that was in progress is interrupted). `codex exec` and `codex --no-daemon` sessions read authentication at startup and keep their account: restart those, or use `codex-switch launch` for a new process.
 
 ## Where is account data stored?
 
