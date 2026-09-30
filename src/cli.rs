@@ -76,12 +76,13 @@ pub enum ProviderCommand {
     Remove {
         /// Provider alias
         alias: String,
-        /// Skip confirmation prompt
+        /// Skip the confirmation prompt (required with --json or when stdin is not a terminal)
         #[arg(long, short)]
         yes: bool,
     },
-    /// Replace saved models with chat slugs from the provider's GET /models.
-    /// Large catalogs must be picked with `--model`.
+    /// Replace saved models with chat slugs from the provider's GET /models
+    /// (matching ids keep their reasoning / web_search settings). Catalogs
+    /// larger than 48 chat models must be picked with `--model`.
     FetchModels {
         /// Provider alias
         alias: String,
@@ -92,6 +93,9 @@ pub enum ProviderCommand {
     },
     /// Probe whether saved models speak Codex's Responses API (no `input`, so a
     /// supporting endpoint 400s at validation without generating tokens).
+    #[command(
+        after_help = "Conclusive results are saved with the provider for 7 days, scoped to the model, key and effective connection settings (endpoint, headers, query, catalog); a change to any of them drops the record. Temporary or ambiguous failures are reported as unknown and are not treated as a denial.\n`launch` performs no gateway request unless a saved result marks the chosen model unsupported; it then re-probes once live and refuses only if the model is still unsupported."
+    )]
     Probe {
         /// Provider alias
         alias: String,
@@ -110,7 +114,7 @@ pub enum ProviderCommand {
     after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, launch, reset-card, rename, delete, login, import, self-update, provider add/list/show/rename/remove/fetch-models/probe)
+    /// Output as compact JSON (supported by list, use, launch, warmup, reset-card, rename, delete, login, import, self-update, provider add/list/show/rename/remove/fetch-models/probe)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -145,7 +149,7 @@ pub struct Cli {
 pub enum Commands {
     /// Switch to a profile; omit alias to auto-select using the unified scoring algorithm
     #[command(
-        after_help = "When the live auth.json changes and a Codex app-server daemon (Codex 0.157+) is running, it is restarted so new sessions use the selected account.\nSet `[use] restart_app_server = false` in config.toml to turn this off."
+        after_help = "`use` switches ChatGPT profiles only. Start a custom API provider with `codex-switch launch <alias>`.\n\nWhen the live auth.json actually changes and a Codex app-server daemon (Codex 0.157+) is running, `codex app-server daemon restart` is run (bounded to 15 seconds) so new sessions use the selected account; a failed restart is a warning, not a failed switch. `login` (when it activates credentials) and the TUI `u` switch do the same.\nSet `[use] restart_app_server = false` in config.toml (or in TUI Settings) to leave the daemon alone; the note then shows the manual command."
     )]
     Use {
         /// Profile alias (omit to auto-select)
@@ -166,7 +170,7 @@ pub enum Commands {
     ResetCard {
         /// Profile alias
         alias: String,
-        /// Skip confirmation prompt
+        /// Skip the confirmation prompt (required with --json)
         #[arg(long, short)]
         yes: bool,
     },
@@ -181,11 +185,14 @@ pub enum Commands {
     Delete {
         /// Profile alias
         alias: String,
-        /// Skip confirmation prompt
+        /// Skip the confirmation prompt (required with --json or when stdin is not a terminal)
         #[arg(long, short)]
         yes: bool,
     },
     /// Log in via browser or --device code flow; re-authorizes if alias already exists
+    #[command(
+        after_help = "Creating a profile or re-authorizing the active one makes those credentials live in auth.json; a running Codex app-server daemon is then restarted like after `use` (see `use --help`)."
+    )]
     Login {
         /// Profile alias -- if it already exists, re-authorizes it; otherwise creates a new profile
         alias: Option<String>,
@@ -223,20 +230,21 @@ pub enum Commands {
     ///
     /// Fresh paid accounts show no reset timer until their first real request.
     /// This command triggers that timer without running a real task. Accounts
-    /// with only a 7-day window (free plans) are skipped.
+    /// with only a 7-day window (free plans) and accounts whose 5h window is
+    /// already active are skipped.
     #[command(
-        after_help = "Examples:\n  codex-switch warmup          # warmup profiles that have a 5h window\n  codex-switch warmup myalias  # warmup a specific profile"
+        after_help = "A profile counts as warmed up only after the response stream reports `response.completed`. The model is chosen from the account's own catalog: a Luna model first, then a mini model, then the highest-priority one.\n\nExamples:\n  codex-switch warmup          # warmup profiles that have a 5h window\n  codex-switch warmup myalias  # warmup a specific profile"
     )]
     Warmup {
         /// Profile alias to warm up (omit to warm up all profiles)
         alias: Option<String>,
     },
-    /// Launch Codex CLI with the best (or specified) profile's auth
+    /// Launch Codex CLI with the best (or specified) ChatGPT profile's auth, or with a custom API provider
     #[command(
-        after_help = "Codex argv is everything after `--`, a known Codex subcommand (`exec`, `resume`, …), or a flag that is not a launch/codex-switch option (`-s`, `--sandbox`, …). Tokens on both sides of `--` are kept (so `launch work exec -- --json` still runs `exec`).\nUse `--` when the Codex argv starts with a prompt, or with a flag that also exists on codex-switch (`--json`, `--color`, `--model`).\n\nExamples:\n  codex-switch launch work -- exec --json \"review this\"\n  codex-switch launch work exec -- --json \"review this\"\n  codex-switch launch exec --json \"do the thing\"\n  codex-switch launch openrouter -- -s workspace-write -a never\n\n`--model` before `--` selects a saved provider model, or is forwarded as Codex `--model` for a ChatGPT profile. `--model` after `--` is Codex's own flag.\n`--json launch` prints one JSON envelope after Codex exits (Codex stdout/stderr are captured into that envelope, not mixed onto stdout)."
+        after_help = "ChatGPT profile: its auth.json is staged for the session and restored after `[launch] restore_delay_secs`. When `codex --help` lists `--no-daemon` (Codex 0.156+), it is prepended so the session reads that file instead of joining the shared app-server daemon. That help probe is bounded to 10 seconds; if it fails, times out or returns no usable help, launch refuses before staging any credentials.\nCustom provider alias: auth.json is not swapped and config.toml is not rewritten. Codex starts in the normal CODEX_HOME with a native per-run `--profile cs-*` and the key in the child environment. A saved `provider probe` result that marks the model unsupported is re-checked live once before launch can refuse. Auto-select (no alias) is ChatGPT-only.\n\nCodex argv is everything after `--`, a known Codex subcommand (`exec`, `resume`, …), or a flag that is not a launch/codex-switch option (`-s`, `--sandbox`, …). Tokens on both sides of `--` are kept (so `launch work exec -- --json` still runs `exec`).\nUse `--` when the Codex argv starts with a prompt, or with a flag that also exists on codex-switch (`--json`, `--color`, `--model`).\n\nExamples:\n  codex-switch launch work -- exec --json \"review this\"\n  codex-switch launch work exec -- --json \"review this\"\n  codex-switch launch exec --json \"do the thing\"\n  codex-switch launch openrouter -- -s workspace-write -a never\n\n`--model` before `--` selects a saved provider model, or is forwarded as Codex `--model` for a ChatGPT profile. `--model` after `--` is Codex's own flag.\n`--json launch` prints one JSON envelope after Codex exits (Codex stdout/stderr are captured into that envelope, not mixed onto stdout)."
     )]
     Launch {
-        /// Profile alias (omit to auto-select best available)
+        /// ChatGPT profile or custom provider alias (omit to auto-select the best ChatGPT profile)
         alias: Option<String>,
         /// When the pool is exhausted, automatically consume the earliest-expiring
         /// reset card to revive an account (only applies when alias is omitted;
@@ -253,7 +261,7 @@ pub enum Commands {
     },
     /// Launch the interactive TUI
     Tui,
-    /// Open the ~/.codex-switch directory in the system file manager
+    /// Open the codex-switch data directory (~/.codex-switch, or $CODEX_SWITCH_HOME) in the system file manager
     Open,
     /// Manage custom API providers (OpenRouter, etc.) for launching Codex with a third-party model
     #[command(subcommand)]
@@ -267,7 +275,7 @@ pub enum Commands {
 /// positional, so `launch -- work` would otherwise become alias `work`. A
 /// known Codex subcommand (`exec`, `resume`, …) or a non-launch flag (`-s`)
 /// in the alias slot is treated the same way, so `launch exec --json` is not
-/// `Profile 'exec' not found`.
+/// `profile 'exec' not found`.
 pub(crate) fn extract_launch_passthrough(argv: &[String]) -> (Vec<String>, Option<Vec<String>>) {
     let Some(launch_at) = first_subcommand(argv).filter(|&i| argv[i] == "launch") else {
         return (argv.to_vec(), None);
