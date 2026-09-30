@@ -134,14 +134,33 @@ jobs:
         run: |
           BIN="target/${{ matrix.target }}/release/codex-switch"
           chmod +x "$BIN"
-          tar czf "${{ matrix.name }}.tar.gz" -C "target/${{ matrix.target }}/release" codex-switch
+          # The binary embeds Apache-2.0 upstream Codex text, so ship the license
+          # and notice files next to it. Installers pick the binary by name and
+          # ignore the rest.
+          STAGE="package-${{ matrix.name }}"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/THIRD-PARTY-LICENSES/upstream-codex"
+          cp "$BIN" "$STAGE/codex-switch"
+          cp LICENSE "$STAGE/LICENSE"
+          cp assets/upstream-codex/LICENSE "$STAGE/THIRD-PARTY-LICENSES/upstream-codex/LICENSE"
+          cp assets/upstream-codex/NOTICE.md "$STAGE/THIRD-PARTY-LICENSES/upstream-codex/NOTICE.md"
+          tar czf "${{ matrix.name }}.tar.gz" -C "$STAGE" codex-switch LICENSE THIRD-PARTY-LICENSES
           shasum -a 256 "${{ matrix.name }}.tar.gz" > "${{ matrix.name }}.tar.gz.sha256"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          7z a "${{ matrix.name }}.zip" "./target/${{ matrix.target }}/release/codex-switch.exe"
+          # Ship the license and notice files next to the binary (see the Unix
+          # step); install.ps1 takes codex-switch.exe from the archive root.
+          STAGE="package-${{ matrix.name }}"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/THIRD-PARTY-LICENSES/upstream-codex"
+          cp "target/${{ matrix.target }}/release/codex-switch.exe" "$STAGE/codex-switch.exe"
+          cp LICENSE "$STAGE/LICENSE"
+          cp assets/upstream-codex/LICENSE "$STAGE/THIRD-PARTY-LICENSES/upstream-codex/LICENSE"
+          cp assets/upstream-codex/NOTICE.md "$STAGE/THIRD-PARTY-LICENSES/upstream-codex/NOTICE.md"
+          (cd "$STAGE" && 7z a "../${{ matrix.name }}.zip" codex-switch.exe LICENSE THIRD-PARTY-LICENSES)
           sha256sum "${{ matrix.name }}.zip" > "${{ matrix.name }}.zip.sha256"
 
       - name: Upload artifacts

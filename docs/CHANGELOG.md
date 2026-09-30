@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Token refresh keeps rotated credentials** — The identity check after a token refresh now refuses only a different account. A refreshed token that gains an email or account id, or a changed email on the same account id, is persisted instead of discarded, so it no longer strands the already-rotated refresh token and forces a re-login.
+- **Release archives carry license notices** — Every release archive now includes the project `LICENSE` and the Apache-2.0 license and notice for the upstream Codex text embedded in the binary (`THIRD-PARTY-LICENSES/upstream-codex/`). The README documents the third-party notice.
 
 ## v20260930.2.0 (candidate) — 2026-09-30
 

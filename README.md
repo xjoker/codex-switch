@@ -86,3 +86,7 @@ See the [developer onboarding](https://github.com/xjoker/codex-switch/wiki/Devel
 ## License
 
 [MIT](LICENSE)
+
+## Third-party notices
+
+The binary embeds the default model instructions from [OpenAI Codex](https://github.com/openai/codex) (Copyright 2025 OpenAI), which is distributed under the Apache License, Version 2.0. The vendored text, its license and its notice live in [`assets/upstream-codex/`](assets/upstream-codex/) ([`LICENSE`](assets/upstream-codex/LICENSE), [`NOTICE.md`](assets/upstream-codex/NOTICE.md)). Release archives include them under `THIRD-PARTY-LICENSES/upstream-codex/`.

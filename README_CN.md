@@ -76,3 +76,7 @@ codex-switch launch       # 用最佳账号启动 Codex
 ## 许可证
 
 [MIT](LICENSE)
+
+## 第三方声明
+
+二进制内嵌了 [OpenAI Codex](https://github.com/openai/codex)（Copyright 2025 OpenAI）的默认模型指令文本，该文本以 Apache License 2.0 分发。被引入的文本、许可证与声明位于 [`assets/upstream-codex/`](assets/upstream-codex/)（[`LICENSE`](assets/upstream-codex/LICENSE)、[`NOTICE.md`](assets/upstream-codex/NOTICE.md)）。发布压缩包在 `THIRD-PARTY-LICENSES/upstream-codex/` 下附带这些文件。
