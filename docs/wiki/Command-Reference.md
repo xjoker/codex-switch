@@ -30,7 +30,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 | Option | Environment variable | Behavior |
 |---|---|---|
-| `--json` | — | Compact structured output (supported by `list`, `use`, `launch`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`, `provider fetch-models`, `provider probe`). `launch --json` prints one envelope after Codex exits; each captured Codex stream is limited to 1 MiB and has a `*_truncated` flag. |
+| `--json` | — | Compact structured output (supported by `list`, `use`, `launch`, `warmup`, `reset-card`, `rename`, `delete`, `login`, `import`, `self-update`, `provider add`, `provider list`, `provider show`, `provider rename`, `provider remove`, `provider fetch-models`, `provider probe`). `launch --json` prints one envelope after Codex exits; each captured Codex stream is limited to 1 MiB and has a `*_truncated` flag. |
 | `--json-pretty` | — | Indented structured output. |
 | `--proxy <URL>` | `CS_PROXY` | Override proxy configuration for this process; supports `http(s)://`, `socks4://`, `socks5://`, and `socks5h://` (remote DNS). |
 | `--color <auto\|always\|never>` | `CS_COLOR` | Control CLI terminal color. `NO_COLOR` disables CLI color regardless of this option. The TUI still paints its designed palette. |
@@ -125,6 +125,8 @@ The Providers table never renders the stored key. `Enter` or `o` picks a saved m
 ### Settings tab
 
 Edits `$CODEX_SWITCH_HOME/config.toml`. Saving rewrites the file (comments and unknown keys are not kept). The TUI process applies changes immediately. `t` on the Accounts page controls session-only automatic usage refresh; quota warmup remains a one-time account-menu action (`w`) or CLI `warmup`.
+
+Fields are labelled with their `config.toml` keys: `proxy.url`, `proxy.no_proxy`, `cache.ttl`, `network.max_concurrent`, `tui.auto_refresh_interval_secs`, `use.safety_margin_7d`, `use.team_priority`, `use.restart_app_server`, and `launch.restore_delay_secs`. The focused field shows a short explanation under the list (units, minimums, and for `use.restart_app_server` what the restart does).
 
 | Key | Action |
 |---|---|
