@@ -2875,7 +2875,12 @@ impl Drop for ProviderRunLease {
 
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 || *libc::__errno_location() == libc::EPERM }
+    if unsafe { libc::kill(pid as i32, 0) } == 0 {
+        return true;
+    }
+    // Read errno straight after the failed call; `__errno_location` is
+    // Linux-only, `last_os_error` is portable across Unix targets.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// The spawned command may be a `.cmd`/`.sh` wrapper that execs the real
