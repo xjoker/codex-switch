@@ -17,7 +17,7 @@ The version is an explicit reference point, not a promise that an arbitrary late
 | Native model metadata | Preserve upstream instructions, tool support, reasoning levels, modality information and unknown extension fields. |
 | Generic model lists | Fill the Codex schema without advertising capabilities that the source did not provide; keep explicit user choices distinct from discovered capability limits. |
 | Provider HTTP connection | Resolve the same saved provider overrides used at launch, including explicit model catalogs, authentication headers and routing queries. |
-| Responses probes | Treat temporary and ambiguous failures as unknown; scope and expire conclusive results instead of permanently trusting an old boolean. |
+| Responses probes | Treat temporary and ambiguous failures as unknown; scope and expire conclusive results instead of permanently trusting an old boolean. A saved denial is re-checked live at launch before it can refuse. |
 | Account authentication | Retry models authentication in a bounded way and use compare-and-swap persistence for rotated credentials. |
 | Account routing | Apply account and FedRAMP routing consistently across model, response, usage and reset-credit calls. |
 | Session recovery | Scan first JSONL metadata records in active and archived rollouts; retain profiles whenever liveness cannot be established safely, including an unavailable Codex home and linked or damaged rollout metadata. |

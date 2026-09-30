@@ -885,7 +885,12 @@ const GATEWAY_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_GATEWAY_MODELS_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROVIDER_CATALOG_BODY_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSES_PROBE_BODY_BYTES: usize = 1024 * 1024;
-const RESPONSES_SUPPORT_TTL_SECS: u64 = 5 * 60;
+/// How long a saved `provider probe` verdict is kept. Launch never trusts a
+/// saved denial on its own: it re-checks it live first (see
+/// [`recheck_cached_responses_denial`]), so a long lifetime only avoids probing
+/// on the normal path. A connection change invalidates a record immediately
+/// through its fingerprint, regardless of age.
+const RESPONSES_SUPPORT_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_RESPONSES_SUPPORT_ENTRIES: usize = 256;
 
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
@@ -1754,6 +1759,80 @@ pub(crate) async fn probe_provider_models(
         results.push(probe_responses_support_with_connection(&connection, &slug).await?);
     }
     Ok(results)
+}
+
+/// Re-check a saved "unsupported" verdict before a launch is refused because of
+/// it. Returns `true` only when a live probe confirms the denial.
+///
+/// A live "supported" answer clears the denial. An inconclusive answer or a
+/// failed request (network, timeout, DNS, TLS) fails open: the saved verdict is
+/// dropped so it stops triggering, and a warning names the reason on stderr.
+/// The refreshed verdict is persisted only while the provider's connection
+/// still matches the one that was probed.
+pub(crate) async fn recheck_cached_responses_denial(
+    profile: &ProviderProfile,
+    model: &str,
+) -> Result<bool> {
+    let connection = resolve_provider_connection(profile)?;
+    let fingerprint = connection.fingerprint();
+    let probe = match probe_responses_support_with_connection(&connection, model).await {
+        Ok(probe) => probe,
+        Err(error) => {
+            let message = redact_connection_secrets(&format!("{error:#}"), &connection);
+            eprintln!(
+                "Warning: the saved probe marked model '{model}' on provider '{}' unsupported, but a fresh check failed ({message}); launching anyway.",
+                profile.alias
+            );
+            forget_responses_verdict(&profile.alias, model, &fingerprint);
+            return Ok(false);
+        }
+    };
+    let confirmed = probe.support == ResponsesSupport::Unsupported;
+    if probe.support == ResponsesSupport::Unknown {
+        eprintln!(
+            "Warning: the saved probe marked model '{model}' on provider '{}' unsupported, but a fresh check was inconclusive (HTTP {}); launching anyway.",
+            profile.alias, probe.status
+        );
+    }
+    if let Err(error) = store_responses_probe(&profile.alias, &fingerprint, &probe) {
+        eprintln!(
+            "Warning: could not save the refreshed probe result for provider '{}': {error:#}",
+            profile.alias
+        );
+    }
+    Ok(confirmed)
+}
+
+fn forget_responses_verdict(alias: &str, model: &str, fingerprint: &str) {
+    let unknown = ResponsesProbe {
+        model: model.to_string(),
+        url: String::new(),
+        support: ResponsesSupport::Unknown,
+        status: 0,
+        code: None,
+        message: String::new(),
+    };
+    if let Err(error) = store_responses_probe(alias, fingerprint, &unknown) {
+        eprintln!(
+            "Warning: could not drop the stale probe result for provider '{alias}': {error:#}"
+        );
+    }
+}
+
+/// Apply one probe result to the freshest saved profile. This deliberately
+/// bypasses [`save`]: that function restores saved probe records whenever the
+/// incoming profile has none, which would resurrect a verdict just removed.
+fn store_responses_probe(alias: &str, fingerprint: &str, probe: &ResponsesProbe) -> Result<()> {
+    let mut latest = load(alias)?;
+    if latest.responses_support_fingerprint()? != fingerprint {
+        // The connection changed while probing; the result no longer applies.
+        return Ok(());
+    }
+    latest.record_responses_probes(std::slice::from_ref(probe));
+    latest.normalize();
+    latest.validate()?;
+    existing_provider_dir(alias)?;
+    write_profile(&provider_dir(alias)?.join("provider.toml"), &latest)
 }
 
 fn openai_error_fields(body: &str) -> (Option<String>, Option<String>, Option<String>) {
@@ -7128,6 +7207,34 @@ api_key = "sk-legacy-key"
             profile.responses_support_for("openai/gpt-5.3-codex"),
             None,
             "expired probe evidence must not block launch"
+        );
+    }
+
+    #[test]
+    fn saved_probe_verdicts_are_kept_for_seven_days() {
+        assert_eq!(RESPONSES_SUPPORT_TTL_SECS, 7 * 24 * 60 * 60);
+        let mut profile = sample("provider");
+        profile.record_responses_probes(&[ResponsesProbe {
+            model: "openai/gpt-5.3-codex".into(),
+            url: String::new(),
+            support: ResponsesSupport::Unsupported,
+            status: 405,
+            code: None,
+            message: String::new(),
+        }]);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let record = profile
+            .responses_support
+            .get_mut("openai/gpt-5.3-codex")
+            .unwrap();
+        record.checked_at = now - 6 * 24 * 60 * 60;
+        assert_eq!(
+            profile.responses_support_for("openai/gpt-5.3-codex"),
+            Some(false),
+            "a verdict from six days ago is still a candidate for a launch re-check"
         );
     }
 

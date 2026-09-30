@@ -15,7 +15,7 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 | `provider list` | List saved providers (no keys). |
 | `provider show <alias>` | Show one provider; the key is redacted. |
 | `provider fetch-models <alias> [--model <id>]` | Replace saved models with chat slugs from the provider's `GET /models`. Matching ids keep reasoning / `web_search`. Large catalogs require `--model`. |
-| `provider probe <alias> [--model <id>]` | `POST {base_url}/responses` with only `model` (no `input`) to see if Codex can use the slug. Does not generate tokens. Default: every saved model. |
+| `provider probe <alias> [--model <id>]` | `POST {base_url}/responses` with only `model` (no `input`) to see if Codex can use the slug. Does not generate tokens. Default: every saved model. Results are kept 7 days; `launch` re-checks a saved unsupported result live before refusing. |
 | `provider rename <old> <new>` | Rename a provider (directory + derived ids). |
 | `provider remove <alias> [-y]` | Delete a provider and its stored key; `-y` / `--yes` skips the prompt. Non-interactive and `--json` runs require `--yes`. |
 | `reset-card <alias> [-y]` | Consume the earliest-expiring reset card for a profile after confirmation; `-y` / `--yes` skips the prompt. |

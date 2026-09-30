@@ -458,30 +458,52 @@ fn setup_provider(home: &Path) {
     setup_provider_at(home, "http://127.0.0.1:9/v1");
 }
 
-async fn provider_models_handler(State(count): State<Arc<AtomicUsize>>) -> Json<Value> {
-    count.fetch_add(1, Ordering::Relaxed);
+/// What `POST /v1/responses` answers. The default looks like a gateway that
+/// supports Responses (missing `input`); the others classify as unsupported
+/// (HTTP 405) and inconclusive (HTTP 500).
+const RESPONSES_SUPPORTED: usize = 0;
+const RESPONSES_UNSUPPORTED: usize = 1;
+const RESPONSES_INCONCLUSIVE: usize = 2;
+
+struct ProbeState {
+    count: AtomicUsize,
+    responses_mode: AtomicUsize,
+}
+
+async fn provider_models_handler(State(state): State<Arc<ProbeState>>) -> Json<Value> {
+    state.count.fetch_add(1, Ordering::Relaxed);
     Json(serde_json::json!({
         "data": [{"id": "openai/gpt-5.3-codex", "context_length": 123456}],
     }))
 }
 
 async fn provider_responses_handler(
-    State(count): State<Arc<AtomicUsize>>,
+    State(state): State<Arc<ProbeState>>,
     Json(_body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    count.fetch_add(1, Ordering::Relaxed);
-    (
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({
-            "error": {"type": "invalid_request_error", "code": "missing_required_parameter", "message": "Missing required parameter: input"},
-        })),
-    )
+    state.count.fetch_add(1, Ordering::Relaxed);
+    match state.responses_mode.load(Ordering::Relaxed) {
+        RESPONSES_UNSUPPORTED => (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(serde_json::json!({"error": {"message": "method not allowed"}})),
+        ),
+        RESPONSES_INCONCLUSIVE => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": {"message": "upstream error"}})),
+        ),
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {"type": "invalid_request_error", "code": "missing_required_parameter", "message": "Missing required parameter: input"},
+            })),
+        ),
+    }
 }
 
 async fn provider_unexpected_handler(
-    State(count): State<Arc<AtomicUsize>>,
+    State(state): State<Arc<ProbeState>>,
 ) -> (StatusCode, Json<Value>) {
-    count.fetch_add(1, Ordering::Relaxed);
+    state.count.fetch_add(1, Ordering::Relaxed);
     (
         StatusCode::NOT_FOUND,
         Json(serde_json::json!({"error": "unexpected provider request"})),
@@ -490,14 +512,17 @@ async fn provider_unexpected_handler(
 
 struct RequestCounter {
     base_url: String,
-    count: Arc<AtomicUsize>,
-    _shutdown: oneshot::Sender<()>,
+    state: Arc<ProbeState>,
+    shutdown: Option<oneshot::Sender<()>>,
     _rt: Runtime,
 }
 
 impl RequestCounter {
     fn start() -> Self {
-        let count = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(ProbeState {
+            count: AtomicUsize::new(0),
+            responses_mode: AtomicUsize::new(RESPONSES_SUPPORTED),
+        });
         let rt = Builder::new_multi_thread().enable_all().build().unwrap();
         let listener = rt
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -507,7 +532,7 @@ impl RequestCounter {
             .route("/v1/models", get(provider_models_handler))
             .route("/v1/responses", post(provider_responses_handler))
             .fallback(provider_unexpected_handler)
-            .with_state(count.clone());
+            .with_state(state.clone());
         let (shutdown, shutdown_rx) = oneshot::channel::<()>();
         rt.spawn(async move {
             let _ = axum::serve(listener, app)
@@ -518,14 +543,33 @@ impl RequestCounter {
         });
         Self {
             base_url: format!("http://{addr}/v1"),
-            count,
-            _shutdown: shutdown,
+            state,
+            shutdown: Some(shutdown),
             _rt: rt,
         }
     }
 
     fn requests(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
+        self.state.count.load(Ordering::Relaxed)
+    }
+
+    fn set_responses_mode(&self, mode: usize) {
+        self.state.responses_mode.store(mode, Ordering::Relaxed);
+    }
+
+    /// Close the listener so later requests fail to connect.
+    fn stop(&mut self) {
+        drop(self.shutdown.take());
+        let addr = self
+            .base_url
+            .trim_start_matches("http://")
+            .trim_end_matches("/v1")
+            .to_string();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::net::TcpStream::connect(&addr).is_ok() {
+            assert!(Instant::now() < deadline, "mock provider did not stop");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -918,32 +962,26 @@ fn provider_sync_is_persisted_and_launch_stays_offline() {
     assert!(record["checked_at"].as_integer().unwrap() > 0);
     record["support"] = toml::Value::String("unsupported".into());
     fs::write(&path, toml::to_string(&unsupported).unwrap()).unwrap();
-    let codex_launches = recorded_argv(&log).len();
 
-    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
+    // A saved denial is re-checked live before it can refuse a launch; this
+    // endpoint answers like a Responses gateway, so the launch proceeds and the
+    // record is refreshed to supported.
+    let rechecked = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
     assert!(
-        !output.status.success(),
-        "saved unsupported verdict was ignored"
-    );
-    assert!(
-        combined.contains("no Codex Responses channel"),
-        "{combined}"
+        rechecked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rechecked.stderr)
     );
     assert_eq!(
         server.requests(),
-        requests_before_launch,
-        "a saved unsupported verdict must also be enforced offline"
+        requests_before_launch + 1,
+        "a saved denial must cost exactly one live re-check"
     );
-    assert_eq!(recorded_argv(&log).len(), codex_launches);
+    assert_eq!(saved_support(&path).as_deref(), Some("supported"));
 
     // A boolean from an older version carries no connection identity or
-    // timestamp and must not preserve a permanent offline denial.
+    // timestamp and must not preserve a permanent denial, so it is not even
+    // re-checked.
     unsupported["responses_support"]["openai/gpt-5.3-codex"] = toml::Value::Boolean(false);
     fs::write(path, toml::to_string(&unsupported).unwrap()).unwrap();
     let legacy = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
@@ -952,7 +990,223 @@ fn provider_sync_is_persisted_and_launch_stays_offline() {
         "{}",
         String::from_utf8_lossy(&legacy.stderr)
     );
-    assert_eq!(server.requests(), requests_before_launch);
+    assert_eq!(server.requests(), requests_before_launch + 1);
+    let _ = fs::remove_dir_all(home);
+}
+
+const PROBED_MODEL: &str = "openai/gpt-5.3-codex";
+
+fn provider_toml(home: &Path) -> PathBuf {
+    home.join(".codex-switch/providers/openrouter/provider.toml")
+}
+
+fn saved_support(path: &Path) -> Option<String> {
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    saved
+        .get("responses_support")?
+        .get(PROBED_MODEL)?
+        .get("support")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Probe once against a supporting endpoint so the saved record carries the
+/// provider's real fingerprint, then rewrite its verdict, age and optionally
+/// its fingerprint.
+fn seed_saved_verdict(
+    home: &Path,
+    fake_bin: &Path,
+    log: &Path,
+    support: &str,
+    age_secs: u64,
+    fingerprint: Option<&str>,
+) {
+    let probed = run(
+        home,
+        fake_bin,
+        log,
+        &["provider", "probe", "openrouter", "--model", PROBED_MODEL],
+    );
+    assert!(
+        probed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probed.stderr)
+    );
+    let path = provider_toml(home);
+    let mut saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let record = &mut saved["responses_support"][PROBED_MODEL];
+    record["support"] = toml::Value::String(support.into());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    record["checked_at"] = toml::Value::Integer((now - age_secs) as i64);
+    if let Some(fingerprint) = fingerprint {
+        record["fingerprint"] = toml::Value::String(fingerprint.into());
+    }
+    fs::write(path, toml::to_string(&saved).unwrap()).unwrap();
+}
+
+fn launch_output_text(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+fn launch_refuses_a_saved_denial_that_a_live_probe_confirms() {
+    let home = temp_home("recheck-confirmed");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let server = RequestCounter::start();
+    setup_provider_at(&home, &server.base_url);
+    seed_saved_verdict(&home, &fake_bin, &log, "unsupported", 60, None);
+    server.set_responses_mode(RESPONSES_UNSUPPORTED);
+    let requests = server.requests();
+    let launches = recorded_launches(&log).len();
+
+    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+
+    assert!(!output.status.success());
+    let text = launch_output_text(&output);
+    assert!(text.contains("no Codex Responses channel"), "{text}");
+    assert!(text.contains("fresh probe just confirmed"), "{text}");
+    assert_eq!(server.requests(), requests + 1);
+    assert_eq!(
+        recorded_launches(&log).len(),
+        launches,
+        "no Codex was started"
+    );
+    assert_eq!(
+        saved_support(&provider_toml(&home)).as_deref(),
+        Some("unsupported")
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_proceeds_and_saves_when_the_live_probe_says_supported() {
+    let home = temp_home("recheck-cleared");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let server = RequestCounter::start();
+    setup_provider_at(&home, &server.base_url);
+    seed_saved_verdict(&home, &fake_bin, &log, "unsupported", 60, None);
+    let requests = server.requests();
+
+    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+
+    assert!(output.status.success(), "{}", launch_output_text(&output));
+    assert_eq!(server.requests(), requests + 1);
+    assert_eq!(
+        saved_support(&provider_toml(&home)).as_deref(),
+        Some("supported")
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_fails_open_and_drops_the_denial_when_the_probe_cannot_reach_the_provider() {
+    let home = temp_home("recheck-network-failure");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let mut server = RequestCounter::start();
+    setup_provider_at(&home, &server.base_url);
+    seed_saved_verdict(&home, &fake_bin, &log, "unsupported", 60, None);
+    server.stop();
+
+    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+
+    assert!(output.status.success(), "{}", launch_output_text(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Warning") && stderr.contains("launching anyway"),
+        "the unconfirmed denial must be reported on stderr: {stderr}"
+    );
+    assert_eq!(
+        saved_support(&provider_toml(&home)),
+        None,
+        "an unconfirmed denial must not keep triggering"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_fails_open_when_the_live_probe_is_inconclusive() {
+    let home = temp_home("recheck-inconclusive");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let server = RequestCounter::start();
+    setup_provider_at(&home, &server.base_url);
+    seed_saved_verdict(&home, &fake_bin, &log, "unsupported", 60, None);
+    server.set_responses_mode(RESPONSES_INCONCLUSIVE);
+
+    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+
+    assert!(output.status.success(), "{}", launch_output_text(&output));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("inconclusive"));
+    assert_eq!(saved_support(&provider_toml(&home)), None);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_does_not_probe_for_a_saved_supported_verdict() {
+    let home = temp_home("recheck-supported-cached");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let server = RequestCounter::start();
+    setup_provider_at(&home, &server.base_url);
+    seed_saved_verdict(&home, &fake_bin, &log, "supported", 60, None);
+    server.set_responses_mode(RESPONSES_UNSUPPORTED);
+    let requests = server.requests();
+
+    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+
+    assert!(output.status.success(), "{}", launch_output_text(&output));
+    assert_eq!(server.requests(), requests, "no probe on the normal path");
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_ignores_a_denial_older_than_the_retention_window() {
+    let home = temp_home("recheck-expired");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let server = RequestCounter::start();
+    setup_provider_at(&home, &server.base_url);
+    let eight_days = 8 * 24 * 60 * 60;
+    seed_saved_verdict(&home, &fake_bin, &log, "unsupported", eight_days, None);
+    server.set_responses_mode(RESPONSES_UNSUPPORTED);
+    let requests = server.requests();
+
+    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+
+    assert!(output.status.success(), "{}", launch_output_text(&output));
+    assert_eq!(server.requests(), requests, "an expired record is ignored");
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_ignores_a_denial_recorded_for_a_different_connection() {
+    let home = temp_home("recheck-fingerprint");
+    let (fake_bin, log) = install_fake_codex(&home);
+    let server = RequestCounter::start();
+    setup_provider_at(&home, &server.base_url);
+    seed_saved_verdict(
+        &home,
+        &fake_bin,
+        &log,
+        "unsupported",
+        60,
+        Some("fingerprint-of-another-endpoint"),
+    );
+    server.set_responses_mode(RESPONSES_UNSUPPORTED);
+    let requests = server.requests();
+
+    let output = run(&home, &fake_bin, &log, &["launch", "openrouter"]);
+
+    assert!(output.status.success(), "{}", launch_output_text(&output));
+    assert_eq!(
+        server.requests(),
+        requests,
+        "a stale fingerprint is ignored"
+    );
     let _ = fs::remove_dir_all(home);
 }
 

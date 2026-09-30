@@ -119,6 +119,8 @@ codex-switch provider probe AI-KR
 codex-switch provider probe AI-KR --model deepseek-v4-flash
 ```
 
+Probe results are saved with the provider for 7 days and are dropped as soon as the endpoint, key, headers, query or catalog change. A saved "supported" or missing result adds no work at launch. A saved "unsupported" result is re-checked with one live probe before `launch` refuses: only a confirming answer blocks the launch, a "supported" answer clears the denial, and an inconclusive answer or a failed request launches anyway with a warning on stderr and removes the stale denial.
+
 That POSTs the resolved Responses URL with only `{"model":"<slug>"}` (no `input`). A validation error specifically naming the missing input can confirm support. Authentication failures, temporary gateway errors, and ambiguous model-not-found responses remain inconclusive. Only explicit evidence that the Responses route or API is unsupported can block launch. Saved verdicts expire and are scoped to the model, credential and effective connection settings; old unscoped boolean verdicts do not block launch.
 
 Model fetching, probing and launch resolve the provider's `--set` overrides consistently, including `base_url`, `model_catalog_url`, `http_headers`, `env_http_headers` and `query_params`. Explicit catalog URLs reject redirects. Other provider requests may follow redirects only within the same origin, so custom credentials cannot be forwarded to a different host.

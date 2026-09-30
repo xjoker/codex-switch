@@ -888,9 +888,14 @@ async fn launch_provider(
     };
     let selected = profile.resolve_model(Some(selected_model))?.clone();
     let shown_model = passthrough_model.unwrap_or_else(|| selected.id.clone());
-    if profile.responses_support_for(&shown_model) == Some(false) {
+    // A saved denial is only a hint: re-check it live so an endpoint that has
+    // since gained /responses is never refused on stale evidence. Supported or
+    // unknown records cost nothing here.
+    if profile.responses_support_for(&shown_model) == Some(false)
+        && provider::recheck_cached_responses_denial(&profile, &shown_model).await?
+    {
         anyhow::bail!(
-            "Model '{}' on provider '{}' has no Codex Responses channel. The saved explicit probe marked it unsupported; probe again with `codex-switch provider probe {} --model {}` after the endpoint changes.",
+            "Model '{}' on provider '{}' has no Codex Responses channel. A saved probe marked it unsupported and a fresh probe just confirmed it; probe again with `codex-switch provider probe {} --model {}` after the endpoint changes.",
             shown_model,
             profile.alias,
             profile.alias,

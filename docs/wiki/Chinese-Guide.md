@@ -113,7 +113,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 
 限制：
 
-- Codex 目前只支持 `wire_api = "responses"`；DeepSeek 官方 Chat Completions API 不能直连，须走 OpenRouter 等网关。同一网关上 `/models` 有 slug 也不等于 `/responses` 能用。`provider probe` 只 POST `{"model":"..."}`（不带 `input`），不走补全。
+- Codex 目前只支持 `wire_api = "responses"`；DeepSeek 官方 Chat Completions API 不能直连，须走 OpenRouter 等网关。同一网关上 `/models` 有 slug 也不等于 `/responses` 能用。`provider probe` 只 POST `{"model":"..."}`（不带 `input`），不走补全。探测结果保存 7 天；`launch` 遇到已保存的“不支持”结论时不会直接拒绝，而是先做一次实时探测：仅在再次确认不支持时才拒绝，探测结果为支持则放行并更新记录，结果不确定或请求失败则放行并在 stderr 给出警告、清除该过期结论。
 - 提供方 `launch` 用独立运行目录（不改用户 `config.toml` 里的 ChatGPT 模型键），只改本次请求的模型和地址。提示词经符号链接写回 `~/.codex`；MCP 在退出时合并。可同时开多个模型。
 - `use` 与无别名的 `launch` 自动选号**仅面向 ChatGPT**，不会自动选提供方。
 - 提供方别名不能与 ChatGPT profile、其他提供方或 Codex 保留 id（`openai` / `ollama` / `lmstudio`）冲突。
