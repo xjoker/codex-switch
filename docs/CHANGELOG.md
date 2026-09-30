@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v20260930.3.0 (candidate) — 2026-09-30
+
 - **Token refresh keeps rotated credentials** — The identity check after a token refresh now refuses only a different account. A refreshed token that gains an email or account id, or a changed email on the same account id, is persisted instead of discarded, so it no longer strands the already-rotated refresh token and forces a re-login.
 - **Release archives carry license notices** — Every release archive now includes the project `LICENSE` and the Apache-2.0 license and notice for the upstream Codex text embedded in the binary (`THIRD-PARTY-LICENSES/upstream-codex/`). The README documents the third-party notice.
 - **401 recovery after a failed pre-refresh** — A warmup or model fetch whose proactive refresh failed for a transient reason (for example a network error) no longer uses up its one recovery refresh, so a following 401 can still be recovered. A terminal rejection such as `refresh_token_invalidated` still stops without replaying the credential.
@@ -9,6 +11,7 @@
 - **Provider launch re-checks a saved Responses denial** — Saved `provider probe` results now last 7 days (still invalidated at once by any endpoint, key, header, query or catalog change). Before `launch` refuses a model because of a saved "unsupported" result, it sends one live probe: a confirming answer refuses the launch, a "supported" answer proceeds and updates the record, and an inconclusive answer or failed request proceeds with a stderr warning and drops the stale denial. Saved "supported" results and missing records add no request.
 - **Maintenance updates** — Updated `thiserror` to 2.0.21 and `rand` to 0.10.3.
 - **Non-ASCII provider header values** — Provider `http_headers` and `env_http_headers` values that contain non-ASCII characters no longer make connection resolution fail, which had broken model fetch, probes and fingerprinting for that provider.
+- Includes the Codex 0.159.2 model contract, provider request, account API, recovery-state and cross-platform launch fixes from the preceding candidate.
 
 ## v20260930.2.0 (candidate) — 2026-09-30
 
