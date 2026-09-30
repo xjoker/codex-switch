@@ -487,6 +487,21 @@ fn harden_windows_acl(path: &Path, directory: bool) -> Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+
+    // Writing a directory DACL makes Windows re-propagate inheritance through
+    // the whole tree below it. `$CODEX_HOME` holds Codex sessions, worktrees,
+    // and caches (tens of thousands of entries), where that took seconds on
+    // every write. Skip the write when the exact protected DACL is already in
+    // place; anything else, including an extra or missing ACE, is rewritten.
+    if windows_dacl_already_matches(&path_wide, dacl) {
+        tracing::debug!(
+            path = %path.display(),
+            directory,
+            "windows ACL already hardened"
+        );
+        return Ok(());
+    }
+
     let acl_write_start = std::time::Instant::now();
     // SAFETY: the path is NUL-terminated, `dacl` points inside the live
     // security descriptor, and null owner/group/SACL pointers are required
@@ -526,6 +541,86 @@ fn harden_windows_acl(path: &Path, directory: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Whether the object at `path_wide` already carries a protected DACL whose
+/// ACEs are byte-identical, in order, to `desired`. Any read failure answers
+/// `false`, so the caller falls back to writing the DACL.
+#[cfg(windows)]
+fn windows_dacl_already_matches(
+    path_wide: &[u16],
+    desired: *const windows_sys::Win32::Security::ACL,
+) -> bool {
+    use std::ptr::null_mut;
+
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, GetSecurityDescriptorControl,
+        PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+    };
+
+    /// Raw bytes of every ACE in `acl`, or `None` when one cannot be read.
+    fn ace_bytes(acl: *const ACL) -> Option<Vec<Vec<u8>>> {
+        // SAFETY: `acl` is a live ACL; its header is read-only here.
+        let count = unsafe { (*acl).AceCount } as u32;
+        let mut aces = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let mut ace = null_mut();
+            // SAFETY: `index` is below AceCount and `ace` is writable storage.
+            if unsafe { GetAce(acl, index, &mut ace) } == 0 || ace.is_null() {
+                return None;
+            }
+            // SAFETY: GetAce returned a pointer to an ACE inside `acl`, which
+            // starts with an ACE_HEADER whose AceSize covers the whole ACE.
+            let size = unsafe { (*ace.cast::<ACE_HEADER>()).AceSize } as usize;
+            aces.push(unsafe { std::slice::from_raw_parts(ace.cast::<u8>(), size) }.to_vec());
+        }
+        Some(aces)
+    }
+
+    let mut current: *mut ACL = null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `path_wide` is NUL-terminated; only the DACL is requested and
+    // the returned descriptor is freed below.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut current,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return false;
+    }
+    let matches = (|| {
+        if current.is_null() {
+            return false;
+        }
+        let mut control = 0;
+        let mut revision = 0;
+        // SAFETY: `descriptor` is the live descriptor returned above.
+        if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0
+            || control & SE_DACL_PROTECTED == 0
+        {
+            return false;
+        }
+        match (ace_bytes(current), ace_bytes(desired)) {
+            (Some(current), Some(desired)) => current == desired,
+            _ => false,
+        }
+    })();
+    // SAFETY: GetNamedSecurityInfoW allocated `descriptor` with LocalAlloc;
+    // `current` points into it and is not used after this point.
+    unsafe {
+        LocalFree(descriptor);
+    }
+    matches
 }
 
 #[cfg(windows)]
@@ -1182,11 +1277,73 @@ mod tests {
         );
     }
 
+    /// Absolute path of a Windows system tool. Other tests swap `PATH` for a
+    /// fake `codex` directory while these run, so a bare name can vanish.
+    #[cfg(windows)]
+    fn windows_system_tool(relative: &str) -> PathBuf {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        PathBuf::from(root).join("System32").join(relative)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hardened_windows_dacl_is_recognized_until_an_ace_is_added() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let wide = |path: &Path| -> Vec<u16> {
+            path.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let desired = |path: &Path, directory: bool| {
+            // Harden once, then read back the DACL the helper compares with.
+            super::harden_windows_acl(path, directory).unwrap();
+            let mut dacl = std::ptr::null_mut();
+            let mut descriptor = std::ptr::null_mut();
+            let status = unsafe {
+                windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW(
+                    wide(path).as_ptr(),
+                    windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT,
+                    windows_sys::Win32::Security::DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut dacl,
+                    std::ptr::null_mut(),
+                    &mut descriptor,
+                )
+            };
+            assert_eq!(status, 0);
+            (dacl, descriptor)
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let (dacl, descriptor) = desired(dir.path(), true);
+        assert!(
+            super::windows_dacl_already_matches(&wide(dir.path()), dacl),
+            "a directory hardened a moment ago must not be rewritten"
+        );
+
+        let status = std::process::Command::new(windows_system_tool("icacls.exe"))
+            .arg(dir.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to seed an Everyone ACE");
+        assert!(
+            !super::windows_dacl_already_matches(&wide(dir.path()), dacl),
+            "an extra ACE must force the DACL to be rewritten"
+        );
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(descriptor);
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn atomic_private_write_removes_unknown_explicit_windows_aces() {
         let dir = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new("icacls")
+        let status = std::process::Command::new(windows_system_tool("icacls.exe"))
             .arg(dir.path())
             .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
             .status()
@@ -1212,18 +1369,20 @@ foreach ($item in @($env:CS_ACL_DIR, $env:CS_ACL_FILE)) {
     }
 }
 "#;
-        let output = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                inspect,
-            ])
-            .env("CS_ACL_DIR", dir.path())
-            .env("CS_ACL_FILE", &path)
-            .output()
-            .unwrap();
+        let output = std::process::Command::new(windows_system_tool(
+            r"WindowsPowerShell\v1.0\powershell.exe",
+        ))
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            inspect,
+        ])
+        .env("CS_ACL_DIR", dir.path())
+        .env("CS_ACL_FILE", &path)
+        .output()
+        .unwrap();
         assert!(
             output.status.success(),
             "ACL inspection failed: {}",
