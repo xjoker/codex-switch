@@ -46,11 +46,11 @@ Independent review covered provider transport, OAuth rotation/routing, native pr
 
 ## Candidate validation
 
-Candidate base version: `20260930.2.0`. Local validation ran on Windows against the combined baseline and these repairs:
+Candidate base version: `20260930.3.0`. Local validation ran on Windows against the combined baseline and these repairs:
 
 - `cargo test --all --offline`: 838 passed (678 unit and 160 integration tests), zero failed or ignored. Unix-only process/signal tests still require the Linux/macOS CI jobs.
 - `cargo fmt --check` and `cargo clippy --all-targets --offline -- -D warnings`: passed.
-- `cargo audit`: passed after refreshing 1,277 RustSec advisories and scanning 384 dependencies; no dependency versions were changed by this candidate.
+- `cargo audit`: passed after refreshing 1,277 RustSec advisories and scanning 384 dependencies; the only dependency changes in this candidate are `thiserror` 2.0.21 and `rand` 0.10.3, which that audit run did not cover.
 - Bash and PowerShell installer syntax: passed.
 - Official Codex `0.159.2` executable: passed a local HTTP/SSE smoke covering model sync, probe, launch, a second launch that sweeps old runs, and exact-session resume. All five requests used the expected routing, headers and credentials; the model query used `client_version=0.159.2`. The catalog supplied nonempty instructions, resume reused its original native profile, and shared `auth.json`/`config.toml` were not created or replaced.
 - The smoke used temporary homes and a mock provider; it did not validate paid-account quota activation against the production ChatGPT backend.
