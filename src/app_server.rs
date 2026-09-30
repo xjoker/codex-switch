@@ -23,8 +23,9 @@ const DAEMON_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 pub enum DaemonRestart {
     /// No managed daemon is running, or this Codex has no daemon; nothing to do.
     NotRunning,
-    /// The live `auth.json` is byte-identical to the snapshot taken before the
-    /// change, so the daemon already holds it.
+    /// The live `auth.json` holds the same credentials as the snapshot taken
+    /// before the change (compared as parsed, canonical JSON, so formatting
+    /// differences are ignored), so the daemon already holds them.
     Unchanged,
     Restarted,
     /// The daemon is running but `use.restart_app_server = false` keeps it

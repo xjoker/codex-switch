@@ -144,6 +144,9 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Switch to a profile; omit alias to auto-select using the unified scoring algorithm
+    #[command(
+        after_help = "When the live auth.json changes and a Codex app-server daemon (Codex 0.157+) is running, it is restarted so new sessions use the selected account.\nSet `[use] restart_app_server = false` in config.toml to turn this off."
+    )]
     Use {
         /// Profile alias (omit to auto-select)
         alias: Option<String>,
