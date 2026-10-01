@@ -41,6 +41,10 @@
 
 后续 CI 的完整分片诊断确认 Windows/macOS 的 Python fake Codex 首次启动超过 4 秒，而同一路径第二次版本探测成功；macOS 的 SIGTERM 用例也在等待 fake 启动时超时。测试 fixture 改用宿主 PATH 上的绝对 Python 解释器，并在正式 CLI 测试前预热 fake executable、清空 probe log。生产 4 秒版本门禁保持不变，故意延迟/失败的回归用例仍在正式执行时设置。
 
+## 发布结果（2026-10-01）
+
+上述修复随 stable `v20261001.5.0` 发布，提交 `629d3b6`，与维护者验收的 `20261001.5.0-dev` 为同一提交。发布前的 Opus 复审另发现一项阻断：旧 stable `v20260804.1.0` 的 `self-update` 会用新二进制重启已删除的 daemon，macOS LaunchAgent 因 `KeepAlive` 无限重启。该问题由隐藏的 `daemon` 兼容命令修复，它会删除旧的服务注册。Release workflow 新增发布前 attestation 以及从 `v0.0.19`、`v20260804.1.0` 升级的三平台门禁，全部通过后才发布。发布后六个归档的 SHA-256 与 provenance 均复核通过。真实账号 quota、企业策略部署和桌面 UI 仍未实测。
+
 ## 已复现 / 代码确定的问题（基线，现已修复）
 
 ### [P2] `use` 可能在 Codex 无法读取认证文件时报告成功

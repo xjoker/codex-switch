@@ -22,7 +22,7 @@ The official Codex 0.159.2 executable passed `doctor` against the PATH CLI and a
 
 Additional isolated CLI smoke tests confirmed that WIF rejects ChatGPT launch before creating live credentials or provider-run state, with one JSON error and no stderr output; a fake-key provider still launches the official engine's `--help` with WIF and a keyring store present, without creating or swapping `auth.json`. This checks the provider branch and process launch, not a real provider completion. No real account or production backend request was used.
 
-These are local checks only. These post-`97a220b` changes have not been pushed; CI on other operating systems and release-artifact verification have not run. The prior `20260930.3.0` validation record elsewhere in this document remains a historical result for that candidate and is not replaced by these results. The candidate remains `20260930.4.0`; this validation does not publish or release it.
+The checks in this section were first run locally on Windows. The prior `20260930.3.0` validation record elsewhere in this document remains a historical result for that candidate and is not replaced by these results. This alignment shipped in stable `v20261001.5.0` (commit `629d3b6`); see [Release outcome](#release-outcome).
 
 ## Authentication and audit follow-up
 
@@ -80,3 +80,7 @@ Full logs from [baseline CI 36661218187](https://github.com/xjoker/codex-switch/
 [First combined CI 36667616283](https://github.com/xjoker/codex-switch/actions/runs/36667616283) passed Linux, Windows and format/audit. Its macOS job exposed a cold-start timeout in the Python test wrapper at the two-second required help probe. The routing probe now has a separate ten-second bound, while the optional version probe remains at two seconds. Regressions cover a three-second valid help response and refusal before any live credential write when help fails. Unknown routing still fails closed.
 
 Remote publication remains gated on all three CI hosts passing for the exact candidate commit. Only then may the rolling `dev` tag move to trigger the six-target release workflow, legacy-upgrade jobs and published-artifact verification. The repository's Actions and rolling release record the remote results; local mock tests do not substitute for those gates.
+
+## Release outcome
+
+The 0.159.2 alignment, the minimum-version gate and the audit repairs were released in stable `v20261001.5.0` on 2026-10-01 from commit `629d3b6`, the same commit the maintainer accepted as `20261001.5.0-dev`. Branch CI passed on Linux, macOS and Windows. The Release workflow built all six archives, attested them, and passed the prepublish upgrade gate from `v0.0.19` and `v20260804.1.0` on all three hosts before publishing. After publication, all six archives matched their SHA-256 files and verified against the build-provenance bundle for that tag and commit. Paid-account quota activation against the production ChatGPT backend and enterprise policy deployments were not exercised by these checks.
