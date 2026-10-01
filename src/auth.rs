@@ -69,6 +69,25 @@ fn client_version_from_report(report: crate::codex_compat::VersionReport) -> Str
         .unwrap_or_else(|| ALIGNED_CODEX_VERSION.to_string())
 }
 
+/// Run the first (blocking) PATH probe on the blocking pool so no async worker
+/// stalls on it. Later calls are free once the value is cached.
+pub(crate) async fn warm_codex_cli_version() {
+    if CODEX_CLI_VERSION.get().is_some() {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(|| {
+        codex_cli_version();
+    })
+    .await;
+}
+
+/// `build_http_client` for async callers: the User-Agent embeds the Codex CLI
+/// version, whose first lookup spawns `codex --version`.
+pub(crate) async fn build_http_client_async() -> Result<reqwest::Client> {
+    warm_codex_cli_version().await;
+    build_http_client()
+}
+
 /// User-Agent in the upstream shape: `codex_cli_rs/<version> (<os>; <arch>)`.
 pub(crate) fn codex_user_agent() -> String {
     format!(
@@ -1156,6 +1175,14 @@ mod tests {
             unknown_cli.status,
             crate::codex_compat::CompatibilityStatus::NotFound
         );
+    }
+
+    #[tokio::test]
+    async fn warming_the_codex_version_runs_off_the_async_worker_and_caches() {
+        warm_codex_cli_version().await;
+        assert!(CODEX_CLI_VERSION.get().is_some());
+        // A second call is a cheap no-op and the async client builder works.
+        build_http_client_async().await.unwrap();
     }
 
     #[test]

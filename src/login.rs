@@ -174,7 +174,7 @@ pub async fn run_device_auth() -> Result<LoginTokens> {
     crate::auth::validate_managed_chatgpt_account(&tokens.id_token)?;
     // Best-effort API key exchange, same as Codex's browser login. Failure
     // leaves OPENAI_API_KEY null, which Codex accepts.
-    if let Ok(client) = crate::auth::build_http_client() {
+    if let Ok(client) = crate::auth::build_http_client_async().await {
         tokens.api_key = obtain_api_key(&client, &tokens.id_token).await;
     }
     Ok(tokens)
@@ -447,7 +447,7 @@ async fn exchange_code_with_redirect(
     code_verifier: &str,
     redirect_uri: &str,
 ) -> Result<LoginTokens> {
-    let client = crate::auth::build_http_client()?;
+    let client = crate::auth::build_http_client_async().await?;
     let token_url = crate::auth::token_url();
 
     let body = format!(
@@ -648,7 +648,7 @@ fn device_poll_next_wake(
 /// Run Device Code Flow: request code → display to user → poll for token
 pub async fn run_device_code_auth() -> Result<LoginTokens> {
     crate::auth::ensure_file_credentials_store()?;
-    let client = crate::auth::build_http_client()?;
+    let client = crate::auth::build_http_client_async().await?;
 
     // Step 1: Request device code
     user_println("  Requesting device code...");

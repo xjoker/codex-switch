@@ -217,7 +217,7 @@ pub async fn refresh_reset_credits_for_profile(
     let (access_token, _) = auth::extract_tokens(&val);
     let access_token = access_token.ok_or_else(|| anyhow::anyhow!("{alias}: no access_token"))?;
     let account_info = crate::jwt::parse_account_info(&val);
-    let client = auth::build_http_client()?;
+    let client = auth::build_http_client_async().await?;
     fetch_reset_credits_with_routing(
         &client,
         &access_token,
@@ -474,7 +474,7 @@ pub async fn fetch_earliest_reset_credit(alias: &str, profile_path: &Path) -> Re
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("{alias}: auth.json missing access_token"))?;
     let account_info = crate::jwt::parse_account_info(&val);
-    let client = auth::build_http_client()?;
+    let client = auth::build_http_client_async().await?;
     let (_, credits) = fetch_reset_credits_with_routing(
         &client,
         &access_token,
@@ -512,7 +512,7 @@ async fn consume_reset_credit_selected(
         .ok_or_else(|| anyhow::anyhow!("{alias}: auth.json missing access_token"))
         .map_err(ConsumeResetCreditError::not_consumed)?;
     let account_info = crate::jwt::parse_account_info(&val);
-    let client = auth::build_http_client().map_err(ConsumeResetCreditError::not_consumed)?;
+    let client = auth::build_http_client_async().await.map_err(ConsumeResetCreditError::not_consumed)?;
 
     let (_, credits) = fetch_reset_credits_with_routing(
         &client,

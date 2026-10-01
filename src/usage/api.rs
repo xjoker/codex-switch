@@ -427,6 +427,32 @@ fn persist_refreshed_tokens(
     Ok(())
 }
 
+/// Async-safe wrapper: persistence polls a file lock for up to 15 s and does
+/// auth I/O and ACL calls, none of which may stall a runtime worker. The
+/// blocking task runs to completion even if the caller is dropped, which is
+/// what we want for a credential the server has already rotated.
+async fn persist_refreshed_tokens_blocking(
+    alias: &str,
+    presented_refresh_token: &str,
+    new_tokens: &RefreshedTokens,
+    operation: &'static str,
+) -> std::result::Result<(), UsageError> {
+    let owned_alias = alias.to_owned();
+    let presented = presented_refresh_token.to_owned();
+    let tokens = new_tokens.clone();
+    match tokio::task::spawn_blocking(move || {
+        persist_refreshed_tokens(&owned_alias, &presented, &tokens, operation)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join_error) => Err(UsageError::token_persist_failed(
+            alias,
+            &anyhow::anyhow!("token persistence task failed: {join_error}"),
+        )),
+    }
+}
+
 fn resolve_refreshed_tokens(
     response: RefreshResponse,
     status: reqwest::StatusCode,
@@ -642,7 +668,7 @@ pub(crate) async fn refresh_profile_tokens(
         anyhow::bail!("{}", known.detail);
     }
 
-    let client = auth::build_http_client()?;
+    let client = auth::build_http_client_async().await?;
     let refreshed = match do_refresh_token(
         alias,
         &client,
@@ -912,7 +938,8 @@ async fn fetch_usage_retried_inner(
                     &anyhow::anyhow!("refresh response without presented refresh_token"),
                 )
             })?;
-            persist_refreshed_tokens(alias, presented, new_tokens, "token_persist_reconcile")?;
+            persist_refreshed_tokens_blocking(alias, presented, new_tokens, "token_persist_reconcile")
+                .await?;
             at = new_tokens.access_token.clone();
             id_token = Some(new_tokens.id_token.clone());
             refresh_token = Some(new_tokens.refresh_token.clone());
@@ -1052,7 +1079,7 @@ async fn fetch_usage_capturing_refresh(
     persist_rotated_tokens: bool,
 ) -> Result<UsageInfo> {
     let client_started = Instant::now();
-    let client = match auth::build_http_client() {
+    let client = match auth::build_http_client_async().await {
         Ok(client) => {
             info!(
                 profile_alias = diagnostic_alias(alias),
@@ -1090,12 +1117,13 @@ async fn fetch_usage_capturing_refresh(
                 let bearer = new_tokens.access_token.clone();
                 *refreshed = Some(new_tokens);
                 if persist_rotated_tokens {
-                    persist_refreshed_tokens(
+                    persist_refreshed_tokens_blocking(
                         alias,
                         rt,
                         refreshed.as_ref().unwrap(),
                         "token_persist_before_replay",
                     )
+                    .await
                     .map_err(|error| anyhow::anyhow!(error.detail))?;
                 }
 
@@ -1180,12 +1208,13 @@ async fn fetch_usage_capturing_refresh(
                 let bearer = new_tokens.access_token.clone();
                 *refreshed = Some(new_tokens);
                 if persist_rotated_tokens {
-                    persist_refreshed_tokens(
+                    persist_refreshed_tokens_blocking(
                         alias,
                         rt,
                         refreshed.as_ref().unwrap(),
                         "token_persist_before_replay",
                     )
+                    .await
                     .map_err(|error| anyhow::anyhow!(error.detail))?;
                 }
 
@@ -1306,7 +1335,7 @@ async fn validate_import_auth_capturing_refresh(
             Ok((usage, validated_account_id))
         }
         (None, Some(rt)) => {
-            let client = auth::build_http_client()?;
+            let client = auth::build_http_client_async().await?;
             let first = do_refresh_token(alias, &client, id_token.as_deref(), None, &rt).await?;
             let (access_token, id_token, refresh_token) = (
                 first.access_token.clone(),
@@ -1574,7 +1603,7 @@ pub async fn refresh_expiring_tokens_within(
 
     // Build before starting the budget: client construction can synchronously
     // initialize TLS state, but the budget is only for opening rotations.
-    let client = match auth::build_http_client() {
+    let client = match auth::build_http_client_async().await {
         Ok(client) => client,
         Err(error) => {
             warn!(
@@ -1611,7 +1640,7 @@ pub async fn refresh_expiring_tokens_within(
                 )
                 .await
                 {
-                    Ok(new_tokens) => match persist_refreshed_tokens(&alias, &rt, &new_tokens, "token_persist_opportunistic") {
+                    Ok(new_tokens) => match persist_refreshed_tokens_blocking(&alias, &rt, &new_tokens, "token_persist_opportunistic").await {
                         Ok(()) => {
                             info!("[{alias}] opportunistic token refresh succeeded");
                             None
@@ -1700,6 +1729,67 @@ mod tests {
         line.split_whitespace()
             .find_map(|part| part.strip_prefix(&format!("{name}=")))
             .map(|value| value.trim_matches('"'))
+    }
+
+    /// Persisting a rotated credential waits on the cross-process auth lock
+    /// (up to 15 s). On the single-thread test runtime, a synchronous wait
+    /// would freeze the ticker below; the blocking-pool wrapper must not.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn persisting_rotated_tokens_does_not_block_the_async_worker() {
+        let _env_lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let previous = (
+            std::env::var_os("CODEX_SWITCH_HOME"),
+            std::env::var_os("CODEX_HOME"),
+        );
+        unsafe {
+            std::env::set_var("CODEX_SWITCH_HOME", home.path());
+            std::env::set_var("CODEX_HOME", home.path().join("codex"));
+        }
+        let lease = crate::profile::lock_launch_session().unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            drop(lease);
+        });
+
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker_ticks = ticks.clone();
+        let ticker = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                ticker_ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let tokens = RefreshedTokens {
+            id_token: "id".into(),
+            access_token: "access".into(),
+            refresh_token: "new".into(),
+        };
+        let result = persist_refreshed_tokens_blocking("missing", "old", &tokens, "test").await;
+        let observed = ticks.load(std::sync::atomic::Ordering::SeqCst);
+        ticker.abort();
+        releaser.join().unwrap();
+        unsafe {
+            match previous.0 {
+                Some(value) => std::env::set_var("CODEX_SWITCH_HOME", value),
+                None => std::env::remove_var("CODEX_SWITCH_HOME"),
+            }
+            match previous.1 {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+
+        // The profile does not exist, so persistence reports a failure, but
+        // only after the lock wait the runtime stayed responsive through.
+        assert!(result.is_err());
+        assert!(
+            observed >= 5,
+            "runtime was blocked while waiting for the auth lock ({observed} ticks)"
+        );
     }
 
     #[tokio::test]

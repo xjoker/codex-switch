@@ -257,6 +257,7 @@ impl Refresh {
     }
 }
 
+#[derive(Clone)]
 pub struct RefreshedTokens {
     pub id_token: String,
     pub access_token: String,

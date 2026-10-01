@@ -1497,6 +1497,7 @@ pub(crate) async fn fetch_gateway_models_with_overrides(
 async fn fetch_gateway_models_with_connection(
     connection: &ProviderHttpConfig,
 ) -> Result<Vec<RemoteModel>> {
+    auth::warm_codex_cli_version().await;
     let (url, allow_same_origin_redirects) = connection.models_url()?;
     let display_url = redact_connection_secrets(&display_safe_url(&url), connection);
     let client = auth::build_http_client_with_redirect_policy(if allow_same_origin_redirects {
@@ -1624,7 +1625,7 @@ pub(crate) async fn fetch_fallback_models(source: &str) -> Result<Vec<RemoteMode
 }
 
 async fn fetch_models_url(url: &str, bearer: Option<&str>) -> Result<Vec<RemoteModel>> {
-    let client = auth::build_http_client()?;
+    let client = auth::build_http_client_async().await?;
     let parsed_url = reqwest::Url::parse(url).context("model catalog URL is invalid")?;
     let display_url = display_safe_url(&parsed_url);
     let mut request = client
@@ -1744,6 +1745,7 @@ async fn probe_responses_support_with_connection(
 ) -> Result<ResponsesProbe> {
     let url = connection.url_for_path("responses")?;
     let display_url = redact_connection_secrets(&display_safe_url(&url), connection);
+    auth::warm_codex_cli_version().await;
     let client = auth::build_http_client_with_redirect_policy(same_origin_redirect_policy(&url))?;
     let headers = provider_http_headers(connection, true)?;
     let body = serde_json::to_vec(&serde_json::json!({ "model": model }))

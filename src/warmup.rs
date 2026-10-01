@@ -854,7 +854,7 @@ pub async fn warmup_account(alias: &str, profile_path: &Path) -> Result<WarmupOu
         is_fedramp: info.is_fedramp,
     };
 
-    let client = crate::auth::build_http_client()?;
+    let client = crate::auth::build_http_client_async().await?;
 
     // Set when the pre-warmup proactive refresh below is rejected by the auth
     // server outright (e.g. `refresh_token_reused`): that refresh_token is now
@@ -1107,7 +1107,7 @@ pub(crate) async fn fetch_models_for_profile(
         is_fedramp: info.is_fedramp,
     };
 
-    let client = crate::auth::build_http_client()?;
+    let client = crate::auth::build_http_client_async().await?;
     let mut refresh_attempted = false;
 
     if profile_tokens.refresh_token.is_some()

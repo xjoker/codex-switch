@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Fewer stalls during refresh.** Saving rotated tokens (which can wait up to 15 s on the auth lock) and the first `codex --version` lookup used for the HTTP User-Agent now run on the blocking thread pool instead of async workers, so concurrent refreshes and the TUI stay responsive. Token rotation semantics are unchanged.
 - **Locally built Codex no longer triggers the upgrade warning.** A development build that reports `0.0.0` (or a `-dev` / `-local` suffix) was classified as below the minimum, giving a permanent TUI upgrade warning and sending `client_version=0.0.0` to `/models`. It is now reported as `dev_build` by `doctor`, never warned about or refused by `launch`, and HTTP requests fall back to the 0.159.2 baseline version.
 - **`launch` no longer refuses when the Codex version cannot be read.** A timeout of the version probe (a cold Windows `codex.cmd` start could exceed 4 s, now 10 s) or unparseable output used to abort the launch with no override; it now prints a warning on stderr and continues. A definitively older version is still refused, and a prerelease of the minimum such as `0.159.2-rc.1` now counts as meeting it. The probe runs off the async worker.
 - **The TUI upgrade warning no longer hides the status bar.** When the PATH Codex CLI was below the minimum version, the warning replaced the status line for the whole session, so status messages, the marked-selection prompt and the footer key hints never appeared. The warning now has its own row above them.
