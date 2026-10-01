@@ -99,6 +99,13 @@ async fn send_usage_request(
     request: reqwest::RequestBuilder,
 ) -> Result<http_retry::BufferedResponse> {
     let started = Instant::now();
+    info!(
+        profile_alias = diagnostic_alias(alias),
+        phase = "usage_http_started",
+        request_phase = phase,
+        outcome = "started",
+        "usage HTTP phase started"
+    );
     match http_retry::send(request, ReplaySafety::DeferredGet).await {
         Ok(response) => {
             info!(
@@ -297,10 +304,8 @@ fn usage_url() -> String {
     std::env::var("CS_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
 }
 
-fn token_needs_refresh(access_token: &str, id_token: Option<&str>, margin_secs: i64) -> bool {
+fn token_needs_refresh(access_token: &str, margin_secs: i64) -> bool {
     crate::jwt::is_token_expiring(access_token, margin_secs).unwrap_or(false)
-        || id_token
-            .is_some_and(|token| crate::jwt::is_token_expiring(token, margin_secs).unwrap_or(false))
 }
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -368,6 +373,13 @@ fn persist_refreshed_tokens(
     operation: &'static str,
 ) -> std::result::Result<(), UsageError> {
     let started = Instant::now();
+    info!(
+        profile_alias = diagnostic_alias(alias),
+        phase = "token_persist_started",
+        operation,
+        outcome = "started",
+        "rotated credential persistence started"
+    );
     let persisted = crate::profile::update_profile_tokens_if_refresh_matches(
         alias,
         presented_refresh_token,
@@ -1065,10 +1077,11 @@ async fn fetch_usage_capturing_refresh(
     let usage_url = usage_url();
     let mut rejected_refresh: Option<anyhow::Error> = None;
 
-    // Refresh when either JWT is near expiry so account identity metadata does
-    // not remain stale while the access token is still usable.
+    // Match Codex's OAuth refresh gate: a parsed access-token expiry controls
+    // proactive rotation. An expired ID token alone is not a reason to spend a
+    // single-use refresh token before the usage request.
     if let Some(rt) = refresh_token
-        && token_needs_refresh(access_token, id_token, OPPORTUNISTIC_REFRESH_MARGIN)
+        && token_needs_refresh(access_token, OPPORTUNISTIC_REFRESH_MARGIN)
     {
         info!("[{alias}] token expiring soon, proactively refreshing");
 
@@ -1360,6 +1373,12 @@ pub(crate) async fn do_refresh_token(
     debug!("[{alias}] sending token refresh request");
 
     let refresh_started = Instant::now();
+    info!(
+        profile_alias = diagnostic_alias(alias),
+        phase = "refresh_post_started",
+        outcome = "started",
+        "credential refresh HTTP phase started"
+    );
     let resp = match build_refresh_request(client, &token_url, refresh_token)
         .send()
         .await
@@ -1434,8 +1453,8 @@ pub(crate) async fn do_refresh_token(
 
 /// Max number of tokens to refresh opportunistically per CLI invocation.
 const OPPORTUNISTIC_REFRESH_LIMIT: usize = 3;
-/// Refresh tokens expiring within this many seconds.
-const OPPORTUNISTIC_REFRESH_MARGIN: i64 = 1800; // 30 minutes
+/// Refresh access tokens expiring within this many seconds, matching Codex.
+const OPPORTUNISTIC_REFRESH_MARGIN: i64 = 5 * 60;
 /// How many rotations may be in flight at once. Each in-flight request holds a
 /// credential that only exists in its own response, so this also bounds how
 /// much can be lost if the process dies mid-batch.
@@ -1527,13 +1546,9 @@ pub async fn refresh_expiring_tokens_within(
             debug!("[{alias}] skipping opportunistic refresh: credential already rejected");
             continue;
         }
-        let expiry = [
-            crate::jwt::token_expires_at(&at),
-            id_token.as_deref().and_then(crate::jwt::token_expires_at),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        // Match Codex's proactive refresh selection: ID-token expiry does not
+        // spend a refresh token while the access token is still valid.
+        let expiry = crate::jwt::token_expires_at(&at);
         let Some(exp) = expiry else {
             continue;
         };
@@ -1681,6 +1696,12 @@ mod tests {
         }
     }
 
+    fn timing_log_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix(&format!("{name}=")))
+            .map(|value| value.trim_matches('"'))
+    }
+
     #[tokio::test]
     async fn usage_http_timing_includes_delayed_mock_response_body() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1724,25 +1745,39 @@ mod tests {
 
         assert_eq!(response.status, reqwest::StatusCode::OK);
         let output = logs.contents();
+        let lines = output.lines().collect::<Vec<_>>();
+        let started_line = lines
+            .iter()
+            .copied()
+            .find(|line| {
+                timing_log_field(line, "phase") == Some("usage_http_started")
+                    && timing_log_field(line, "request_phase") == Some("usage_get")
+            })
+            .expect("usage GET start event should be captured");
         let usage_line = output
             .lines()
-            .find(|line| line.contains("usage_get"))
+            .find(|line| timing_log_field(line, "phase") == Some("usage_get"))
             .expect("usage GET timing event should be captured");
-        let field = |name: &str| {
-            usage_line
-                .split_whitespace()
-                .find_map(|part| part.strip_prefix(&format!("{name}=")))
-                .map(|value| value.trim_matches('"'))
-        };
-        assert_eq!(field("phase"), Some("usage_get"), "{usage_line}");
+        let start_index = lines.iter().position(|line| *line == started_line).unwrap();
+        let finish_index = lines.iter().position(|line| *line == usage_line).unwrap();
+        assert!(start_index < finish_index, "{output}");
+        assert_eq!(
+            timing_log_field(started_line, "profile_alias"),
+            Some("<redacted-email-alias>")
+        );
+        assert_eq!(
+            timing_log_field(usage_line, "phase"),
+            Some("usage_get"),
+            "{usage_line}"
+        );
         assert!(output.contains("<redacted-email-alias>"), "{output}");
         assert!(!output.contains("private@example.invalid"), "{output}");
         assert_eq!(
-            field("status").and_then(|value| value.split(' ').next()),
+            timing_log_field(usage_line, "status").and_then(|value| value.split(' ').next()),
             Some("200")
         );
-        assert_eq!(field("response_bytes"), Some("2"));
-        let elapsed = field("elapsed_ms")
+        assert_eq!(timing_log_field(usage_line, "response_bytes"), Some("2"));
+        let elapsed = timing_log_field(usage_line, "elapsed_ms")
             .and_then(|value| value.parse::<u64>().ok())
             .expect("timing log should contain integer elapsed_ms");
         assert!(
@@ -1777,12 +1812,277 @@ mod tests {
     }
 
     #[test]
-    fn expired_id_token_triggers_refresh_before_access_token_expires() {
+    fn only_access_token_expiry_triggers_proactive_refresh() {
         let now = crate::auth::now_unix_secs();
         let access = jwt_with_exp(now + 86_400);
-        let id = jwt_with_exp(now - 60);
 
-        assert!(token_needs_refresh(&access, Some(&id), 60));
+        assert!(!token_needs_refresh(&access, 60));
+        let expiring_access = jwt_with_exp(now + 30);
+        assert!(token_needs_refresh(&expiring_access, 60));
+    }
+
+    struct EnvVarGuard {
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvVarGuard {
+        fn set(values: &[(&'static str, Option<&std::ffi::OsStr>)]) -> Self {
+            let previous = values
+                .iter()
+                .map(|(name, value)| {
+                    let old = std::env::var_os(name);
+                    match value {
+                        Some(value) => unsafe { std::env::set_var(name, value) },
+                        None => unsafe { std::env::remove_var(name) },
+                    }
+                    (*name, old)
+                })
+                .collect();
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.previous.drain(..) {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    async fn read_mock_request(stream: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0, "mock client closed before sending headers");
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    async fn write_mock_response(stream: &mut tokio::net::TcpStream, body: &str) {
+        use tokio::io::AsyncWriteExt;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    // The process-wide environment lock must cover all awaited mock requests.
+    #[allow(clippy::await_holding_lock)]
+    async fn expired_id_token_with_valid_access_token_uses_get_without_refresh_post() {
+        use tokio::net::TcpListener;
+
+        let _url_lock = crate::auth::URL_ENV_LOCK.lock().await;
+        let _env_lock = crate::profile::TEST_ENV_LOCK.lock().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let token_url = format!("http://{address}/oauth/token");
+        let usage_url = format!("http://{address}/usage");
+        let _vars = EnvVarGuard::set(&[
+            ("CODEX_HOME", Some(codex_home.path().as_os_str())),
+            ("CS_TOKEN_URL", Some(std::ffi::OsStr::new(&token_url))),
+            ("CS_USAGE_URL", Some(std::ffi::OsStr::new(&usage_url))),
+            ("OPENAI_FEDERATION_RULE_ID", None),
+            ("OPENAI_IDENTITY_TOKEN_FILE", None),
+        ]);
+        let now = crate::auth::now_unix_secs();
+        let access = jwt_with_exp(now + 86_400);
+        let expected_access = access.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_mock_request(&mut stream).await;
+                if request.starts_with("POST /oauth/token ") {
+                    requests.push("POST /oauth/token".to_string());
+                    // Keep any regression hermetic and terminal so this fake
+                    // single-use credential is never sent to a live endpoint.
+                    write_mock_response(&mut stream, r#"{"error":"invalid_grant"}"#).await;
+                    continue;
+                }
+                assert!(
+                    request.starts_with("GET /usage "),
+                    "unexpected mock request"
+                );
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer ")
+                );
+                assert!(
+                    request.contains(&expected_access),
+                    "mock GET used another access token"
+                );
+                requests.push("GET /usage".to_string());
+                write_mock_response(
+                    &mut stream,
+                    r#"{"credits":{"has_credits":true,"balance":0}}"#,
+                )
+                .await;
+                break;
+            }
+            requests
+        });
+
+        let outcome = fetch_usage_with_refresh(
+            "test",
+            &access,
+            Some(&jwt_with_exp(now - 60)),
+            Some("refresh-single-use"),
+            None,
+            false,
+        )
+        .await;
+        assert!(outcome.result.is_ok());
+        assert!(outcome.refreshed.is_none());
+        assert_eq!(server.await.unwrap(), ["GET /usage"]);
+    }
+
+    #[tokio::test]
+    // The process-wide environment lock must cover all awaited mock requests.
+    #[allow(clippy::await_holding_lock)]
+    async fn expiring_access_token_posts_refresh_then_replays_usage_get() {
+        use tokio::net::TcpListener;
+
+        let _url_lock = crate::auth::URL_ENV_LOCK.lock().await;
+        let _env_lock = crate::profile::TEST_ENV_LOCK.lock().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let token_url = format!("http://{address}/oauth/token");
+        let usage_url = format!("http://{address}/usage");
+        let _vars = EnvVarGuard::set(&[
+            ("CODEX_HOME", Some(codex_home.path().as_os_str())),
+            ("CS_TOKEN_URL", Some(std::ffi::OsStr::new(&token_url))),
+            ("CS_USAGE_URL", Some(std::ffi::OsStr::new(&usage_url))),
+            ("OPENAI_FEDERATION_RULE_ID", None),
+            ("OPENAI_IDENTITY_TOKEN_FILE", None),
+        ]);
+        let server = tokio::spawn(async move {
+            let (mut token_stream, _) = listener.accept().await.unwrap();
+            let token_request = read_mock_request(&mut token_stream).await;
+            assert!(token_request.starts_with("POST /oauth/token "));
+            write_mock_response(
+                &mut token_stream,
+                r#"{"id_token":"id-new","access_token":"access-new","refresh_token":"refresh-new"}"#,
+            )
+            .await;
+            let (mut usage_stream, _) = listener.accept().await.unwrap();
+            let usage_request = read_mock_request(&mut usage_stream).await;
+            assert!(usage_request.starts_with("GET /usage "));
+            assert!(
+                usage_request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer access-new")
+            );
+            write_mock_response(
+                &mut usage_stream,
+                r#"{"credits":{"has_credits":true,"balance":0}}"#,
+            )
+            .await;
+            (token_request, usage_request)
+        });
+
+        let now = crate::auth::now_unix_secs();
+        let outcome = fetch_usage_with_refresh(
+            "test",
+            &jwt_with_exp(now + 30),
+            Some(&jwt_with_exp(now - 60)),
+            Some("refresh-single-use"),
+            None,
+            false,
+        )
+        .await;
+        assert!(outcome.result.is_ok());
+        assert_eq!(outcome.refreshed.unwrap().refresh_token, "refresh-new");
+        let (token_request, usage_request) = server.await.unwrap();
+        assert!(token_request.starts_with("POST /oauth/token "));
+        assert!(usage_request.starts_with("GET /usage "));
+    }
+
+    #[tokio::test]
+    // The process-wide environment lock must cover all awaited mock requests.
+    #[allow(clippy::await_holding_lock)]
+    async fn opportunistic_refresh_ignores_expired_id_with_valid_access_token() {
+        use tokio::{net::TcpListener, sync::oneshot};
+
+        let _url_lock = crate::auth::URL_ENV_LOCK.lock().await;
+        let _env_lock = crate::profile::TEST_ENV_LOCK.lock().unwrap();
+        let switch_home = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let token_url = format!("http://{address}/oauth/token");
+        let _vars = EnvVarGuard::set(&[
+            ("CODEX_SWITCH_HOME", Some(switch_home.path().as_os_str())),
+            ("CODEX_HOME", Some(codex_home.path().as_os_str())),
+            ("CS_TOKEN_URL", Some(std::ffi::OsStr::new(&token_url))),
+            ("OPENAI_FEDERATION_RULE_ID", None),
+            ("OPENAI_IDENTITY_TOKEN_FILE", None),
+        ]);
+
+        let now = crate::auth::now_unix_secs();
+        let alias = "expired-id-valid-access";
+        let profile_path = crate::auth::profiles_dir()
+            .unwrap()
+            .join(alias)
+            .join("auth.json");
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        let access = jwt_with_exp(now + 86_400);
+        let id = jwt_with_exp(now - 60);
+        let auth_value = json!({
+            "tokens": {
+                "id_token": id,
+                "access_token": access,
+                "refresh_token": "refresh-single-use"
+            }
+        });
+        auth::write_auth(&profile_path, &auth_value).unwrap();
+
+        let (stop_tx, mut stop_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    accepted = listener.accept() => {
+                        let (mut stream, _) = accepted.unwrap();
+                        let request = read_mock_request(&mut stream).await;
+                        requests.push(request.lines().next().unwrap_or_default().to_string());
+                        write_mock_response(&mut stream, r#"{"error":"invalid_grant"}"#).await;
+                    }
+                }
+            }
+            requests
+        });
+
+        let failures = refresh_expiring_tokens_within(Duration::from_secs(1)).await;
+        assert!(failures.is_empty());
+        let _ = stop_tx.send(());
+        assert!(
+            server.await.unwrap().is_empty(),
+            "valid access token must not trigger an opportunistic refresh POST"
+        );
+        let after = auth::read_auth(&profile_path).unwrap();
+        assert_eq!(after, auth_value, "the saved profile must remain unchanged");
     }
 
     #[test]

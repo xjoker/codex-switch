@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v20261001.2.0 (candidate) — 2026-10-01
+
+- **Reset cards use their own expiry colors** — Each reset-card expiry is colored independently instead of using one earliest-card expiry for the whole account summary.
+- **Low PATH Codex versions stay visible in the TUI** — Startup checks the actual PATH CLI used for shared HTTP requests and keeps a warning visible below the 0.159.2 project support minimum; the request's `client_version` remains tied to that executable.
+- **Usage refresh follows access-token validity** — Background quota requests refresh only when the access token is within five minutes of expiry. An expired ID token alone no longer blocks a quota GET while the access token remains valid. Usage and refresh logs mark HTTP request start and completion so a pending phase is diagnosable without logging credentials or response bodies.
+- **Logging no longer panics during nested TUI/file writes** — Switching tracing dispatch from inside a subscriber callback could panic during normal logging. A same-thread reentrancy guard now skips nested file writes before reacquiring the writer lock, preventing recursive deadlock while other tracing layers still receive those events.
+
 ## v20261001.1.0 (candidate) — 2026-10-01
 
 - **Credits stay in their native units** — CLI and TUI display raw balances as credits, preserve fractional precision, and keep positive balances neutral; JSON `credits_balance` remains unchanged. No general USD conversion is inferred.

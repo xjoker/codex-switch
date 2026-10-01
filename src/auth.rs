@@ -19,6 +19,7 @@ pub(crate) use crate::codex_compat::ALIGNED_CODEX_VERSION;
 
 const CODEX_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 static CODEX_CLI_VERSION: OnceLock<String> = OnceLock::new();
+static CODEX_CLI_VERSION_REPORT: OnceLock<crate::codex_compat::VersionReport> = OnceLock::new();
 
 /// Use the same bounded local Codex version probe for request query parameters
 /// and the HTTP User-Agent. A malformed, missing, or unresponsive CLI falls
@@ -26,16 +27,39 @@ static CODEX_CLI_VERSION: OnceLock<String> = OnceLock::new();
 /// is not used by launch compatibility checks or the doctor report.
 pub(crate) fn codex_cli_version() -> &'static str {
     CODEX_CLI_VERSION
-        .get_or_init(detect_codex_cli_version)
+        .get_or_init(|| client_version_from_report(codex_cli_version_report()))
         .as_str()
 }
 
-fn detect_codex_cli_version() -> String {
-    let Some(path) = crate::launch::command_on_path("codex") else {
-        return ALIGNED_CODEX_VERSION.to_string();
-    };
-    crate::codex_compat::probe_executable_with_timeout(&path, CODEX_VERSION_PROBE_TIMEOUT)
+/// The actual PATH probe shared by HTTP headers/query parameters and the TUI
+/// compatibility notice. Unlike the request fallback below, this preserves
+/// missing/unparseable CLI information instead of claiming the aligned version.
+pub(crate) fn codex_cli_version_report() -> crate::codex_compat::VersionReport {
+    CODEX_CLI_VERSION_REPORT
+        .get_or_init(detect_codex_cli_version_report)
+        .clone()
+}
+
+fn detect_codex_cli_version_report() -> crate::codex_compat::VersionReport {
+    match crate::launch::command_on_path("codex") {
+        Some(path) => {
+            crate::codex_compat::probe_executable_with_timeout(&path, CODEX_VERSION_PROBE_TIMEOUT)
+                .report()
+        }
+        None => crate::codex_compat::VersionReport {
+            executable: None,
+            version: None,
+            status: crate::codex_compat::CompatibilityStatus::NotFound,
+            note: Some("codex was not found on PATH".to_string()),
+        },
+    }
+}
+
+fn client_version_from_report(report: crate::codex_compat::VersionReport) -> String {
+    report
         .version
+        .as_deref()
+        .and_then(|version| semver::Version::parse(version).ok())
         .map(|version| format!("{}.{}.{}", version.major, version.minor, version.patch))
         .unwrap_or_else(|| ALIGNED_CODEX_VERSION.to_string())
 }
@@ -1084,6 +1108,36 @@ mod tests {
         let version = codex_cli_version();
         assert!(codex_user_agent().starts_with(&format!("codex_cli_rs/{version} ")));
         assert_eq!(ALIGNED_CODEX_VERSION, "0.159.2");
+    }
+
+    #[test]
+    fn transport_version_uses_older_cli_version_but_keeps_unknown_report_unknown() {
+        let older_cli = crate::codex_compat::VersionReport {
+            executable: Some("C:/fnm/codex.cmd".into()),
+            version: Some("0.154.0".into()),
+            status: crate::codex_compat::CompatibilityStatus::BelowMinimum,
+            note: None,
+        };
+        assert_eq!(client_version_from_report(older_cli.clone()), "0.154.0");
+        assert_eq!(
+            older_cli.status,
+            crate::codex_compat::CompatibilityStatus::BelowMinimum
+        );
+
+        let unknown_cli = crate::codex_compat::VersionReport {
+            executable: None,
+            version: None,
+            status: crate::codex_compat::CompatibilityStatus::NotFound,
+            note: Some("codex was not found on PATH".into()),
+        };
+        assert_eq!(
+            client_version_from_report(unknown_cli.clone()),
+            ALIGNED_CODEX_VERSION
+        );
+        assert_eq!(
+            unknown_cli.status,
+            crate::codex_compat::CompatibilityStatus::NotFound
+        );
     }
 
     #[test]

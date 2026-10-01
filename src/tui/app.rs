@@ -253,6 +253,11 @@ pub struct App {
     /// Persistent load diagnostics remain visible until that data domain loads cleanly.
     pub profile_load_error: Option<String>,
     pub provider_load_error: Option<String>,
+    /// PATH Codex version captured once during TUI startup; probing stays off
+    /// the render/event thread and never substitutes the HTTP UA fallback.
+    pub codex_path_version: Option<crate::codex_compat::VersionReport>,
+    codex_path_version_rx:
+        Option<tokio::sync::oneshot::Receiver<crate::codex_compat::VersionReport>>,
     pub refreshing_requests: HashMap<String, (u64, Refresh)>,
     pub pending_usage_refreshes: HashMap<String, Refresh>,
     pub usage_next_id: u64,
@@ -344,6 +349,8 @@ impl App {
             status_expiry: None,
             profile_load_error: None,
             provider_load_error: None,
+            codex_path_version: None,
+            codex_path_version_rx: None,
             refreshing_requests: HashMap::new(),
             pending_usage_refreshes: HashMap::new(),
             usage_next_id: 0,
@@ -386,6 +393,63 @@ impl App {
             switch_sender: switch_tx,
             switching_alias: None,
         }
+    }
+
+    pub fn start_codex_path_version_probe(&mut self) {
+        if self.codex_path_version.is_some() || self.codex_path_version_rx.is_some() {
+            return;
+        }
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.codex_path_version_rx = Some(receiver);
+        tokio::task::spawn_blocking(move || {
+            let _ = sender.send(crate::auth::codex_cli_version_report());
+        });
+    }
+
+    pub fn poll_codex_path_version(&mut self) {
+        let Some(receiver) = self.codex_path_version_rx.as_mut() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(report) => {
+                self.codex_path_version = Some(report);
+                self.codex_path_version_rx = None;
+                if matches!(
+                    self.menu.as_ref(),
+                    Some(super::menu::MenuState::Account { .. })
+                ) {
+                    self.rebuild_open_account_menu();
+                }
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                self.codex_path_version_rx = None;
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        }
+    }
+
+    pub fn codex_compatibility_warning(&self) -> Option<String> {
+        let report = self.codex_path_version.as_ref()?;
+        if report.status != crate::codex_compat::CompatibilityStatus::BelowMinimum {
+            return None;
+        }
+        Some(format!(
+            "PATH Codex {} < required {}; model catalog may be incomplete. Run codex-switch doctor.",
+            report.version.as_deref().unwrap_or("unknown"),
+            crate::codex_compat::MINIMUM_CODEX_VERSION,
+        ))
+    }
+
+    pub fn codex_path_version_detail(&self) -> Option<String> {
+        let report = self.codex_path_version.as_ref()?;
+        (report.status == crate::codex_compat::CompatibilityStatus::BelowMinimum).then(|| {
+            format!(
+                "PATH Codex {} at {} is below minimum {}; model catalog may be incomplete. Run codex-switch doctor.",
+                report.version.as_deref().unwrap_or("unknown"),
+                report.executable.as_deref().unwrap_or("unresolved executable"),
+                crate::codex_compat::MINIMUM_CODEX_VERSION,
+            )
+        })
     }
 
     /// Kick off a model-list fetch for `alias` if the detail panel needs it
@@ -542,6 +606,23 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
+        let reset_card_expiry_colors = loaded_usage
+            .map(|u| {
+                let mut credits: Vec<_> = u.reset_credits.iter().collect();
+                credits.sort_by_key(|credit| {
+                    credit
+                        .expires_at
+                        .as_deref()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .map(|dt| dt.timestamp())
+                        .unwrap_or(i64::MAX)
+                });
+                credits
+                    .into_iter()
+                    .map(|credit| super::ui::reset_card_expiry_color(credit.expires_at.as_deref()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let can_consume_reset_card = loaded_usage
             .and_then(|u| crate::usage::earliest_reset_credit(&u.reset_credits))
             .is_some();
@@ -681,8 +762,10 @@ impl App {
                 usage: loaded_usage.cloned().map(Box::new),
                 usage_meta,
                 models,
+                codex_compatibility_warning: self.codex_compatibility_warning(),
                 reset_cards,
                 reset_card_expiries,
+                reset_card_expiry_colors,
                 can_consume_reset_card,
             },
         ));
@@ -2906,6 +2989,7 @@ async fn run_app(
     shutdown: &mut crate::signals::ShutdownListener,
 ) -> Result<Option<crate::signals::ShutdownSignal>> {
     let mut app = App::new();
+    app.start_codex_path_version_probe();
     let profiles_loaded = app.load_profiles();
     app.update_view();
 
@@ -2917,6 +3001,7 @@ async fn run_app(
 
     loop {
         app.poll_switch_results();
+        app.poll_codex_path_version();
         if quit_after_switch && !app.switch_in_flight() {
             break;
         }
@@ -5144,6 +5229,32 @@ mod tests {
                 || line.contains("visibility=")
                 || line.contains("context=")
         }));
+    }
+
+    #[test]
+    fn codex_compatibility_warning_only_appears_below_minimum_and_reports_path_version() {
+        let mut app = App::new();
+        app.codex_path_version = Some(crate::codex_compat::VersionReport {
+            executable: Some("C:/Users/test/fnm_multishells/9876/codex.cmd".into()),
+            version: Some("0.154.0".into()),
+            status: crate::codex_compat::CompatibilityStatus::BelowMinimum,
+            note: Some("version is below minimum".into()),
+        });
+
+        let warning = app.codex_compatibility_warning().unwrap();
+        assert!(warning.contains("0.154.0"));
+        assert!(warning.contains("0.159.2"));
+        let detail = app.codex_path_version_detail().unwrap();
+        assert!(detail.contains("C:/Users/test/fnm_multishells/9876/codex.cmd"));
+
+        app.codex_path_version = Some(crate::codex_compat::VersionReport {
+            executable: Some("C:/codex.exe".into()),
+            version: Some("0.159.2".into()),
+            status: crate::codex_compat::CompatibilityStatus::Aligned,
+            note: None,
+        });
+        assert!(app.codex_compatibility_warning().is_none());
+        assert!(app.codex_path_version_detail().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -118,6 +118,12 @@ Mouse input is available alongside the keyboard: click a tab to switch pages, cl
 
 The ChatGPT model list comes from the selected profile's authenticated `/models` response, using the Codex CLI version detected on `PATH`; it is account- and route-specific and is cached in the TUI for five minutes. Use `Enter` then `r` in the account menu to refresh that account's usage and model catalog. The app does not add models that the service did not return. Model request errors report the `client_version` used.
 
+The detected PATH Codex version supplies the `client_version` query parameter and User-Agent value for shared HTTP requests; the desktop application's bundled engine does not determine that HTTP client version. If no usable PATH version can be detected, HTTP requests use the 0.159.2 alignment baseline as a transport fallback; `doctor` still reports the actual executable as missing or unknown, and `launch` enforces the real PATH minimum. For an npm-installed CLI managed with fnm, run `npm install -g @openai/codex@0.159.2` in the intended fnm Node environment, then open a fresh terminal and verify `where.exe codex`, `codex --version`, and `codex-switch doctor`. A persistent TUI status-bar warning identifies a PATH CLI below the 0.159.2 project support minimum. A newer desktop engine does not change which CLI the terminal resolves.
+
+Usage refresh is gated by a parseable access-token expiry: it proactively refreshes when that token is within five minutes of expiry. If the access-token expiry is unavailable, the quota request is tried first and an HTTP 401/403 can enter the existing recovery flow. An expired ID token by itself does not mean the access token is expired and does not block an otherwise valid quota request. If refresh reports `refresh_token_invalidated` for a profile, stop retrying refresh for that profile; use `codex-switch login <alias>` to reauthenticate it, or `codex-switch use <alias>` to switch to another saved account.
+
+Usage and refresh diagnostics record request phase start and completion, including elapsed time, outcome, and HTTP status when available. They do not log credential values or response bodies.
+
 ### Providers tab
 
 | Key | Action |

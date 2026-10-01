@@ -66,7 +66,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
         }
         Tab::Providers => render_providers_tab(f, app, vertical[1]),
         Tab::Settings => {
-            super::settings::render_settings_tab(f, &app.settings, vertical[1], &mut app.hitmap)
+            let compatibility_notice = app.codex_path_version_detail();
+            super::settings::render_settings_tab(
+                f,
+                &app.settings,
+                vertical[1],
+                &mut app.hitmap,
+                compatibility_notice.as_deref(),
+            )
         }
         Tab::Logs => render_logs(f, app, vertical[1]),
     }
@@ -76,8 +83,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Overlays (rendered last, on top of everything).
     // Help popup takes top priority since the user invoked it explicitly.
     let active_tab = app.active_tab;
+    let compatibility_notice = app.codex_compatibility_warning();
     if let Some(state) = app.help_popup.as_mut() {
-        let panel = render_help_popup(f, state, active_tab, area);
+        let panel = render_help_popup(f, state, active_tab, area, compatibility_notice.as_deref());
         app.hitmap.overlay = match panel {
             Some(panel) => super::hitmap::OverlayHit::Dismissible { panel },
             None => super::hitmap::OverlayHit::Modal,
@@ -168,12 +176,21 @@ fn render_help_popup(
     state: &mut popup::PopupState,
     active_tab: Tab,
     area: ratatui::layout::Rect,
+    compatibility_notice: Option<&str>,
 ) -> Option<Rect> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let key_style = base().fg(C_YELLOW).add_modifier(Modifier::BOLD);
     let label_style = base().fg(C_WHITE);
     let heading_style = base().fg(C_CYAN).add_modifier(Modifier::BOLD);
     let dim_style = base().fg(DIM);
+
+    if let Some(notice) = compatibility_notice {
+        lines.push(Line::from(Span::styled(
+            notice.to_string(),
+            base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+    }
 
     // Compute key column width for alignment within section
     let active_section = match active_tab {
@@ -900,18 +917,8 @@ pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
     match reset_credits_count(u) {
         Some(0) => DIM,
         Some(_) => crate::usage::earliest_reset_credit(&u.reset_credits)
-            .and_then(|credit| credit.expires_at.as_deref())
-            .and_then(|expires_at| chrono::DateTime::parse_from_rfc3339(expires_at).ok())
-            .map(|expires_at| expires_at.timestamp() - crate::auth::now_unix_secs())
-            .map(|remaining| {
-                if remaining < 3 * 24 * 60 * 60 {
-                    C_RED
-                } else if remaining < 7 * 24 * 60 * 60 {
-                    C_YELLOW
-                } else {
-                    C_GREEN
-                }
-            })
+            .map(|credit| reset_card_expiry_color(credit.expires_at.as_deref()))
+            .filter(|color| *color != DIM)
             .unwrap_or_else(|| {
                 if u.reset_credits_error.is_some() {
                     C_YELLOW
@@ -921,6 +928,22 @@ pub(super) fn reset_cards_color(u: &UsageInfo) -> Color {
             }),
         None if u.reset_credits_error.is_some() => C_YELLOW,
         None => DIM,
+    }
+}
+
+pub(super) fn reset_card_expiry_color(expires_at: Option<&str>) -> Color {
+    let Some(remaining) = expires_at
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|expires_at| expires_at.timestamp() - crate::auth::now_unix_secs())
+    else {
+        return DIM;
+    };
+    if remaining < 3 * 24 * 60 * 60 {
+        C_RED
+    } else if remaining < 7 * 24 * 60 * 60 {
+        C_YELLOW
+    } else {
+        C_GREEN
     }
 }
 
@@ -1349,7 +1372,7 @@ fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let load_warning = app
+    let mut load_warning = app
         .profile_load_error
         .as_deref()
         .map(|error| format!("Account data stale/incomplete: {error}"))
@@ -1361,10 +1384,24 @@ fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .collect::<Vec<_>>()
         .join("; ");
+    if let Some(compatibility_warning) = app.codex_compatibility_warning() {
+        if !load_warning.is_empty() {
+            load_warning.push_str("; ");
+        }
+        load_warning.push_str(&compatibility_warning);
+    }
     if !load_warning.is_empty() {
+        let warning_color = if app.codex_compatibility_warning().is_some()
+            && app.profile_load_error.is_none()
+            && app.provider_load_error.is_none()
+        {
+            C_YELLOW
+        } else {
+            C_RED
+        };
         let msg = Line::from(Span::styled(
             load_warning,
-            base().fg(C_RED).add_modifier(Modifier::BOLD),
+            base().fg(warning_color).add_modifier(Modifier::BOLD),
         ));
         f.render_widget(Paragraph::new(msg).style(base()), area);
     } else if let Some(s) = &app.status_msg {
@@ -1931,6 +1968,64 @@ mod tests {
             .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
             .unwrap();
         assert!(row_text(terminal.backend(), 0).contains("A later informational message"));
+    }
+
+    #[test]
+    fn below_minimum_path_cli_warning_stays_visible_in_the_status_bar() {
+        let mut app = App::new();
+        app.codex_path_version = Some(crate::codex_compat::VersionReport {
+            executable: Some("C:/fnm_multishells/codex.cmd".into()),
+            version: Some("0.154.0".into()),
+            status: crate::codex_compat::CompatibilityStatus::BelowMinimum,
+            note: None,
+        });
+        app.status_msg = Some("Usage refresh finished".into());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
+            .unwrap();
+        let rendered = row_text(terminal.backend(), 0);
+        assert!(rendered.contains("0.154.0"), "{rendered}");
+        assert!(rendered.contains("0.159.2"), "{rendered}");
+        assert!(!rendered.contains("Usage refresh finished"), "{rendered}");
+
+        app.codex_path_version = Some(crate::codex_compat::VersionReport {
+            executable: Some("C:/codex.exe".into()),
+            version: Some("0.159.2".into()),
+            status: crate::codex_compat::CompatibilityStatus::Aligned,
+            note: None,
+        });
+        terminal
+            .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
+            .unwrap();
+        assert!(row_text(terminal.backend(), 0).contains("Usage refresh finished"));
+    }
+
+    #[test]
+    fn settings_show_path_executable_and_minimum_for_old_cli() {
+        let mut app = App::new();
+        app.active_tab = Tab::Settings;
+        app.codex_path_version = Some(crate::codex_compat::VersionReport {
+            executable: Some("C:/Users/test/fnm_multishells/9876/codex.cmd".into()),
+            version: Some("0.154.0".into()),
+            status: crate::codex_compat::CompatibilityStatus::BelowMinimum,
+            note: None,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let rendered = (0..40)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("0.154.0"), "{rendered}");
+        assert!(rendered.contains("0.159.2"), "{rendered}");
+        assert!(
+            rendered.contains("fnm_multishells/9876/codex.cmd"),
+            "{rendered}"
+        );
     }
 
     #[test]

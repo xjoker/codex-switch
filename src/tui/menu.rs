@@ -57,8 +57,10 @@ pub struct AccountMenuInfo {
     pub usage: Option<Box<crate::usage::UsageInfo>>,
     pub usage_meta: Vec<String>,
     pub models: Vec<String>,
+    pub codex_compatibility_warning: Option<String>,
     pub reset_cards: Option<u64>,
     pub reset_card_expiries: Vec<String>,
+    pub reset_card_expiry_colors: Vec<Color>,
     pub can_consume_reset_card: bool,
 }
 
@@ -526,13 +528,24 @@ impl MenuState {
                 ]));
                 for (idx, expiry) in info.reset_card_expiries.iter().enumerate() {
                     let note = if idx == 0 { "  next to use" } else { "" };
+                    let expiry_style = base().fg(info
+                        .reset_card_expiry_colors
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(DIM));
                     left_lines.push(Line::from(vec![
                         Span::styled(format!("  #{}  ", idx + 1), dim),
-                        Span::styled(expiry.clone(), cards_style),
+                        Span::styled(expiry.clone(), expiry_style),
                         Span::styled(note, dim),
                     ]));
                 }
                 left_lines.push(Line::from(""));
+                if let Some(warning) = &info.codex_compatibility_warning {
+                    left_lines.push(Line::from(Span::styled(
+                        warning.clone(),
+                        base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+                    )));
+                }
                 left_lines.push(Line::from(Span::styled(
                     format!("Models ({})", info.models.len()),
                     header_style.add_modifier(Modifier::BOLD),
@@ -791,8 +804,15 @@ mod tests {
             usage: Some(Box::new(usage)),
             usage_meta: Vec::new(),
             models: Vec::new(),
+            codex_compatibility_warning: None,
             reset_cards: Some(1),
             reset_card_expiries: vec!["expires soon".into()],
+            reset_card_expiry_colors: vec![super::super::ui::reset_card_expiry_color(Some(
+                chrono::DateTime::from_timestamp(crate::auth::now_unix_secs() + seconds, 0)
+                    .unwrap()
+                    .to_rfc3339()
+                    .as_str(),
+            ))],
             can_consume_reset_card: true,
         })
     }
@@ -825,6 +845,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn account_details_color_each_reset_card_by_its_own_expiry() {
+        let mut menu = account_menu_with_reset_card_expiring_in(6 * 24 * 60 * 60);
+        let MenuState::Account { info, .. } = &mut menu else {
+            unreachable!();
+        };
+        info.reset_card_expiries = vec!["expires soon".into(), "expires later".into()];
+        info.reset_card_expiry_colors = vec![C_RED, C_GREEN];
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                let _ = menu.render(frame, frame.area());
+            })
+            .unwrap();
+
+        for (needle, expected) in [("expires soon", C_RED), ("expires later", C_GREEN)] {
+            let pos = find_text(terminal.backend(), needle).expect("card expiry text");
+            assert_eq!(
+                terminal.backend().buffer().cell(pos).unwrap().fg,
+                expected,
+                "each card should use its own expiry color"
+            );
+        }
+    }
+
+    #[test]
+    fn account_model_details_show_low_path_cli_warning() {
+        let mut menu = account_menu_with_reset_card_expiring_in(6 * 24 * 60 * 60);
+        let MenuState::Account { info, .. } = &mut menu else {
+            unreachable!();
+        };
+        info.codex_compatibility_warning =
+            Some("PATH Codex 0.154.0 < required 0.159.2; model catalog may be incomplete.".into());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                let _ = menu.render(frame, frame.area());
+            })
+            .unwrap();
+        let rendered = (0..30)
+            .map(|y| {
+                (0..120)
+                    .map(|x| terminal.backend().buffer().cell((x, y)).unwrap().symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("PATH Codex 0.154.0"), "{rendered}");
+        assert!(rendered.contains("required 0.159.2"), "{rendered}");
+        assert!(rendered.contains("Models"), "{rendered}");
+    }
+
     fn account_menu_with_usage(usage: UsageInfo) -> MenuState {
         MenuState::account(AccountMenuInfo {
             alias: "account".into(),
@@ -841,8 +915,10 @@ mod tests {
             usage: Some(Box::new(usage)),
             usage_meta: Vec::new(),
             models: Vec::new(),
+            codex_compatibility_warning: None,
             reset_cards: Some(0),
             reset_card_expiries: Vec::new(),
+            reset_card_expiry_colors: Vec::new(),
             can_consume_reset_card: false,
         })
     }
@@ -906,8 +982,10 @@ mod tests {
             usage: None,
             usage_meta: Vec::new(),
             models: Vec::new(),
+            codex_compatibility_warning: None,
             reset_cards: None,
             reset_card_expiries: Vec::new(),
+            reset_card_expiry_colors: Vec::new(),
             can_consume_reset_card: false,
         });
         assert!(matches!(
@@ -942,8 +1020,10 @@ mod tests {
             usage: None,
             usage_meta: Vec::new(),
             models: Vec::new(),
+            codex_compatibility_warning: None,
             reset_cards: None,
             reset_card_expiries: Vec::new(),
+            reset_card_expiry_colors: Vec::new(),
             can_consume_reset_card: false,
         });
 
@@ -971,8 +1051,10 @@ mod tests {
             usage: None,
             usage_meta: vec!["usage metadata".into(); 4],
             models: (0..16).map(|idx| format!("model-{idx}")).collect(),
+            codex_compatibility_warning: None,
             reset_cards: Some(0),
             reset_card_expiries: Vec::new(),
+            reset_card_expiry_colors: Vec::new(),
             can_consume_reset_card: false,
         });
         for _ in 0..64 {
@@ -1098,8 +1180,10 @@ mod tests {
             usage: Some(Box::new(usage)),
             usage_meta: vec!["  updated now".into()],
             models: vec!["  Official Model".into(), "    Official description".into()],
+            codex_compatibility_warning: None,
             reset_cards: Some(0),
             reset_card_expiries: Vec::new(),
+            reset_card_expiry_colors: Vec::new(),
             can_consume_reset_card: false,
         });
         let backend = TestBackend::new(160, 40);

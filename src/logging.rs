@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{Days, Local, NaiveDate};
 use fs4::FileExt;
 use std::{
+    cell::Cell,
     collections::VecDeque,
     fs::{self, OpenOptions},
     io::{self, Write},
@@ -20,6 +21,29 @@ const MAX_TUI_LOG_LINE_BYTES: usize = 8 * 1024;
 const MAX_TUI_LOG_BYTES: usize = 512 * 1024;
 const TUI_TRUNCATION_MARKER: &str = "… [truncated]";
 static TUI_LOG_WRITER: OnceLock<TuiLogWriter> = OnceLock::new();
+thread_local! {
+    static IN_FILE_LOG_WRITE: Cell<bool> = const { Cell::new(false) };
+}
+
+struct FileLogWriteGuard;
+
+impl FileLogWriteGuard {
+    fn enter() -> Option<Self> {
+        IN_FILE_LOG_WRITE.with(|active| {
+            if active.replace(true) {
+                None
+            } else {
+                Some(Self)
+            }
+        })
+    }
+}
+
+impl Drop for FileLogWriteGuard {
+    fn drop(&mut self) {
+        IN_FILE_LOG_WRITE.with(|active| active.set(false));
+    }
+}
 
 pub(crate) fn tui_log_writer() -> TuiLogWriter {
     TUI_LOG_WRITER.get_or_init(TuiLogWriter::new).clone()
@@ -250,6 +274,12 @@ pub(crate) struct LogFile {
 
 impl Write for LogFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Permission and retention helpers can emit tracing events. A nested
+        // file write must be skipped before taking the state lock, or it would
+        // deadlock while the outer write is doing that maintenance.
+        let Some(_write_guard) = FileLogWriteGuard::enter() else {
+            return Ok(buf.len());
+        };
         let retained = if buf.len() as u64 > MAX_LOG_BYTES {
             &buf[buf.len() - MAX_LOG_BYTES as usize..]
         } else {
@@ -265,19 +295,12 @@ impl Write for LogFile {
         let now = Instant::now();
         let run_maintenance =
             maintenance_due(state.last_maintenance, now, state.bytes_since_maintenance);
-        // File maintenance can harden permissions through helpers that emit
-        // tracing events. Suppress those events here: this writer already holds
-        // its state lock, so dispatching them normally would re-enter this writer
-        // and deadlock before the original record can finish.
-        let no_dispatch = tracing::Dispatch::none();
-        tracing::dispatcher::with_default(&no_dispatch, || {
-            append_log(
-                &state.dir,
-                Local::now().date_naive(),
-                retained,
-                run_maintenance,
-            )
-        })?;
+        append_log(
+            &state.dir,
+            Local::now().date_naive(),
+            retained,
+            run_maintenance,
+        )?;
         if run_maintenance {
             state.last_maintenance = Some(now);
             state.bytes_since_maintenance = 0;
@@ -428,6 +451,75 @@ fn log_date(filename: &str) -> Option<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filtered_tui_and_file_layers_receive_events_after_file_write() {
+        use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_writer = FileLogWriter {
+            state: Arc::new(Mutex::new(LogState {
+                dir: dir.path().to_path_buf(),
+                last_maintenance: None,
+                bytes_since_maintenance: 0,
+            })),
+        };
+        let tui_writer = TuiLogWriter::new();
+        let tui_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(tui_writer.clone())
+            .with_filter(tracing_subscriber::EnvFilter::new("codex_switch=debug"));
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(file_writer)
+            .with_filter(tracing_subscriber::EnvFilter::new("codex_switch=debug"));
+        let subscriber = tracing_subscriber::registry()
+            .with(tui_layer)
+            .with(file_layer);
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::info!(
+                target: "codex_switch::usage::api",
+                phase = "cache_get_initial",
+                elapsed_ms = 1,
+                outcome = "miss",
+                "usage local phase finished"
+            );
+            tracing::info!(
+                target: "codex_switch::usage::api",
+                phase = "refresh_post_started",
+                outcome = "started",
+                "credential refresh HTTP phase started"
+            );
+            tracing::info!(
+                target: "codex_switch::usage::api",
+                phase = "usage_total",
+                elapsed_ms = 5,
+                outcome = "success",
+                "usage fetch finished"
+            );
+        });
+
+        let tui_lines = tui_writer.lines_if_changed(None).unwrap().1;
+        let daily_log =
+            fs::read_to_string(log_path(dir.path(), Local::now().date_naive())).unwrap();
+        for phase in ["cache_get_initial", "refresh_post_started", "usage_total"] {
+            assert_eq!(
+                tui_lines.iter().filter(|line| line.contains(phase)).count(),
+                1,
+                "TUI layer did not receive phase {phase}: {tui_lines:?}"
+            );
+            assert_eq!(
+                daily_log
+                    .lines()
+                    .filter(|line| line.contains(phase))
+                    .count(),
+                1,
+                "file layer did not receive phase {phase}: {daily_log}"
+            );
+        }
+    }
 
     #[test]
     fn tui_writer_keeps_logs_in_memory_without_terminal_output() {
