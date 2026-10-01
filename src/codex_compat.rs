@@ -19,6 +19,9 @@ pub(crate) enum CompatibilityStatus {
     NotChecked,
     NotFound,
     Unknown,
+    /// A locally built Codex (`0.0.0`, `-dev` / `-local` suffix) whose version
+    /// carries no release information, so the minimum cannot be checked.
+    DevBuild,
     BelowMinimum,
     Aligned,
     AboveBaselineUnverified,
@@ -58,6 +61,7 @@ impl Probe {
     pub fn report(&self) -> VersionReport {
         let status = match &self.version {
             None => CompatibilityStatus::Unknown,
+            Some(version) if is_dev_build_version(version) => CompatibilityStatus::DevBuild,
             Some(version) if !version_meets_minimum(version) => CompatibilityStatus::BelowMinimum,
             Some(version) if same_release_core(version, &aligned_version()) => {
                 CompatibilityStatus::Aligned
@@ -68,10 +72,14 @@ impl Probe {
             executable: Some(self.executable.display().to_string()),
             version: self.version.as_ref().map(ToString::to_string),
             status,
-            note: self.failure.clone().or_else(|| {
-                (status == CompatibilityStatus::AboveBaselineUnverified).then(|| {
-                    "meets the minimum version, but is newer than the currently verified baseline; full compatibility is not guaranteed".to_string()
-                })
+            note: self.failure.clone().or_else(|| match status {
+                CompatibilityStatus::AboveBaselineUnverified => Some(
+                    "meets the minimum version, but is newer than the currently verified baseline; full compatibility is not guaranteed".to_string(),
+                ),
+                CompatibilityStatus::DevBuild => Some(
+                    "local development build; its version carries no release information, so the minimum version was not checked".to_string(),
+                ),
+                _ => None,
             }),
         }
     }
@@ -79,8 +87,22 @@ impl Probe {
     pub fn meets_minimum(&self) -> bool {
         self.version
             .as_ref()
-            .is_some_and(version_meets_minimum)
+            .is_some_and(|version| is_dev_build_version(version) || version_meets_minimum(version))
     }
+}
+
+/// Locally built Codex binaries report `0.0.0` (or a `-dev` / `-local`
+/// suffixed version), which would otherwise look older than every minimum.
+pub(crate) fn is_dev_build_version(version: &Version) -> bool {
+    if (version.major, version.minor, version.patch) == (0, 0, 0) {
+        return true;
+    }
+    version
+        .pre
+        .as_str()
+        .split('.')
+        .next()
+        .is_some_and(|first| matches!(first.to_ascii_lowercase().as_str(), "dev" | "local"))
 }
 
 /// Compare `major.minor.patch` only. Semver orders `0.159.2-rc.1` below
@@ -233,7 +255,9 @@ pub(crate) fn doctor_report(desktop_path: Option<&Path>) -> DoctorReport {
     let healthy = |report: &VersionReport| {
         matches!(
             report.status,
-            CompatibilityStatus::Aligned | CompatibilityStatus::AboveBaselineUnverified
+            CompatibilityStatus::Aligned
+                | CompatibilityStatus::AboveBaselineUnverified
+                | CompatibilityStatus::DevBuild
         )
     };
     let ok = healthy(&path_cli)
@@ -252,6 +276,8 @@ pub(crate) fn doctor_report(desktop_path: Option<&Path>) -> DoctorReport {
 
 pub(crate) fn ensure_launch_version(path: &Path) -> Result<()> {
     let probe = probe_executable(path);
+    // Includes local dev builds: they cannot be compared with the minimum, so
+    // they are neither refused nor warned about.
     if probe.meets_minimum() {
         return Ok(());
     }
@@ -457,6 +483,30 @@ mod tests {
 
         let old = executable(dir.path(), "old-codex", "echo 0.159.1");
         assert!(ensure_launch_version(&old).is_err());
+    }
+
+    #[test]
+    fn dev_builds_are_not_below_minimum_and_do_not_block_launch() {
+        let _env = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        for (name, output) in [
+            ("zero", "codex-cli 0.0.0"),
+            ("dev-suffix", "codex-cli 0.158.0-dev"),
+            ("local-suffix", "codex-cli 0.158.0-local.3"),
+        ] {
+            let path = executable(dir.path(), name, &format!("echo {output}"));
+            let probe = probe_executable(&path);
+            assert!(probe.meets_minimum(), "{output}");
+            let report = probe.report();
+            assert_eq!(report.status, CompatibilityStatus::DevBuild, "{output}");
+            assert!(report.note.unwrap().contains("development build"));
+            ensure_launch_version(&path).unwrap();
+        }
+        // Real prereleases and old versions are unaffected.
+        assert!(!is_dev_build_version(&Version::parse("0.160.0-alpha.1").unwrap()));
+        assert!(!is_dev_build_version(&Version::new(0, 154, 0)));
     }
 
     #[test]

@@ -56,6 +56,11 @@ fn detect_codex_cli_version_report() -> crate::codex_compat::VersionReport {
 }
 
 fn client_version_from_report(report: crate::codex_compat::VersionReport) -> String {
+    // A dev build's version (`0.0.0`) is not a real client version, so it falls
+    // back to the aligned release like a missing CLI would.
+    if report.status == crate::codex_compat::CompatibilityStatus::DevBuild {
+        return ALIGNED_CODEX_VERSION.to_string();
+    }
     report
         .version
         .as_deref()
@@ -1151,6 +1156,17 @@ mod tests {
             unknown_cli.status,
             crate::codex_compat::CompatibilityStatus::NotFound
         );
+    }
+
+    #[test]
+    fn dev_build_cli_version_falls_back_to_the_aligned_client_version() {
+        let dev = crate::codex_compat::VersionReport {
+            executable: Some("C:/src/codex/target/debug/codex.exe".into()),
+            version: Some("0.0.0".into()),
+            status: crate::codex_compat::CompatibilityStatus::DevBuild,
+            note: None,
+        };
+        assert_eq!(client_version_from_report(dev), ALIGNED_CODEX_VERSION);
     }
 
     #[test]
