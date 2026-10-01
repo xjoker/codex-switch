@@ -13,6 +13,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch or PR supersedes the older run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -20,18 +25,28 @@ jobs:
   quality:
     name: Format and audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head 2026-07-16
         with:
           components: rustfmt
       - name: Check shell installer syntax
         run: bash -n scripts/install.sh
+      - name: Check release gate scripts
+        run: |
+          bash -n scripts/ci/legacy-upgrade.sh
+          python3 -m py_compile scripts/prepare-release-metadata.py
       - name: Check formatting
         run: cargo fmt --check
+      # Prebuilt binary instead of compiling cargo-audit on every run.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-audit
       - name: Audit dependencies
         run: cargo audit
 
@@ -48,30 +63,45 @@ jobs:
           - host: windows
             os: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head 2026-07-16
         with:
           components: clippy
+      # Branch CI only; release builds stay uncached so published binaries
+      # never depend on restored build state.
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Check shell installer syntax
         if: runner.os != 'Windows'
         run: bash -n scripts/install.sh
-      - name: Check PowerShell installer syntax
+      - name: Check PowerShell script syntax
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path 'scripts/install.ps1'),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Error $_ }
-            exit 1
+          $failed = $false
+          foreach ($script in 'scripts/install.ps1', 'scripts/ci/legacy-upgrade.ps1') {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "${script}: $_" -ErrorAction Continue }
+              $failed = $true
+            }
           }
+          if ($failed) { exit 1 }
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
       - name: Run tests
         shell: pwsh
         run: |
@@ -105,7 +135,3 @@ jobs:
             }
           }
           exit $cargoExitCode
-      - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Build debug binary
-        run: cargo build

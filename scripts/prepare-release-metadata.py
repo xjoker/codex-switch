@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build the minimal GitHub Release JSON used by the pre-publish upgrade gate."""
+"""Build the minimal GitHub API responses used by the pre-publish upgrade gate.
+
+Writes the release JSON and, when requested, the `git/ref/tags/<tag>` reference
+that updaters with provenance verification resolve to the attested commit.
+"""
 
 from __future__ import annotations
 
@@ -40,7 +44,11 @@ def checked_digest(checksum_path: Path, archive_name: str) -> str:
 
 
 def build_metadata(
-    artifacts_dir: Path, base_url: str, tag: str, name: str
+    artifacts_dir: Path,
+    base_url: str,
+    tag: str,
+    name: str,
+    extra_assets: tuple[str, ...] = (),
 ) -> dict[str, object]:
     assets: list[dict[str, str]] = []
     for archive_name in ARCHIVES:
@@ -59,7 +67,30 @@ def build_metadata(
                     "browser_download_url": f"{base_url.rstrip('/')}/{quote(asset_name)}",
                 }
             )
+    for asset_name in extra_assets:
+        if not (artifacts_dir / asset_name).is_file():
+            raise ValueError(f"missing extra release asset: {asset_name}")
+        assets.append(
+            {
+                "name": asset_name,
+                "browser_download_url": f"{base_url.rstrip('/')}/{quote(asset_name)}",
+            }
+        )
     return {"tag_name": tag, "name": name, "assets": assets}
+
+
+def build_tag_reference(tag: str, commit_sha: str) -> dict[str, object]:
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit_sha):
+        raise ValueError(f"invalid commit SHA: {commit_sha}")
+    return {
+        "ref": f"refs/tags/{tag}",
+        "object": {"type": "commit", "sha": commit_sha.lower()},
+    }
+
+
+def write_json(path: Path, value: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -69,13 +100,24 @@ def main() -> None:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--name", required=True)
-    args = parser.parse_args()
-
-    metadata = build_metadata(args.artifacts_dir, args.base_url, args.tag, args.name)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    parser.add_argument(
+        "--extra-asset",
+        action="append",
+        default=[],
+        help="additional file in --artifacts-dir to list as a release asset",
     )
+    parser.add_argument("--tag-ref-output", type=Path)
+    parser.add_argument("--commit-sha")
+    args = parser.parse_args()
+    if (args.tag_ref_output is None) != (args.commit_sha is None):
+        parser.error("--tag-ref-output and --commit-sha must be given together")
+
+    metadata = build_metadata(
+        args.artifacts_dir, args.base_url, args.tag, args.name, tuple(args.extra_asset)
+    )
+    write_json(args.output, metadata)
+    if args.tag_ref_output is not None:
+        write_json(args.tag_ref_output, build_tag_reference(args.tag, args.commit_sha))
 
 
 if __name__ == "__main__":

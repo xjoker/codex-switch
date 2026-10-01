@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# Never let two runs for the same tag race to overwrite release assets.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -91,8 +96,11 @@ jobs:
             name: cs-windows-arm64
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head 2026-07-16
@@ -174,32 +182,21 @@ jobs:
             ${{ matrix.name }}.zip.sha256
           if-no-files-found: ignore
 
-  release:
-    needs: [meta, build, legacy-upgrade]
-    if: >-
-      always() && needs.meta.result == 'success' && needs.build.result == 'success' &&
-      (needs['legacy-upgrade'].result == 'success' || needs['legacy-upgrade'].result == 'skipped')
+  attest:
+    needs: [meta, build]
     runs-on: ubuntu-latest
-    env:
-      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+    timeout-minutes: 15
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: List artifacts
-        run: find artifacts -type f | sort
 
       - name: Verify release checksums
         shell: bash
@@ -225,6 +222,8 @@ jobs:
             )
           done
 
+      # Attest before the upgrade gate: updaters since v20260804.1.0 verify
+      # this provenance, so the gate can only exercise them with a bundle.
       - name: Attest release archives
         id: attest
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
@@ -233,9 +232,54 @@ jobs:
             artifacts/*.tar.gz
             artifacts/*.zip
 
-      - name: Add provenance bundle to release assets
+      - name: Stage provenance bundle
         shell: bash
-        run: cp "${{ steps.attest.outputs.bundle-path }}" artifacts/codex-switch-build-provenance.json
+        run: |
+          mkdir -p provenance
+          cp "${{ steps.attest.outputs.bundle-path }}" provenance/codex-switch-build-provenance.json
+
+      - name: Upload provenance bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: provenance
+          path: provenance/codex-switch-build-provenance.json
+          if-no-files-found: error
+
+  release:
+    needs: [meta, build, attest, legacy-upgrade]
+    if: >-
+      always() && needs.meta.result == 'success' && needs.build.result == 'success' &&
+      needs.attest.result == 'success' &&
+      (needs['legacy-upgrade'].result == 'success' || needs['legacy-upgrade'].result == 'skipped')
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Verify release checksums and provenance bundle
+        shell: bash
+        run: |
+          test -s artifacts/codex-switch-build-provenance.json
+          for checksum in artifacts/*.sha256; do
+            (
+              cd artifacts
+              sha256sum --check "$(basename "$checksum")"
+            )
+          done
 
       - name: Generate install script body
         run: |
@@ -327,13 +371,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   legacy-upgrade:
-    needs: [meta, build]
+    needs: [meta, build, attest]
     if: needs.meta.outputs.is_dev == 'true' || needs.meta.outputs.prerelease == 'false'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-26, windows-latest]
+        # 0.0.19: oldest supported updater. 20260804.1.0: last stable with the
+        # removed daemon; its updater verifies provenance and restarts the
+        # daemon with the new binary.
+        legacy: ["0.0.19", "20260804.1.0"]
+    name: legacy-upgrade (${{ matrix.os }}, v${{ matrix.legacy }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
     env:
       EXPECTED_VERSION: ${{ needs.meta.outputs.version }}
       IS_DEV: ${{ needs.meta.outputs.is_dev }}
@@ -348,154 +400,18 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Upgrade v0.0.19 on Unix
+      - name: Upgrade v${{ matrix.legacy }} on Unix
         if: runner.os != 'Windows'
         shell: bash
-        run: |
-          case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)
-              asset="cs-linux-amd64.tar.gz"
-              pinned_hash="3589fdac3d480aea83ab61dd4fb0a7592c018a44415842083df2d5f1d0bb0d2f"
-              ;;
-            Linux-aarch64|Linux-arm64)
-              asset="cs-linux-arm64.tar.gz"
-              pinned_hash="5db981cc5f1380f3bf9ac2d66484c0cc67d06712e617c2cd0457e3058dcb12b0"
-              ;;
-            Darwin-x86_64)
-              asset="cs-darwin-amd64.tar.gz"
-              pinned_hash="cbc4229285c5e8ea02c9463b7868cd03f2021f5125f5b187ff99e3bebe16e278"
-              ;;
-            Darwin-arm64)
-              asset="cs-darwin-arm64.tar.gz"
-              pinned_hash="2e365dc8273c04ee634d593eeada338a46ba7c7db2a1ca8f5c2aff30aec57a98"
-              ;;
-            *) echo "Unsupported legacy-upgrade runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-          esac
-          work="${RUNNER_TEMP}/codex-switch-legacy-upgrade"
-          mkdir -p "$work/home"
-          api_root="${work}/api"
-          mkdir -p "$api_root/artifacts"
-          cp artifacts/* "$api_root/artifacts/"
-          if [[ "$IS_DEV" == "true" ]]; then
-            api_path="repos/xjoker/codex-switch/releases/tags/dev"
-            release_tag="dev"
-            release_name="dev (${EXPECTED_VERSION})"
-          else
-            api_path="repos/xjoker/codex-switch/releases/latest"
-            release_tag="v${EXPECTED_VERSION}"
-            release_name="$release_tag"
-          fi
-          api_file="${api_root}/${api_path}"
-          mkdir -p "$(dirname "$api_file")"
-          python3 scripts/prepare-release-metadata.py \
-            --artifacts-dir "$api_root/artifacts" \
-            --output "$api_file" \
-            --base-url "http://127.0.0.1:8765/artifacts" \
-            --tag "$release_tag" \
-            --name "$release_name"
-          test -s "$api_file"
-          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$api_root" >/dev/null 2>&1 &
-          metadata_server_pid=$!
-          trap 'kill "$metadata_server_pid"' EXIT
-          for attempt in 1 2 3 4 5; do
-            curl -fsS "http://127.0.0.1:8765/${api_path}" >/dev/null && break
-            test "$attempt" -lt 5
-            sleep 1
-          done
-          base="https://github.com/xjoker/codex-switch/releases/download/v0.0.19"
-          curl -fsSL "${base}/${asset}" -o "${work}/${asset}"
-          curl -fsSL "${base}/${asset}.sha256" -o "${work}/${asset}.sha256"
-          (
-            cd "$work"
-            printf '%s  %s\n' "$pinned_hash" "$asset" | shasum -a 256 -c -
-            shasum -a 256 -c "${asset}.sha256"
-            tar xzf "$asset"
-          )
-          bin="${work}/codex-switch"
-          test "$("$bin" --version | head -n 1)" = "codex-switch 0.0.19"
-          if [[ "$IS_DEV" == "true" ]]; then
-            HOME="${work}/home" CS_GITHUB_API_URL=http://127.0.0.1:8765 "$bin" self-update --dev
-          else
-            HOME="${work}/home" CS_GITHUB_API_URL=http://127.0.0.1:8765 "$bin" self-update --stable
-          fi
-          test "$("$bin" --version | head -n 1)" = "codex-switch ${EXPECTED_VERSION}"
+        run: bash scripts/ci/legacy-upgrade.sh "${{ matrix.legacy }}"
 
-      - name: Upgrade v0.0.19 on Windows
+      - name: Upgrade v${{ matrix.legacy }} on Windows
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $work = Join-Path $env:RUNNER_TEMP "codex-switch-legacy-upgrade"
-          $apiRoot = Join-Path $work "api"
-          $artifactRoot = Join-Path $apiRoot "artifacts"
-          New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
-          Copy-Item -Path "artifacts\*" -Destination $artifactRoot -Force
-          if ($env:IS_DEV -eq "true") {
-            $apiPath = "repos/xjoker/codex-switch/releases/tags/dev"
-            $releaseTag = "dev"
-            $releaseName = "dev ($env:EXPECTED_VERSION)"
-          } else {
-            $apiPath = "repos/xjoker/codex-switch/releases/latest"
-            $releaseTag = "v$env:EXPECTED_VERSION"
-            $releaseName = $releaseTag
-          }
-          $apiFile = Join-Path $apiRoot $apiPath
-          New-Item -ItemType Directory -Path (Split-Path $apiFile) -Force | Out-Null
-          & python scripts/prepare-release-metadata.py `
-            --artifacts-dir $artifactRoot `
-            --output $apiFile `
-            --base-url "http://127.0.0.1:8765/artifacts" `
-            --tag $releaseTag `
-            --name $releaseName
-          if ($LASTEXITCODE -ne 0) { throw "local release metadata generation failed" }
-          if (-not (Test-Path -LiteralPath $apiFile)) { throw "local release metadata missing" }
-          $metadataServer = Start-Process -FilePath python -ArgumentList @(
-            "-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", $apiRoot
-          ) -WindowStyle Hidden -PassThru
-          try {
-            $metadataReady = $false
-            foreach ($attempt in 1..5) {
-              try {
-                Invoke-WebRequest -Uri "http://127.0.0.1:8765/$apiPath" -UseBasicParsing | Out-Null
-                $metadataReady = $true
-                break
-              } catch {
-                if ($attempt -eq 5) { throw }
-                Start-Sleep -Seconds 1
-              }
-            }
-            if (-not $metadataReady) { throw "local release metadata server did not start" }
-            $asset = "cs-windows-amd64.zip"
-            $base = "https://github.com/xjoker/codex-switch/releases/download/v0.0.19"
-            $archive = Join-Path $work $asset
-            $checksum = "${archive}.sha256"
-            Invoke-WebRequest -Uri "$base/$asset" -OutFile $archive
-            Invoke-WebRequest -Uri "$base/$asset.sha256" -OutFile $checksum
-            $expectedHash = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
-            $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
-            if ($actualHash -ne $expectedHash) { throw "v0.0.19 checksum mismatch" }
-            $pinnedHash = "9ff8a3f8794517771ef6959632417fdf1dfbc85b7fdf4c344998223985582e63"
-            if ($actualHash -ne $pinnedHash) { throw "v0.0.19 archive changed from the reviewed fixture" }
-            Expand-Archive -Path $archive -DestinationPath $work -Force
-            $bin = Join-Path $work "codex-switch.exe"
-            if (@(& $bin --version)[0] -ne "codex-switch 0.0.19") {
-              throw "unexpected legacy version"
-            }
-            $env:CS_GITHUB_API_URL = "http://127.0.0.1:8765"
-            if ($env:IS_DEV -eq "true") {
-              & $bin self-update --dev
-            } else {
-              & $bin self-update --stable
-            }
-            if ($LASTEXITCODE -ne 0) { throw "v0.0.19 self-update failed" }
-            if (@(& $bin --version)[0] -ne "codex-switch $env:EXPECTED_VERSION") {
-              throw "legacy upgrade installed an unexpected version"
-            }
-          } finally {
-            Stop-Process -Id $metadataServer.Id -Force -ErrorAction SilentlyContinue
-          }
+        run: ./scripts/ci/legacy-upgrade.ps1 -Legacy "${{ matrix.legacy }}"
 
   homebrew:
-    needs: [meta, release, legacy-upgrade]
+    needs: [meta, release]
     if: needs.meta.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     env:
@@ -633,5 +549,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for ${VERSION}."
+            exit 0
+          fi
           git commit -m "codex-switch ${VERSION} (latest + versioned formula)"
           git push

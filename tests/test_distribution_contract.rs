@@ -171,7 +171,6 @@ fn ci_runs_build_test_lint_format_audit_and_script_parsers() {
     for command in [
         "cargo test --all",
         "cargo clippy --all-targets -- -D warnings",
-        "cargo build",
         "cargo fmt --check",
         "cargo audit",
         "bash -n scripts/install.sh",
@@ -182,9 +181,12 @@ fn ci_runs_build_test_lint_format_audit_and_script_parsers() {
         );
     }
     assert!(
-        workflow.contains("Parser]::ParseFile") && workflow.contains("scripts/install.ps1"),
-        "Windows CI must parse install.ps1 with the PowerShell parser"
+        workflow.contains("Parser]::ParseFile")
+            && workflow.contains("scripts/install.ps1")
+            && workflow.contains("scripts/ci/legacy-upgrade.ps1"),
+        "Windows CI must parse the PowerShell scripts with the PowerShell parser"
     );
+    assert!(workflow.contains("bash -n scripts/ci/legacy-upgrade.sh"));
 }
 
 #[test]
@@ -813,71 +815,117 @@ fn release_attests_archives_before_publishing_them() {
     );
 }
 
+fn legacy_upgrade_job(workflow: &str) -> &str {
+    workflow
+        .split_once("  legacy-upgrade:\n")
+        .and_then(|(_, rest)| rest.split_once("  homebrew:\n"))
+        .map(|(job, _)| job)
+        .expect("release workflow must contain a bounded legacy-upgrade job")
+}
+
 #[test]
-fn release_retests_v0019_upgrade_on_all_supported_hosts() {
+fn release_retests_legacy_upgrades_on_all_supported_hosts() {
     let workflow = repo_file(".github/workflows/release.yml");
+    let unix = repo_file("scripts/ci/legacy-upgrade.sh");
+    let windows = repo_file("scripts/ci/legacy-upgrade.ps1");
+    let legacy = legacy_upgrade_job(&workflow);
 
     for required in [
-        "legacy-upgrade:",
-        "needs: [meta, build]",
+        "needs: [meta, build, attest]",
         "if: needs.meta.outputs.is_dev == 'true' || needs.meta.outputs.prerelease == 'false'",
-        "ubuntu-latest",
-        "macos-26",
-        "windows-latest",
+        "os: [ubuntu-latest, macos-26, windows-latest]",
+        r#"legacy: ["0.0.19", "20260804.1.0"]"#,
         "Download build artifacts",
-        "scripts/prepare-release-metadata.py",
-        "--base-url \"http://127.0.0.1:8765/artifacts\"",
-        "releases/download/v0.0.19",
-        "self-update --dev",
-        "self-update --stable",
-        "@(& $bin --version)[0]",
+        r#"bash scripts/ci/legacy-upgrade.sh "${{ matrix.legacy }}""#,
+        r#"./scripts/ci/legacy-upgrade.ps1 -Legacy "${{ matrix.legacy }}""#,
+    ] {
+        assert!(
+            legacy.contains(required),
+            "legacy-upgrade job must contain `{required}`"
+        );
+    }
+    // Reviewed archive fixtures for both legacy updaters.
+    for hash in [
         "3589fdac3d480aea83ab61dd4fb0a7592c018a44415842083df2d5f1d0bb0d2f",
         "5db981cc5f1380f3bf9ac2d66484c0cc67d06712e617c2cd0457e3058dcb12b0",
         "cbc4229285c5e8ea02c9463b7868cd03f2021f5125f5b187ff99e3bebe16e278",
         "2e365dc8273c04ee634d593eeada338a46ba7c7db2a1ca8f5c2aff30aec57a98",
-        "9ff8a3f8794517771ef6959632417fdf1dfbc85b7fdf4c344998223985582e63",
+        "649bdaed3c380b60537321c59e5ab5e36959d4aed582fb4f587efacdb81763eb",
+        "f1b1fd3eb3843d5e1b9eb578d5296eb6938b828c0a34d1aa7b996d0abb6cdbac",
+        "459c01026ccd46660408c36944b2001ba0337248fdae2c094515410a587ac986",
+        "b89e3d82a300795feaba9aa8e51d1675877f0072bfc44fb4a70a9d05f261bd41",
     ] {
-        assert!(
-            workflow.contains(required),
-            "Release workflow must test legacy upgrade contract: `{required}`"
-        );
+        assert!(unix.contains(hash), "Unix gate must pin `{hash}`");
     }
+    for hash in [
+        "9ff8a3f8794517771ef6959632417fdf1dfbc85b7fdf4c344998223985582e63",
+        "2702116e852f8bf3563a0dc892ab6bab2792679c090054d184d65f43b9224e4b",
+    ] {
+        assert!(windows.contains(hash), "Windows gate must pin `{hash}`");
+    }
+    for script in [&unix, &windows] {
+        for required in [
+            "releases/download/v",
+            "self-update",
+            "--dev",
+            "--stable",
+            "daemon start --foreground",
+            "codex-switch-build-provenance.json",
+        ] {
+            assert!(
+                script.contains(required),
+                "legacy upgrade script must contain `{required}`"
+            );
+        }
+    }
+    assert!(windows.contains("@(& $bin --version)[0]"));
 }
 
 #[test]
 fn legacy_upgrade_uses_build_artifact_release_metadata_before_publishing() {
     let workflow = repo_file(".github/workflows/release.yml");
-    let legacy = workflow
-        .split_once("  legacy-upgrade:\n")
-        .and_then(|(_, rest)| rest.split_once("  homebrew:\n"))
-        .map(|(job, _)| job)
-        .expect("release workflow must contain a bounded legacy-upgrade job");
+    let legacy = legacy_upgrade_job(&workflow);
+    let unix = repo_file("scripts/ci/legacy-upgrade.sh");
+    let windows = repo_file("scripts/ci/legacy-upgrade.ps1");
 
-    for required in [
-        "actions/download-artifact@",
-        "scripts/prepare-release-metadata.py",
-        "--artifacts-dir",
-        "--base-url \"http://127.0.0.1:8765/artifacts\"",
-        "CS_GITHUB_API_URL=http://127.0.0.1:8765",
-        "python3 -m http.server 8765 --bind 127.0.0.1",
-        "\"-m\", \"http.server\", \"8765\", \"--bind\", \"127.0.0.1\"",
-        "macos-26",
+    assert!(legacy.contains("actions/download-artifact@"));
+    for (script, server) in [
+        (&unix, r#"python3 -m http.server "$port" --bind 127.0.0.1"#),
+        (
+            &windows,
+            r#"'-m', 'http.server', "$port", '--bind', '127.0.0.1'"#,
+        ),
     ] {
-        assert!(
-            workflow.contains(required),
-            "legacy upgrade must serve build artifacts locally: `{required}`"
-        );
+        for required in [
+            "scripts/prepare-release-metadata.py",
+            "--artifacts-dir",
+            "--base-url \"http://127.0.0.1:$",
+            "--tag-ref-output",
+            "--commit-sha",
+            "CS_GITHUB_API_URL",
+            "http://127.0.0.1:$",
+        ] {
+            assert!(
+                script.contains(required),
+                "legacy upgrade must serve build artifacts locally: `{required}`"
+            );
+        }
+        assert!(script.contains(server), "missing local server `{server}`");
+        // Release data comes from the local mock, never the live API.
+        assert!(!script.contains("gh api"));
+        assert!(!script.contains("api.github.com"));
     }
-
-    assert!(!legacy.contains("gh api"));
+    // The bundle is verified offline, as on a user's machine without auth.
     assert!(!legacy.contains("GH_TOKEN"));
+    assert!(unix.contains("port=8765") && windows.contains("$port = 8765"));
     assert!(!legacy.contains("releases/download/v${{ needs.meta.outputs.version }}"));
-    assert!(legacy.contains("releases/download/v0.0.19"));
-    assert!(workflow.contains("release:\n    needs: [meta, build, legacy-upgrade]"));
+    assert!(workflow.contains("release:\n    needs: [meta, build, attest, legacy-upgrade]"));
     assert!(workflow.contains("always() && needs.meta.result == 'success'"));
+    assert!(workflow.contains("needs.attest.result == 'success'"));
     assert!(workflow.contains("needs['legacy-upgrade'].result == 'success'"));
-    assert!(workflow.contains("homebrew:\n    needs: [meta, release, legacy-upgrade]"));
+    assert!(workflow.contains("homebrew:\n    needs: [meta, release]"));
     assert!(workflow.contains("overwrite_files: true"));
+    assert_before(&workflow, "  attest:\n", "  legacy-upgrade:\n");
 
     assert!(
         !workflow.contains("os: [ubuntu-latest, macos-latest, windows-latest]"),
@@ -894,7 +942,7 @@ fn homebrew_hashes_come_from_verified_build_artifacts() {
         .expect("release workflow must contain the Homebrew job");
 
     for required in [
-        "needs: [meta, release, legacy-upgrade]",
+        "needs: [meta, release]",
         "actions/download-artifact@",
         "Verify Homebrew archive checksums",
         r#"expected=$(awk 'NF >= 1 { print $1; exit }' "$checksum")"#,
@@ -939,7 +987,8 @@ fn prepublish_metadata_builder_checks_fixed_archive_hashes() {
         "browser_download_url",
         "checksum file names the wrong archive",
         "actual != expected",
-        "json.dumps(metadata",
+        "write_json(args.output, metadata)",
+        "build_tag_reference",
     ] {
         assert!(
             script.contains(required),
