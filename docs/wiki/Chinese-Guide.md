@@ -37,7 +37,7 @@ codex-switch tui
 
 ChatGPT 文件登录需要 `cli_auth_credentials_store = "file"`。登录、导入、切换及对应后端请求会预检有效的系统/MDM 认证策略；普通配置不能放宽管理员的登录方式、工作区或存储要求。存在 `OPENAI_FEDERATION_RULE_ID` 或 `OPENAI_IDENTITY_TOKEN_FILE`（即使为空）时，Codex 会优先选择工作负载身份联合认证，因此文件登录操作会被拒绝；工具不会删除这些变量或改写企业策略。codex-switch 自身发起的 ChatGPT 请求（用量、刷新、工作区元数据、预热、模型、重置卡）不支持自定义 `chatgpt_base_url`，会在请求前明确报错；`use`、`import`、`login`、`launch` 等纯本地命令不受其影响。API 提供方使用独立的密钥启动路径。管理员策略文件（系统 requirements、managed_config、MDM）无法读取、过大或格式错误时仍会明确报错（跳过会丢失强制策略）；未知的 `allowed_login_methods` 条目会被忽略并警告（若不剩任何已知方式，ChatGPT 登录仍被拒绝），未知的 `cli_auth_credentials_store` 值按“不是 `file`”处理；用户自己的 `config.toml` 无法读取、过大或不是合法 TOML 时仅警告并跳过。
 
-`codex-switch launch` 的项目支持基线是 Codex CLI 0.159.2 或更新版本。先用 `codex-switch doctor` 检查 PATH 中实际解析到的 CLI；这是本项目的支持基线，不表示旧版 Codex 一定无法独立工作。桌面版可能使用另一个引擎，可用 `codex-switch doctor --desktop-codex <桌面版内置引擎路径>` 单独检查，不会自动搜索桌面安装。Windows 下 WSL 默认使用独立 Linux home，不会自动共享 Windows Codex app 的配置、认证和会话；参见 OpenAI 的 [Windows app 与 WSL 说明](https://learn.chatgpt.com/docs/windows/windows-app)。
+`codex-switch launch` 的项目支持基线是 Codex CLI 0.159.2 或更新版本。先用 `codex-switch doctor` 检查 PATH 中实际解析到的 CLI；这是本项目的支持基线，不表示旧版 Codex 一定无法独立工作。若 PATH CLI 低于基线，请按原安装方式升级；npm 安装的 CLI 在同一 Node.js/fnm 环境中运行 `npm install -g @openai/codex@latest`（与 TUI 和 `launch` 提示的命令一致），然后重启终端并用 `codex --version` 或 `codex-switch doctor` 验证。桌面版可能使用另一个引擎，可用 `codex-switch doctor --desktop-codex <桌面版内置引擎路径>` 单独检查，不会自动搜索桌面安装。Windows 下 WSL 默认使用独立 Linux home，不会自动共享 Windows Codex app 的配置、认证和会话；参见 OpenAI 的 [Windows app 与 WSL 说明](https://learn.chatgpt.com/docs/windows/windows-app)。
 
 已有 `auth.json` 备份可导入：
 
