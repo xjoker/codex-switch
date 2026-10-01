@@ -26,7 +26,7 @@ Start with the complete error message, its file path, and the command that produ
 | Provider configuration reports `auth.command` conflicts with `env_key` | Remove the active provider's `auth` override. Saved API-key providers use their generated `env_key`; command-based provider authentication is not supported. |
 | TUI shows stale or incomplete saved lists | Resolve the reported directory or provider-file error, then reload. Previously loaded rows remain visible while loading fails. |
 | Headless login cannot open a browser | Run `codex-switch login --device`. |
-| An old daemon task remains after upgrading | The new binary has no daemon command and does not remove OS tasks. Use the old binary to run `daemon stop`, verify with `daemon status`, then run `daemon uninstall`; if already upgraded, restore the old executable or remove the task/service with the operating system scheduler. See [Updating](Updating#migrate-from-the-removed-daemon). |
+| An old daemon task remains after upgrading | Run `codex-switch daemon uninstall`. The hidden migration command removes the old LaunchAgent, systemd user unit, or scheduled task and prints a manual command if that fails (for example, a task that needs an elevated PowerShell). See [Updating](Updating#migrate-from-the-removed-daemon). |
 | TUI layout is broken in Git Bash | Use Windows Terminal or PowerShell. |
 | Direct update does not replace a Homebrew binary | Run `brew upgrade xjoker/tap/codex-switch`. |
 | A Homebrew installation cannot switch to dev | Run `brew uninstall codex-switch`, then follow [Testing development releases](Development-Releases#install-the-rolling-dev-build). |

@@ -46,6 +46,11 @@ pub async fn run_cli() {
     let raw: Vec<String> = std::env::args().collect();
     let (clap_argv, launch_passthrough) = extract_launch_passthrough(&raw);
     let cli = Cli::parse_from(&clap_argv);
+    // Handle the removed daemon before configuration loads: an old service
+    // must be cleaned up even when config.toml still has obsolete content.
+    if let Commands::Daemon { args } = &cli.command {
+        std::process::exit(crate::legacy_daemon::run(args));
+    }
     let is_tui = matches!(&cli.command, Commands::Tui);
     let use_json = cli.json || cli.json_pretty;
     let message_mode = if is_tui {
@@ -165,6 +170,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Tui => "tui",
         Commands::Open => "open",
         Commands::Provider(_) => "provider",
+        Commands::Daemon { .. } => "daemon",
     }
 }
 
@@ -233,6 +239,7 @@ async fn dispatch(
         Commands::Tui => tui::run_tui().await?,
         Commands::Open => commands::open_cmd()?,
         Commands::Provider(sub) => commands::provider_cmd(sub, json).await?,
+        Commands::Daemon { .. } => unreachable!("the daemon shim exits before dispatch"),
     }
 
     // If startup check actually synced the profile, re-sync after command execution

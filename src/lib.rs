@@ -28,6 +28,8 @@ mod http_retry;
 pub mod jwt;
 pub mod launch;
 #[allow(dead_code)]
+mod legacy_daemon;
+#[allow(dead_code)]
 mod logging;
 #[allow(dead_code)]
 mod login;

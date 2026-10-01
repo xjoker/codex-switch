@@ -280,6 +280,13 @@ pub enum Commands {
     /// (Beta) Manage Responses-compatible API providers, models, and launch settings
     #[command(subcommand)]
     Provider(ProviderCommand),
+    /// Removed daemon. Kept hidden so services and self-updates from releases
+    /// that had it remove their old registration instead of failing forever.
+    #[command(hide = true, disable_help_flag = true)]
+    Daemon {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
 }
 
 /// Split `codex-switch launch …` so Codex argv is never parsed as a

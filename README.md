@@ -66,7 +66,7 @@ codex-switch launch       # start Codex with the best account
 
 > **Upgrading from a `0.0.x` install?** This release line intentionally breaks two conventions: versions are now calendar-based (`YYYYMMDD.N.0`, so updates sort and read by date), and Unix installs moved from `/usr/local/bin` to the user-owned `$HOME/.local/bin` so `self-update` never needs `sudo`. A normal `self-update` or one installer rerun migrates you; profiles and configuration are preserved. All breaking changes and reasons: [Updating](https://github.com/xjoker/codex-switch/wiki/Updating).
 
-> **Upgrading from a release with the old daemon?** Before replacing that binary, run its `daemon stop`, `daemon status`, and `daemon uninstall` commands, then remove any old LaunchAgent, systemd unit, or Windows Task Scheduler task. Remove obsolete `[daemon]` settings such as `cache_refresh_interval_secs` and `auto_warmup`. The new release has no daemon compatibility command and does not clean OS tasks automatically; see [Updating](https://github.com/xjoker/codex-switch/wiki/Updating#migrate-from-the-removed-daemon).
+> **Upgrading from a release with the old daemon?** The daemon was removed. When the old LaunchAgent, systemd unit, or Windows scheduled task (or an old `self-update`) starts the new binary as a daemon, it removes that registration and exits instead of failing on every launch; `codex-switch daemon uninstall` does the same on demand. Obsolete `[daemon]` settings such as `cache_refresh_interval_secs` and `auto_warmup` can be deleted. See [Updating](https://github.com/xjoker/codex-switch/wiki/Updating#migrate-from-the-removed-daemon).
 
 ## Documentation
 

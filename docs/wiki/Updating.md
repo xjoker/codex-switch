@@ -40,15 +40,13 @@ The current release line intentionally breaks with several `0.0.x` conventions. 
 
 ## Migrate from the removed daemon
 
-The daemon commands were removed. Before replacing an older binary, use that older binary to stop and uninstall its service:
+The background daemon and its commands were removed; account switching, usage refresh and warmup run only from one-off commands and the TUI. The new binary keeps a hidden `daemon` command for migration only:
 
-```bash
-codex-switch daemon stop
-codex-switch daemon status
-codex-switch daemon uninstall
-```
+- An old LaunchAgent (`com.codex-switch.daemon`), systemd user unit (`codex-switch-daemon`) or Windows scheduled task (`\codex-switch-daemon`) that launches `daemon start --foreground` now runs the new binary, which deletes that registration, stops the job and exits successfully. It no longer fails on every launch or, on macOS, restarts every few seconds.
+- A `self-update` from a release that had the daemon restarts the daemon after replacing the binary. That restart reaches the same cleanup. If no service was installed, the old updater can still report `self-update completed, but daemon restart failed`; the update itself succeeded.
+- `codex-switch daemon uninstall` (or `stop` / `status`) runs the cleanup on demand and prints what was removed. `daemon start`, `install` and `restart` clean up the same way and exit with an error because there is no daemon to run.
 
-Run these commands before installing the new release; the new binary intentionally has no daemon compatibility command. Confirm in the operating system's scheduler that the old LaunchAgent, systemd user unit, or Task Scheduler task is gone. An upgrade does not automatically stop or remove machine tasks and services. If you already upgraded, use the old executable or restore it temporarily to perform the stop/uninstall, then remove any remaining task yourself. Do not leave an old scheduled task invoking the old daemon after the upgrade.
+To stay in control of the timing, you can still run the old binary's `daemon stop` and `daemon uninstall` before upgrading. If cleanup reports a failure, for example a scheduled task that needs elevation, follow the printed command. Obsolete `[daemon]` settings in `config.toml` are ignored and can be deleted.
 
 ## Homebrew installations
 
@@ -69,7 +67,7 @@ curl -fsSL https://github.com/xjoker/codex-switch/releases/download/dev/install.
 
 ## Legacy direct installs
 
-- Stable versions `0.0.3` and newer update directly with `self-update`; the release workflow continuously verifies the upgrade path from `v0.0.19` on macOS, Linux, and Windows.
+- Stable versions `0.0.3` and newer update directly with `self-update`; the release workflow verifies the upgrade paths from `v0.0.19` and from `v20260804.1.0` (including its daemon) on macOS, Linux, and Windows before every release.
 - Versions `0.0.1` and `0.0.2` should rerun the installer because their updater predates the supported migration path.
 - Older macOS/Linux direct installs in `/usr/local/bin` should rerun the current installer once:
 
