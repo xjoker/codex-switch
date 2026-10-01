@@ -1617,13 +1617,17 @@ impl App {
         all_ok
     }
 
+    /// Reloads and keeps the selected account. Returns whether the *account*
+    /// list was read successfully, which is what gates account refreshes: a
+    /// provider read failure is still surfaced by `load_profiles` but must not
+    /// switch off usage refresh for healthy accounts.
     pub fn load_profiles_preserving_selection(&mut self) -> bool {
         let selected_alias = self
             .selected_account_idx()
             .and_then(|idx| self.accounts.get(idx))
             .map(|entry| entry.alias.clone());
 
-        let loaded = self.load_profiles();
+        self.load_profiles();
 
         if let Some(alias) = selected_alias
             && let Some(account_idx) = self.accounts.iter().position(|a| a.alias == alias)
@@ -1631,7 +1635,12 @@ impl App {
         {
             self.selected = view_idx;
         }
-        loaded
+        self.accounts_loaded()
+    }
+
+    /// True when the last `load_profiles` read the account side cleanly.
+    pub fn accounts_loaded(&self) -> bool {
+        self.profile_load_error.is_none()
     }
 
     /// Recompute `view_indices` based on the current search query.
@@ -2736,7 +2745,8 @@ impl App {
                                 self.marked.insert(new.clone());
                             }
                             self.set_status(format!("Renamed {old} -> {new}"), 3);
-                            let loaded = self.load_profiles();
+                            self.load_profiles();
+                            let loaded = self.accounts_loaded();
                             if let Some(account_idx) = loaded
                                 .then(|| self.accounts.iter().position(|a| a.alias == new))
                                 .flatten()
@@ -3003,7 +3013,8 @@ async fn run_app(
 ) -> Result<Option<crate::signals::ShutdownSignal>> {
     let mut app = App::new();
     app.start_codex_path_version_probe();
-    let profiles_loaded = app.load_profiles();
+    app.load_profiles();
+    let profiles_loaded = app.accounts_loaded();
     app.update_view();
 
     if profiles_loaded && !app.accounts.is_empty() {
@@ -5453,6 +5464,47 @@ mod tests {
             );
             assert!(!app.model_requests.contains_key("account"));
         }
+    }
+
+    #[tokio::test]
+    async fn damaged_provider_does_not_disable_account_auto_refresh() {
+        let _home = EnvHome::new();
+        let path = crate::profile::profile_auth_path("account").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        let provider = crate::provider::ProviderProfile::build(
+            "broken-provider",
+            "https://example.test/v1",
+            vec![crate::provider::ProviderModel::from_id("model")],
+            "test-key",
+        );
+        crate::provider::save(&provider).unwrap();
+        std::fs::write(
+            crate::auth::app_home()
+                .unwrap()
+                .join("providers/broken-provider/provider.toml"),
+            "invalid = [toml",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        // No network: queued refresh tasks wait on a limiter with no permits.
+        app.usage_limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        assert!(!app.load_profiles(), "the provider side is still reported");
+        assert!(app.accounts_loaded());
+        assert!(app.provider_load_error.is_some());
+        assert!(app.profile_load_error.is_none());
+
+        app.auto_refresh_enabled = true;
+        app.next_auto_refresh = Some(Instant::now() - Duration::from_secs(1));
+        app.run_due_auto_refresh();
+        assert_eq!(
+            app.loading_count(),
+            1,
+            "the healthy account must still be refreshed"
+        );
+        assert!(app.provider_load_error.is_some());
+        assert!(app.load_profiles_preserving_selection());
     }
 
     #[tokio::test(flavor = "current_thread")]
