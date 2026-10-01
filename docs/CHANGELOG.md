@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## v20261001.5.0 — 2026-10-01
+
+Stable release candidate covering every development build since v20260804.1.0. Read the upgrade notes first: this release removes the background daemon.
+
+**Upgrade notes (breaking changes)**
+
+- **The background daemon is removed.** Automatic account switching, scheduled warmup and periodic usage refresh no longer run in the background. `use`, `list --force`, `warmup` and `launch` are one-shot commands, and the TUI refreshes only while it is open. Use an OS scheduler to run `codex-switch warmup` or `codex-switch use` periodically if you need that behavior. Obsolete `[daemon]` settings in `config.toml` are ignored and can be deleted.
+- **Old daemon services clean themselves up.** A LaunchAgent, systemd user unit or Windows scheduled task installed by an older release now starts the new binary, which removes that registration and exits instead of failing on every launch (on macOS, every few seconds). A `self-update` from v20260804.1.0 restarts its daemon after replacing the binary and reaches the same cleanup; when no service was installed, that old updater may still print `daemon restart failed` even though the update succeeded. `codex-switch daemon uninstall` runs the cleanup on demand. See [Updating](https://github.com/xjoker/codex-switch/wiki/Updating#migrate-from-the-removed-daemon).
+- **Codex CLI 0.159.2 or newer is required for `launch`.** ChatGPT and provider launches check the PATH `codex` version before selecting an account or staging credentials; `codex-switch doctor` reports the CLI and an optional desktop engine.
+- **Managed authentication policy is enforced before ChatGPT requests.** System `requirements.toml`, managed config and forced macOS MDM preferences are read in addition to `config.toml`. Workload identity federation variables (`OPENAI_FEDERATION_RULE_ID`, `OPENAI_IDENTITY_TOKEN_FILE`) or a non-default `chatgpt_base_url` stop file-based ChatGPT operations with an explanation; custom provider launches stay available.
+- **TUI Extra `-c` values use a JSON array for several entries.** Comma-separated lists are no longer split.
+
+**Highlights since v20260804.1.0**
+
+- **Custom API providers (Beta)** — Save Responses-compatible endpoints with several models, fetch their catalogs, probe Responses support, and start Codex with `codex-switch launch <alias>`. Each run uses a native Codex `--profile` inside your normal `CODEX_HOME`, so MCP servers, skills, hooks and sessions stay shared; runs can be resumed and are protected against concurrent cleanup.
+- **TUI** — Providers, Settings and Logs tabs, mouse support for tabs, rows, footer actions and modal forms, an account launch picker with live model catalogs, per-card Reset Card expiry colors, and visible upgrade guidance when the PATH Codex CLI is too old.
+- **Codex 0.157+ app-server daemon** — After a switch changes the live `auth.json`, a running `codex app-server daemon` is restarted (bounded to 15 seconds; disable with `[use] restart_app_server = false`). ChatGPT `launch` adds `--no-daemon` so the session reads the staged account.
+- **Credential safety** — Rotated refresh tokens are saved before any further request, survive policy changes and concurrent refreshes, and are refreshed only when the access token is within five minutes of expiry. Saved profiles are compared by content, not bytes.
+- **Rate limits and Reset Cards** — HTTP 429 responses back off with `Retry-After` and jitter, Reset Card details are fetched serially in the background, and card consumption never replays an ambiguous request.
+- **Windows** — Account switches no longer rewrite inherited ACLs across the Codex home (seconds per switch on large homes), and debug logging no longer deadlocks.
+- **Warmup** — Waits for a completed response, prefers Luna models and skips 7-day-only accounts.
+- **Release archives** include the project license and the upstream Codex notices.
+- **Release pipeline** — Build provenance is attested before the prepublish upgrade gate, which now also upgrades from v20260804.1.0 with a running daemon (a real LaunchAgent on macOS) and requires the old service registration to be removed. Branch CI caches builds, installs a prebuilt `cargo-audit`, cancels superseded runs, and bounds every job with a timeout.
+
 ## v20261001.4.0 (candidate) — 2026-10-01
 
 - **Custom API providers are labeled Beta** — User guides describe endpoint/key storage, per-model settings, catalog fetching, and Codex launch, and clarify that provider compatibility depends on the gateway and model. Providers do not show ChatGPT quota or participate in ChatGPT automatic account selection.
