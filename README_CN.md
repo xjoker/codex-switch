@@ -44,7 +44,7 @@ codex-switch launch       # 用最佳账号启动 Codex
 ## 功能一览
 
 - 保存、导入、重命名、切换和可恢复地删除 Codex 账号。
-- 保存自定义 API 提供方（OpenRouter 等兼容 Responses 协议的接口）：一个端点可配置多个模型，思考等级与 `web_search` 按模型保存；TUI Providers 页用同一张表单新增/编辑（`a` / `e`），`Enter` / `o` 启动 Codex。通过 `launch` 启动，使用 Codex 原生的每次运行独立 profile（`$CODEX_HOME` 中的 `cs-*.config.toml`），共享认证与 ChatGPT 配置保持不变：
+- **Beta：自定义 API 提供方。** 保存兼容 Responses 协议的端点和 API 密钥，为每个端点配置多个模型及各自的思考等级、`web_search`，获取网关模型目录并启动 Codex。兼容性取决于网关和具体模型；提供方不展示 ChatGPT 额度，也不参与自动选号。TUI Providers 页可用同一张表单新增/编辑（`a` / `e`），按 `Enter` / `o` 启动 Codex；启动使用 Codex 原生的每次运行独立 profile（`$CODEX_HOME` 中的 `cs-*.config.toml`），共享认证与 ChatGPT 配置保持不变：
 
   ```bash
   codex-switch provider add openrouter \

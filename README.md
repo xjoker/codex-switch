@@ -46,7 +46,7 @@ codex-switch launch       # start Codex with the best account
 ## What it does
 
 - Saves, imports, renames, switches, and recoverably deletes Codex profiles.
-- Saves custom API providers (OpenRouter and other Responses-compatible endpoints) with multiple models per endpoint, and launches Codex through native per-run profiles while keeping shared authentication and ChatGPT configuration intact:
+- **Beta — custom API providers:** save a Responses-compatible endpoint and API key, configure multiple models with per-model reasoning and `web_search`, fetch the gateway's model catalog, and launch Codex through native per-run profiles. Compatibility depends on the gateway and model. Providers do not show ChatGPT quota or participate in ChatGPT automatic account selection:
 
   ```bash
   codex-switch provider add openrouter \

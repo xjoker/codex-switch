@@ -506,7 +506,7 @@ impl MenuState {
                 let credits_text = match info.usage.as_deref() {
                     Some(u) if u.unlimited_credits == Some(true) => "unlimited".to_string(),
                     Some(u) => match u.credits_balance {
-                        Some(balance) => crate::usage::format_credits_balance(balance),
+                        Some(balance) => crate::usage::format_credits_amount(balance),
                         None => "not available".to_string(),
                     },
                     None => "not available".to_string(),
@@ -968,7 +968,11 @@ mod tests {
             find_text(terminal.backend(), "Credits").is_some(),
             "the detail popup must have a dedicated Credits field"
         );
-        let pos = find_text(terminal.backend(), "15.5 credits").expect("credits balance rendered");
+        let pos = find_text(terminal.backend(), "15.5").expect("credits balance rendered");
+        assert!(
+            find_text(terminal.backend(), "15.5 credits").is_none(),
+            "the Credits label should not be repeated in the numeric value"
+        );
         assert_eq!(terminal.backend().buffer().cell(pos).unwrap().fg, C_WHITE);
 
         // Accounts without the credits system still get an explicit slot rather

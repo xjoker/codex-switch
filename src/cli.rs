@@ -12,8 +12,12 @@ pub enum ColorMode {
 }
 
 #[derive(Debug, Clone, Subcommand)]
+#[command(
+    about = "(Beta) Manage custom Responses-compatible API providers for Codex launches",
+    after_help = "Providers let you save Responses-compatible API endpoints, manage multiple models and per-model reasoning / web_search settings, and choose a model to launch Codex. They do not include ChatGPT usage quotas or automatic account selection."
+)]
 pub enum ProviderCommand {
-    /// Add a custom API provider (e.g. OpenRouter) for launching Codex with a third-party model
+    /// (Beta) Add a Responses-compatible API provider for launching Codex with third-party models
     #[command(
         after_help = "The API key is read from a hidden prompt (or stdin with --api-key-stdin), never from the command line.\n--model is repeatable; the first is the default. --reasoning / --no-web-search attach to the most recent --model.\n--fetch-models GETs {base_url}/models and saves chat slugs (embedding/reranker omitted). Use it instead of, or together with, --model. Catalogs larger than 48 models (OpenRouter-sized) are not imported wholesale: pass --model to pick, or use TUI `f`.\n\nExample:\n  codex-switch provider add openrouter \\\n    --base-url https://openrouter.ai/api/v1 \\\n    --fetch-models \\\n    --model openai/gpt-5.3-codex \\\n    --model deepseek/deepseek-r1-0528 --reasoning high\n  printf '%s' \"$KEY\" | codex-switch provider add zai --base-url https://api.example/v1 --fetch-models --api-key-stdin"
     )]
@@ -59,21 +63,21 @@ pub enum ProviderCommand {
         #[arg(long)]
         api_key_stdin: bool,
     },
-    /// List saved custom providers
+    /// (Beta) List saved custom API providers
     List,
-    /// Show one provider's details (API key redacted)
+    /// (Beta) Show one provider's details (API key redacted)
     Show {
         /// Provider alias
         alias: String,
     },
-    /// Rename a custom provider
+    /// (Beta) Rename a custom API provider
     Rename {
         /// Current provider alias
         old: String,
         /// New provider alias
         new: String,
     },
-    /// Remove a custom provider and its stored key
+    /// (Beta) Remove a custom API provider and its stored key
     Remove {
         /// Provider alias
         alias: String,
@@ -81,7 +85,7 @@ pub enum ProviderCommand {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Replace saved models with chat slugs from the provider's GET /models
+    /// (Beta) Replace saved models with chat slugs from the provider's GET /models
     /// (matching ids keep their reasoning / web_search settings). Catalogs
     /// larger than 48 chat models must be picked with `--model`.
     FetchModels {
@@ -92,7 +96,7 @@ pub enum ProviderCommand {
         #[arg(long, action = clap::ArgAction::Append)]
         model: Vec<String>,
     },
-    /// Probe whether saved models speak Codex's Responses API (no `input`, so a
+    /// (Beta) Probe whether saved models speak Codex's Responses API (no `input`, so a
     /// supporting endpoint 400s at validation without generating tokens).
     #[command(
         after_help = "Conclusive results are saved with the provider for 7 days, scoped to the model, key and effective connection settings (endpoint, headers, query, catalog); a change to any of them drops the record. Temporary or ambiguous failures are reported as unknown and are not treated as a denial.\n`launch` performs no gateway request unless a saved result marks the chosen model unsupported; it then re-probes once live and refuses only if the model is still unsupported."
@@ -273,7 +277,7 @@ pub enum Commands {
     Tui,
     /// Open the codex-switch data directory (~/.codex-switch, or $CODEX_SWITCH_HOME) in the system file manager
     Open,
-    /// Manage custom API providers (OpenRouter, etc.) for launching Codex with a third-party model
+    /// (Beta) Manage Responses-compatible API providers, models, and launch settings
     #[command(subcommand)]
     Provider(ProviderCommand),
 }
@@ -427,6 +431,32 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn provider_help_marks_beta_and_explains_its_scope() {
+        let help = Cli::try_parse_from(["codex-switch", "provider", "--help"])
+            .err()
+            .expect("--help should exit with a clap display error")
+            .to_string();
+        assert!(help.contains("(Beta)"), "{help}");
+        assert!(
+            help.contains("Responses-compatible API endpoints"),
+            "{help}"
+        );
+        assert!(help.contains("per-model reasoning / web_search"), "{help}");
+        assert!(
+            help.contains("do not include ChatGPT usage quotas"),
+            "{help}"
+        );
+        assert!(help.contains("automatic account selection"), "{help}");
+
+        let add_help = Cli::try_parse_from(["codex-switch", "provider", "add", "--help"])
+            .err()
+            .expect("--help should exit with a clap display error")
+            .to_string();
+        assert!(add_help.contains("(Beta)"), "{add_help}");
+        assert!(add_help.contains("third-party models"), "{add_help}");
     }
 
     #[test]

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v20261001.4.0 (candidate) — 2026-10-01
+
+- **Custom API providers are labeled Beta** — User guides describe endpoint/key storage, per-model settings, catalog fetching, and Codex launch, and clarify that provider compatibility depends on the gateway and model. Providers do not show ChatGPT quota or participate in ChatGPT automatic account selection.
+- **Credits displays avoid repeating the unit** — Numeric balances rely on the surrounding credits label instead of appending a second unit to each value; raw JSON balances remain unchanged.
+
 ## v20261001.3.0 (candidate) — 2026-10-01
 
 - **Below-minimum Codex versions prompt an upgrade** — CLI and TUI compatibility guidance distinguishes the PATH-installed CLI from the desktop app's bundled engine and points users to the updater for the installation they need to change.

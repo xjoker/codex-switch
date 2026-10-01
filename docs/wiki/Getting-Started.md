@@ -90,9 +90,9 @@ Saved profiles, cache, and configuration default to `~/.codex-switch` (`%USERPRO
 
 Never share profile files, `auth.json`, tokens, provider API keys, proxy credentials, or unredacted `--debug` output.
 
-## Add a custom API provider (optional)
+## Add a custom API provider (Beta, optional)
 
-If you use OpenRouter or another Responses-compatible gateway instead of ChatGPT OAuth:
+If you use OpenRouter or another Responses-compatible gateway instead of ChatGPT OAuth, you can save its endpoint and API key, configure multiple models, fetch its model catalog, and launch Codex. Compatibility depends on the gateway and selected model. Providers do not show ChatGPT quota or participate in ChatGPT automatic account selection:
 
 ```bash
 codex-switch provider add openrouter \
@@ -101,7 +101,7 @@ codex-switch provider add openrouter \
 codex-switch launch openrouter
 ```
 
-`codex-switch tui` also has a **Providers** tab for add/edit/rename/remove and for launching Codex with a saved model. `use` and auto-select stay ChatGPT-only.
+`codex-switch tui` also has a **Providers (Beta)** tab for add/edit/rename/remove and for launching Codex with a saved model. `use` and auto-select stay ChatGPT-only.
 
 ## Next steps
 

@@ -4,6 +4,8 @@ The installed binary remains authoritative: use `codex-switch --help` and `codex
 
 ## Commands
 
+**Custom API providers (Beta):** save Responses-compatible endpoints and API keys, configure multiple models with per-model reasoning and `web_search`, fetch a gateway model catalog, and launch Codex. Compatibility depends on the gateway and selected model. Providers do not show ChatGPT quota or participate in ChatGPT automatic account selection.
+
 | Command | Purpose |
 |---|---|
 | `login [--device] [alias]` | Add or reauthorize a profile through browser PKCE or device-code login. If the alias already exists, it is reauthorized; otherwise a new profile is created. |

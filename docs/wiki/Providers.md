@@ -1,6 +1,6 @@
-# Custom API providers
+# Custom API providers (Beta)
 
-A custom API provider is a saved third-party endpoint that `codex-switch launch` can hand to Codex CLI for one session. Typical case: OpenRouter, or another gateway that speaks Codex's Responses protocol.
+A custom API provider is a **Beta** feature: it saves a Responses-compatible third-party endpoint and API key for `codex-switch launch` to pass to Codex CLI for one session. You can configure multiple models with per-model reasoning and `web_search` settings, fetch the gateway's model catalog, and launch Codex. Compatibility depends on the gateway and the selected model. Providers do not show ChatGPT quota or participate in ChatGPT automatic account selection. A typical use is OpenRouter or another gateway that speaks Codex's Responses protocol.
 
 Unlike a ChatGPT account profile, a provider has no `auth.json` and no quota dashboard. It stores one endpoint plus a bearer API key under `$CODEX_SWITCH_HOME`, and a list of models. Each model can carry its own reasoning effort and `web_search` setting. At launch the run writes a native Codex profile — `$CODEX_HOME/cs-<identity>-<run>.config.toml` — holding only this run's model routing (`model_provider`, the `model_providers.<id>` table, model, reasoning, web_search, catalog); Codex is started with `--profile cs-<identity>-<run>`. Everything else — MCP servers and their credentials, skills, plugins, hooks, `prompts/`, `AGENTS.md`, project `.codex/config.toml`, sessions — comes from the user's normal `$CODEX_HOME` (normally `~/.codex`) exactly as a ChatGPT launch sees it. `auth.json` is not swapped, and the user's `config.toml` is never rewritten for a provider launch.
 

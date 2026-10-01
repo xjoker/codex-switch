@@ -2,7 +2,7 @@
 
 > 英文 Wiki 是 `codex-switch` 的主文档与行为依据。本页提供中文快速入口与常用操作摘要；细节、标志位与边界条件以英文页面为准（尤其 [Providers](Providers)、[Command reference](Command-Reference)）。
 
-`codex-switch` 用于管理本机多个 OpenAI Codex CLI 登录、查看额度，并在新会话前选择合适账号。它也会保存自定义 API 提供方（如 OpenRouter），通过 `launch` 把**模型和地址**交给 Codex。提供方沿用原来的 `$CODEX_HOME`，直接使用现有 MCP、skills、agents、插件和 hooks；每次启动选择独立的 Codex 原生 profile，模型与路由设置不会写入默认 `config.toml`。支持多个提供方同时运行，启动工具异常退出不需要恢复默认配置。请勿分享 profile、`auth.json`、提供方 API 密钥、代理凭据或未脱敏的 debug 输出。
+`codex-switch` 用于管理本机多个 OpenAI Codex CLI 登录、查看额度，并在新会话前选择合适账号。它也提供 **Beta 自定义 API 提供方**：保存兼容 Responses 协议的端点和 API 密钥，为多个模型分别设置思考等级与 `web_search`，获取网关模型目录并启动 Codex。兼容性取决于网关和具体模型；提供方不展示 ChatGPT 额度，也不参与自动选号。提供方沿用原来的 `$CODEX_HOME`，直接使用现有 MCP、skills、agents、插件和 hooks；每次启动选择独立的 Codex 原生 profile，模型与路由设置不会写入默认 `config.toml`。支持多个提供方同时运行，启动工具异常退出不需要恢复默认配置。请勿分享 profile、`auth.json`、提供方 API 密钥、代理凭据或未脱敏的 debug 输出。
 
 ## 快速开始
 
@@ -74,7 +74,7 @@ codex-switch import ~/auth-backups
 
 如果旧版本安装过 daemon，升级前必须用旧版本依次运行 `codex-switch daemon stop`、`codex-switch daemon status`、`codex-switch daemon uninstall`，并在系统计划任务中确认旧任务已删除。新版本没有兼容 daemon 命令，也不会自动清理系统任务；完整迁移说明见 [Updating](Updating#migrate-from-the-removed-daemon)。
 
-## 自定义 API 提供方
+## 自定义 API 提供方（Beta）
 
 检查 PATH CLI 以及可选的桌面内置引擎：
 
@@ -85,7 +85,7 @@ codex-switch doctor --desktop-codex <桌面版内置引擎路径>
 
 未提供桌面路径会报告 `not_checked`，不会失败。未知/低于最低版本会失败并输出诊断；两个引擎都达到最低版本但 core/prerelease 版本不同时，只报告差异，build metadata 差异不算版本不匹配。更高版本会标为 `above_baseline_unverified`。`doctor` 只检查可执行文件版本，不检查认证、系统/managed policy、桌面 UI 或 daemon 兼容性；版本差异不代表这些路径已验证。`--json doctor` 提供结构化结果；详见英文 [Command reference](Command-Reference)。
 
-一个提供方 = **一个端点 URL + 一把 API 密钥 + 多个模型**。别名（Alias）是唯一对用户可见的名称；思考等级（reasoning）与 `web_search` 按**模型**保存，不是按整个提供方。
+一个提供方 = **一个 Responses-compatible 端点 URL + 一把 API 密钥 + 多个模型**。可获取网关模型目录并启动 Codex。兼容性取决于网关和具体模型；提供方没有 ChatGPT 额度视图，也不参与自动选号。别名（Alias）是唯一对用户可见的名称；思考等级（reasoning）与 `web_search` 按**模型**保存，不是按整个提供方。
 
 ### CLI
 

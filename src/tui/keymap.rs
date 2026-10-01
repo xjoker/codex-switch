@@ -29,13 +29,19 @@ impl Section {
             Section::Selection => "Selection",
             Section::Account => "Accounts tab",
             Section::Batch => "Batch actions  (open via Enter when accounts marked)",
-            Section::Provider => "Providers tab",
+            Section::Provider => "Providers tab (Beta)",
             Section::Settings => "Settings tab",
             Section::Logs => "Logs tab",
             Section::Global => "Global",
         }
     }
 }
+
+pub const PROVIDER_OVERVIEW: [&str; 3] = [
+    "Manage Responses-compatible API endpoints and multiple models.",
+    "Set reasoning/web_search per model; choose a model to launch Codex.",
+    "No ChatGPT quotas or automatic account selection.",
+];
 
 #[derive(Debug, Clone, Copy)]
 pub struct Binding {

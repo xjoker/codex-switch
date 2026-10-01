@@ -18,7 +18,7 @@ use crate::jwt::PlanKind;
 use crate::output::{
     format_local_time, format_reset_short, format_reset_time, reset_credits_count,
 };
-use crate::usage::{UsageInfo, format_credits_balance, is_available};
+use crate::usage::{UsageInfo, format_credits_amount, is_available};
 
 fn status_message_color(is_error: bool) -> Color {
     if is_error { C_RED } else { C_CYAN }
@@ -209,6 +209,14 @@ fn render_help_popup(
         .max()
         .unwrap_or(8);
 
+    if active_tab == Tab::Providers {
+        lines.push(Line::from(Span::styled("Providers (Beta)", heading_style)));
+        for description in keymap::PROVIDER_OVERVIEW {
+            lines.push(Line::from(Span::styled(description, label_style)));
+        }
+        lines.push(Line::from(""));
+    }
+
     for (i, (heading, items)) in groups.iter().enumerate() {
         if i > 0 {
             lines.push(Line::from(""));
@@ -330,7 +338,7 @@ fn render_account_table(f: &mut Frame, app: &mut App, area: Rect) {
                 UsageStatus::Loaded(usage) if usage.unlimited_credits == Some(true) => {
                     Some("unlimited".to_string())
                 }
-                UsageStatus::Loaded(usage) => usage.credits_balance.map(format_credits_balance),
+                UsageStatus::Loaded(usage) => usage.credits_balance.map(format_credits_amount),
                 _ => None,
             })
             .map(|text| u16::try_from(display_width(&text)).unwrap_or(u16::MAX))
@@ -962,7 +970,7 @@ fn render_tab_bar(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let accounts = format!(" Accounts ({}) ", app.accounts.len());
-    let providers = format!(" Providers ({}) ", app.providers.len());
+    let providers = format!(" Providers (Beta) ({}) ", app.providers.len());
     let settings = " Settings ".to_string();
     let logs = " Logs ".to_string();
     let gap_w = 2u16;
@@ -1004,25 +1012,45 @@ fn render_tab_bar(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(line).style(base()), area);
 }
 
-/// Providers tab: read-only list of configured custom API providers. The stored
-/// API key is never rendered.
+/// Providers tab: list configured custom API providers. The stored API key is
+/// never rendered.
 fn render_providers_tab(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
-        .title(" Custom providers ")
+        .title(" Custom providers (Beta) ")
         .borders(Borders::ALL)
         .border_style(base().fg(C_BLUE))
         .style(base());
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let overview: Vec<Line<'static>> = keymap::PROVIDER_OVERVIEW
+        .iter()
+        .map(|description| Line::from(Span::styled(*description, base().fg(C_GRAY))))
+        .collect();
+    let overview_height = u16::try_from(overview.len()).unwrap_or(u16::MAX);
+    let overview_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height.min(overview_height),
+    };
+    f.render_widget(Paragraph::new(overview).style(base()), overview_area);
+    let table_area = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(overview_height),
+        width: inner.width,
+        height: inner.height.saturating_sub(overview_height),
+    };
+
     if app.providers.is_empty() {
+        app.hitmap.provider_list = None;
         let hint = Paragraph::new(Line::from(vec![
             Span::styled("No custom providers. Press ", base().fg(DIM)),
             Span::styled("a", base().fg(C_YELLOW).add_modifier(Modifier::BOLD)),
             Span::styled(" to add one.", base().fg(DIM)),
         ]))
         .style(base());
-        f.render_widget(hint, inner);
+        f.render_widget(hint, table_area);
         return;
     }
 
@@ -1069,13 +1097,13 @@ fn render_providers_tab(f: &mut Frame, app: &mut App, area: Rect) {
     .style(base());
 
     let mut state = TableState::default().with_selected(app.provider_selected);
-    f.render_stateful_widget(table, inner, &mut state);
+    f.render_stateful_widget(table, table_area, &mut state);
     app.hitmap.provider_list = Some(super::hitmap::ListHit {
         rows_area: Rect {
-            x: inner.x,
-            y: inner.y.saturating_add(1),
-            width: inner.width,
-            height: inner.height.saturating_sub(1),
+            x: table_area.x,
+            y: table_area.y.saturating_add(1),
+            width: table_area.width,
+            height: table_area.height.saturating_sub(1),
         },
         offset: state.offset(),
         row_count: app.providers.len(),
@@ -1090,7 +1118,7 @@ fn credits_table_text(u: &UsageInfo) -> String {
     if u.unlimited_credits == Some(true) {
         "unlimited".to_string()
     } else if let Some(balance) = u.credits_balance {
-        format_credits_balance(balance)
+        format_credits_amount(balance)
     } else {
         "--".to_string()
     }
@@ -2139,9 +2167,19 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            joined.contains("Custom providers"),
+            joined.contains("Custom providers (Beta)"),
             "the panel header must render:\n{joined}"
         );
+        assert!(joined.contains("Providers (Beta) (1)"), "{joined}");
+        assert!(
+            joined.contains("Responses-compatible API endpoints"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("reasoning/web_search per model"),
+            "{joined}"
+        );
+        assert!(joined.contains("No ChatGPT quotas"), "{joined}");
         assert!(joined.contains("openrouter"));
         assert!(joined.contains("https://openrouter.ai/api/v1"));
         assert!(
@@ -2159,6 +2197,31 @@ mod tests {
         assert!(
             !joined.contains("l launch"),
             "l must not mean launch on Providers:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn empty_providers_tab_explains_beta_scope_and_keeps_add_hint() {
+        let mut app = App::new();
+        app.active_tab = Tab::Providers;
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let rendered = (0..20)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Providers (Beta) (0)"), "{rendered}");
+        assert!(rendered.contains("Custom providers (Beta)"), "{rendered}");
+        assert!(
+            rendered.contains("Responses-compatible API endpoints"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("No ChatGPT quotas"), "{rendered}");
+        assert!(
+            rendered.contains("No custom providers. Press a to add one."),
+            "{rendered}"
         );
     }
 
@@ -2506,7 +2569,7 @@ mod tests {
             credits_balance: Some(15.5),
             ..Default::default()
         };
-        assert_eq!(credits_table_text(&healthy), "15.5 credits");
+        assert_eq!(credits_table_text(&healthy), "15.5");
         assert_eq!(credits_table_color(&healthy), C_WHITE);
 
         let mid = UsageInfo {
@@ -2519,14 +2582,14 @@ mod tests {
             credits_balance: Some(1.0),
             ..Default::default()
         };
-        assert_eq!(credits_table_text(&low), "1 credits");
+        assert_eq!(credits_table_text(&low), "1");
         assert_eq!(credits_table_color(&low), C_WHITE);
 
         let empty = UsageInfo {
             credits_balance: Some(0.0),
             ..Default::default()
         };
-        assert_eq!(credits_table_text(&empty), "0 credits");
+        assert_eq!(credits_table_text(&empty), "0");
         assert_eq!(credits_table_color(&empty), C_RED);
 
         // Accounts that don't use the pay-per-use credits system read as "--".
@@ -2585,8 +2648,12 @@ mod tests {
         assert!(header.contains("5h"), "missing 5h columns: {header}");
         let joined = rows.join("\n");
         assert!(
-            joined.contains("62,500 credits"),
+            joined.contains("62,500"),
             "the account's credits balance must render in the table:\n{joined}"
+        );
+        assert!(
+            !joined.contains("62,500 credits"),
+            "unit is shown by the header:\n{joined}"
         );
     }
 }
