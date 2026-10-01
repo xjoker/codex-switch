@@ -1308,6 +1308,32 @@ fn normal_footer_specs(app: &App) -> Vec<FooterActionSpec> {
 }
 
 fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
+    // The below-minimum Codex warning is persistent for the whole session, so
+    // it gets its own row instead of replacing the status line: otherwise
+    // transient status messages, the marked-selection prompt and the footer key
+    // hints would never be visible. Skip it on a one-row area so an active
+    // prompt still wins over the warning.
+    if let Some(warning) = app.codex_compatibility_warning()
+        && area.height >= 2
+    {
+        let warning_row = Rect { height: 1, ..area };
+        let rest = Rect {
+            y: area.y + 1,
+            height: area.height - 1,
+            ..area
+        };
+        let msg = Line::from(Span::styled(
+            warning,
+            base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+        ));
+        f.render_widget(Paragraph::new(msg).style(base()), warning_row);
+        render_status_content(f, app, rest);
+        return;
+    }
+    render_status_content(f, app, area);
+}
+
+fn render_status_content(f: &mut Frame, app: &mut App, area: Rect) {
     // Rename input takes top priority
     if app.rename.is_some() {
         let input = app.rename.as_ref().expect("rename").input.clone();
@@ -1402,7 +1428,6 @@ fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let mut load_warning = app.codex_compatibility_warning().unwrap_or_default();
     let stale_warning = app
         .profile_load_error
         .as_deref()
@@ -1416,23 +1441,9 @@ fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
         .collect::<Vec<_>>()
         .join("; ");
     if !stale_warning.is_empty() {
-        if !load_warning.is_empty() {
-            load_warning.push_str("; ");
-        }
-        load_warning.push_str(&stale_warning);
-    }
-    if !load_warning.is_empty() {
-        let warning_color = if app.codex_compatibility_warning().is_some()
-            && app.profile_load_error.is_none()
-            && app.provider_load_error.is_none()
-        {
-            C_YELLOW
-        } else {
-            C_RED
-        };
         let msg = Line::from(Span::styled(
-            load_warning,
-            base().fg(warning_color).add_modifier(Modifier::BOLD),
+            stale_warning,
+            base().fg(C_RED).add_modifier(Modifier::BOLD),
         ));
         f.render_widget(Paragraph::new(msg).style(base()), area);
     } else if let Some(s) = &app.status_msg {
@@ -1919,8 +1930,13 @@ fn format_auto_refresh_remaining(secs: u64) -> String {
 }
 
 fn status_bar_height(app: &App, width: u16) -> usize {
-    if app.codex_compatibility_warning().is_some()
-        || app.status_msg.is_some()
+    // The compatibility warning sits on its own row above the status line.
+    usize::from(app.codex_compatibility_warning().is_some())
+        + status_content_height(app, width)
+}
+
+fn status_content_height(app: &App, width: u16) -> usize {
+    if app.status_msg.is_some()
         || app.profile_load_error.is_some()
         || app.provider_load_error.is_some()
         || app.rename.is_some()
@@ -2002,25 +2018,33 @@ mod tests {
         assert!(row_text(terminal.backend(), 0).contains("A later informational message"));
     }
 
-    #[test]
-    fn below_minimum_path_cli_warning_stays_visible_in_the_status_bar() {
-        let mut app = App::new();
-        app.codex_path_version = Some(crate::codex_compat::VersionReport {
-            executable: Some("C:/fnm_multishells/codex.cmd".into()),
+    fn below_minimum_report(path: &str) -> crate::codex_compat::VersionReport {
+        crate::codex_compat::VersionReport {
+            executable: Some(path.into()),
             version: Some("0.154.0".into()),
             status: crate::codex_compat::CompatibilityStatus::BelowMinimum,
             note: None,
-        });
-        app.status_msg = Some("Usage refresh finished".into());
+        }
+    }
 
-        let mut terminal = Terminal::new(TestBackend::new(120, 1)).unwrap();
+    #[test]
+    fn below_minimum_path_cli_warning_stays_visible_in_the_status_bar() {
+        let mut app = App::new();
+        app.codex_path_version = Some(below_minimum_report("C:/fnm_multishells/codex.cmd"));
+        app.status_msg = Some("Usage refresh finished".into());
+        assert_eq!(status_bar_height(&app, 120), 2);
+
+        // The warning owns row 0; the transient status message is still shown
+        // beneath it for the whole time the warning is active.
+        let mut terminal = Terminal::new(TestBackend::new(120, 2)).unwrap();
         terminal
             .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
             .unwrap();
-        let rendered = row_text(terminal.backend(), 0);
-        assert!(rendered.contains("0.154.0"), "{rendered}");
-        assert!(rendered.contains("0.159.2"), "{rendered}");
-        assert!(!rendered.contains("Usage refresh finished"), "{rendered}");
+        let warning = row_text(terminal.backend(), 0);
+        assert!(warning.contains("0.154.0"), "{warning}");
+        assert!(warning.contains("0.159.2"), "{warning}");
+        let status = row_text(terminal.backend(), 1);
+        assert!(status.contains("Usage refresh finished"), "{status}");
 
         app.codex_path_version = Some(crate::codex_compat::VersionReport {
             executable: Some("C:/codex.exe".into()),
@@ -2028,18 +2052,17 @@ mod tests {
             status: crate::codex_compat::CompatibilityStatus::Aligned,
             note: None,
         });
-        terminal
+        assert_eq!(status_bar_height(&app, 120), 1);
+        let mut single = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        single
             .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
             .unwrap();
-        assert!(row_text(terminal.backend(), 0).contains("Usage refresh finished"));
+        assert!(row_text(single.backend(), 0).contains("Usage refresh finished"));
 
-        app.codex_path_version = Some(crate::codex_compat::VersionReport {
-            executable: Some("C:/very/long/fnm/multishell/path/codex.cmd".into()),
-            version: Some("0.154.0".into()),
-            status: crate::codex_compat::CompatibilityStatus::BelowMinimum,
-            note: None,
-        });
-        let mut narrow = Terminal::new(TestBackend::new(42, 1)).unwrap();
+        app.codex_path_version = Some(below_minimum_report(
+            "C:/very/long/fnm/multishell/path/codex.cmd",
+        ));
+        let mut narrow = Terminal::new(TestBackend::new(42, 2)).unwrap();
         narrow
             .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
             .unwrap();
@@ -2058,6 +2081,31 @@ mod tests {
             "the long stale warning must not hide the upgrade action: {}",
             row_text(narrow.backend(), 0)
         );
+    }
+
+    #[test]
+    fn below_minimum_warning_keeps_key_hints_and_marked_prompt_visible() {
+        let mut app = App::new();
+        app.codex_path_version = Some(below_minimum_report("C:/codex.cmd"));
+
+        let height = status_bar_height(&app, 200);
+        assert!(height >= 2);
+        let mut terminal = Terminal::new(TestBackend::new(200, height as u16)).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
+            .unwrap();
+        assert!(row_text(terminal.backend(), 0).contains("UPGRADE CODEX CLI"));
+        let hints = (1..height as u16)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<String>();
+        assert!(hints.contains("quit"), "footer key hints missing: {hints}");
+
+        app.marked.insert("a".into());
+        let mut marked = Terminal::new(TestBackend::new(200, 2)).unwrap();
+        marked
+            .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
+            .unwrap();
+        assert!(row_text(marked.backend(), 1).contains("selected"));
     }
 
     #[test]
