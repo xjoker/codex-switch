@@ -60,7 +60,7 @@ pub fn usage_has_active_warmup_window(u: &UsageInfo, now: i64) -> bool {
         .additional_limits
         .iter()
         .filter(|limit| is_five_hour_warmup_pool(limit))
-        .all(|limit| limit.primary.as_ref().is_some_and(&active));
+        .all(|limit| limit.primary.as_ref().is_some_and(active));
     main_active && additional_active
 }
 
