@@ -938,8 +938,13 @@ async fn fetch_usage_retried_inner(
                     &anyhow::anyhow!("refresh response without presented refresh_token"),
                 )
             })?;
-            persist_refreshed_tokens_blocking(alias, presented, new_tokens, "token_persist_reconcile")
-                .await?;
+            persist_refreshed_tokens_blocking(
+                alias,
+                presented,
+                new_tokens,
+                "token_persist_reconcile",
+            )
+            .await?;
             at = new_tokens.access_token.clone();
             id_token = Some(new_tokens.id_token.clone());
             refresh_token = Some(new_tokens.refresh_token.clone());

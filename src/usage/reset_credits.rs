@@ -512,7 +512,9 @@ async fn consume_reset_credit_selected(
         .ok_or_else(|| anyhow::anyhow!("{alias}: auth.json missing access_token"))
         .map_err(ConsumeResetCreditError::not_consumed)?;
     let account_info = crate::jwt::parse_account_info(&val);
-    let client = auth::build_http_client_async().await.map_err(ConsumeResetCreditError::not_consumed)?;
+    let client = auth::build_http_client_async()
+        .await
+        .map_err(ConsumeResetCreditError::not_consumed)?;
 
     let (_, credits) = fetch_reset_credits_with_routing(
         &client,

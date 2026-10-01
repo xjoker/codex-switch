@@ -4970,7 +4970,10 @@ mod tests {
         save_legacy_auth_override_profile("legacy-auth");
 
         let error = format!("{:#}", rename("legacy-auth", "fresh").unwrap_err());
-        assert!(error.contains("cannot rename provider 'legacy-auth'"), "{error}");
+        assert!(
+            error.contains("cannot rename provider 'legacy-auth'"),
+            "{error}"
+        );
         assert!(exists("legacy-auth"));
         assert!(!exists("fresh"));
     }

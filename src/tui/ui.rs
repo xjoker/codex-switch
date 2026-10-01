@@ -1931,8 +1931,7 @@ fn format_auto_refresh_remaining(secs: u64) -> String {
 
 fn status_bar_height(app: &App, width: u16) -> usize {
     // The compatibility warning sits on its own row above the status line.
-    usize::from(app.codex_compatibility_warning().is_some())
-        + status_content_height(app, width)
+    usize::from(app.codex_compatibility_warning().is_some()) + status_content_height(app, width)
 }
 
 fn status_content_height(app: &App, width: u16) -> usize {

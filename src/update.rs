@@ -423,10 +423,9 @@ async fn download_and_replace(
     let executable = std::env::current_exe().context("locating current executable")?;
     let platform = current_update_platform();
     ensure_replace_parent_writable(&executable, platform, &release.tag_name)?;
-    let client =
-        crate::auth::build_http_client_async()
-            .await
-            .context("building HTTP client for self-update")?;
+    let client = crate::auth::build_http_client_async()
+        .await
+        .context("building HTTP client for self-update")?;
     let archive_name = asset_name();
     let archive_asset = release
         .assets
@@ -618,10 +617,9 @@ async fn fetch_release_optional(version: Option<&str>) -> Result<Option<GithubRe
 }
 
 async fn fetch_release_inner(version: Option<&str>) -> Result<Option<GithubRelease>> {
-    let client =
-        crate::auth::build_http_client_async()
-            .await
-            .context("building HTTP client for update check")?;
+    let client = crate::auth::build_http_client_async()
+        .await
+        .context("building HTTP client for update check")?;
     let url = release_api_url(version);
     let resp = http_retry::send(
         client

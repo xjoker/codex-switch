@@ -109,11 +109,10 @@ pub(crate) fn is_dev_build_version(version: &Version) -> bool {
 /// `0.159.2`, but a prerelease build of the minimum release already carries
 /// its behavior, so it must not be refused or flagged as outdated.
 fn version_meets_minimum(version: &Version) -> bool {
-    (version.major, version.minor, version.patch)
-        >= {
-            let minimum = minimum_version();
-            (minimum.major, minimum.minor, minimum.patch)
-        }
+    (version.major, version.minor, version.patch) >= {
+        let minimum = minimum_version();
+        (minimum.major, minimum.minor, minimum.patch)
+    }
 }
 
 fn same_release_core(left: &Version, right: &Version) -> bool {
@@ -416,8 +415,7 @@ mod tests {
                 ),
             )
         };
-        let report =
-            probe_executable_with_timeout(&slow, Duration::from_secs(2)).report();
+        let report = probe_executable_with_timeout(&slow, Duration::from_secs(2)).report();
         assert_eq!(report.status, CompatibilityStatus::Unknown);
         assert!(
             report
@@ -505,7 +503,9 @@ mod tests {
             ensure_launch_version(&path).unwrap();
         }
         // Real prereleases and old versions are unaffected.
-        assert!(!is_dev_build_version(&Version::parse("0.160.0-alpha.1").unwrap()));
+        assert!(!is_dev_build_version(
+            &Version::parse("0.160.0-alpha.1").unwrap()
+        ));
         assert!(!is_dev_build_version(&Version::new(0, 154, 0)));
     }
 
