@@ -109,23 +109,26 @@ try {
     return
   }
 
-  # Detached daemon restarted by the old updater with the new binary.
-  & $bin daemon start
-  if ($LASTEXITCODE -ne 0) { throw 'legacy daemon start failed' }
-  Wait-Until 'old detached daemon to start' { Test-Path -LiteralPath $pidFile }
-  $updateLog = @(& $bin self-update $channel 2>&1 | ForEach-Object { "$_" })
-  $updateExit = $LASTEXITCODE
-  $updateLog | Write-Output
-  Assert-Upgraded
-  if ($updateExit -ne 0 -and -not ($updateLog -match 'self-update completed, but daemon restart failed')) {
-    throw "v$Legacy self-update failed before replacing the binary"
-  }
-  Wait-Until 'daemon process exit' {
-    -not (Get-CimInstance Win32_Process -Filter "Name = 'codex-switch.exe'" |
-        Where-Object { $_.ExecutablePath -eq $bin })
+  # On Windows, v20260804.1.0 runs its daemon from the scheduled task as
+  # `daemon start --foreground`, and that daemon holds its pidfile locked, so
+  # the old CLI cannot see it: detached `daemon start` times out and the old
+  # updater neither stops nor restarts it. Reproduce that state: the binary
+  # must be replaced while the old daemon process is still running.
+  $daemon = Start-Process -FilePath $bin -ArgumentList 'daemon', 'start', '--foreground' `
+    -WindowStyle Hidden -PassThru
+  try {
+    Wait-Until 'old foreground daemon to write its pidfile' { Test-Path -LiteralPath $pidFile }
+    if ($daemon.HasExited) { throw "old daemon exited early with $($daemon.ExitCode)" }
+    & $bin self-update $channel
+    if ($LASTEXITCODE -ne 0) { throw "v$Legacy self-update failed beside a running daemon" }
+    Assert-Upgraded
+  } finally {
+    # In real use the old daemon keeps running until logoff.
+    Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
   }
 
-  # A scheduled task left by `daemon install` is removed when it launches.
+  # At the next logon the old task launches the new binary, which must
+  # remove the task instead of failing on every logon.
   & $schtasks /Create /TN $taskName /TR "`"$bin`" daemon start --foreground" /SC ONCE /ST 23:59 /F | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'creating the legacy scheduled task fixture failed' }
   & $bin daemon start --foreground
