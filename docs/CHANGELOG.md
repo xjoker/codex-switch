@@ -6,6 +6,7 @@
 
 - **Custom API providers are labeled Beta** — User guides describe endpoint/key storage, per-model settings, catalog fetching, and Codex launch, and clarify that provider compatibility depends on the gateway and model. Providers do not show ChatGPT quota or participate in ChatGPT automatic account selection.
 - **Credits displays avoid repeating the unit** — Numeric balances rely on the surrounding credits label instead of appending a second unit to each value; raw JSON balances remain unchanged.
+- **User-visible regression checks target rendered output** — Help tests check the top-level provider row and provider heading, provider clicks use rendered coordinates, and Settings footer/field labels are checked at short and tall terminal heights. Duplicate Credits formatter and Settings fixtures were consolidated while preserving their distinct cases.
 
 ## v20261001.3.0 (candidate) — 2026-10-01
 

@@ -41,22 +41,21 @@ mod tests {
     use super::{format_credits_amount, format_credits_balance};
 
     #[test]
-    fn formats_raw_credit_units_without_currency() {
-        assert_eq!(format_credits_balance(62_500.0), "62,500 credits");
-        assert_eq!(format_credits_balance(15.5), "15.5 credits");
-        assert_eq!(format_credits_balance(1.234_567), "1.234567 credits");
-        assert_eq!(format_credits_balance(0.0), "0 credits");
-        assert_eq!(format_credits_balance(-1_234.5), "-1,234.5 credits");
-    }
+    fn formats_credit_units_for_labeled_and_standalone_output() {
+        for (balance, amount, standalone) in [
+            (62_500.0, "62,500", "62,500 credits"),
+            (15.5, "15.5", "15.5 credits"),
+            (1.234_567, "1.234567", "1.234567 credits"),
+            (0.0, "0", "0 credits"),
+            (-1_234.5, "-1,234.5", "-1,234.5 credits"),
+        ] {
+            assert_eq!(format_credits_amount(balance), amount);
+            assert_eq!(format_credits_balance(balance), standalone);
+        }
 
-    #[test]
-    fn formats_numeric_amount_for_labeled_credits_cells() {
-        assert_eq!(format_credits_amount(62_500.0), "62,500");
-        assert_eq!(format_credits_amount(15.5), "15.5");
-        assert_eq!(format_credits_amount(1.234_567), "1.234567");
-        assert_eq!(format_credits_amount(0.0), "0");
-        assert_eq!(format_credits_amount(-1_234.5), "-1,234.5");
-        assert_eq!(format_credits_amount(f64::INFINITY), "unknown");
-        assert_eq!(format_credits_balance(f64::NAN), "unknown credits");
+        for balance in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(format_credits_amount(balance), "unknown");
+            assert_eq!(format_credits_balance(balance), "unknown credits");
+        }
     }
 }

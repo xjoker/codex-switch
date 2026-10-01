@@ -2226,52 +2226,51 @@ mod tests {
     }
 
     #[test]
-    fn settings_tab_renders_config_fields_and_save_hint() {
-        let mut app = App::new();
-        app.active_tab = crate::tui::app::Tab::Settings;
+    fn settings_tab_preserves_config_labels_and_footer_at_short_and_tall_heights() {
+        for height in [36, 50] {
+            let mut app = App::new();
+            app.active_tab = crate::tui::app::Tab::Settings;
+            let backend = TestBackend::new(120, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| super::render(f, &mut app)).unwrap();
 
-        let backend = TestBackend::new(120, 36);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| super::render(f, &mut app)).unwrap();
+            let rows = (0..height)
+                .map(|y| row_text(terminal.backend(), y))
+                .collect::<Vec<_>>();
+            let joined = rows.join("\n");
+            assert!(
+                joined.contains("Settings"),
+                "Settings tab title must render at height {height}:\n{joined}"
+            );
 
-        let joined = (0..36)
-            .map(|y| row_text(terminal.backend(), y))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("Settings"), "tab bar or panel:\n{joined}");
-        assert!(
-            joined.contains("s save"),
-            "status bar must show save:\n{joined}"
-        );
-        assert!(
-            !joined.contains("enter/o launch"),
-            "Settings must not reuse the Providers status bar:\n{joined}"
-        );
-    }
+            let status_height = status_bar_height(&app, 120) as u16;
+            let status_start = height.saturating_sub(status_height);
+            let footer = rows[usize::from(status_start)..].join("\n");
+            assert!(
+                footer.contains("s save"),
+                "the rendered Settings footer must show save at height {height}:\n{footer}"
+            );
+            assert!(
+                !footer.contains("enter/o launch"),
+                "the Settings footer must not show the Providers launch hint at height {height}:\n{footer}"
+            );
 
-    #[test]
-    fn settings_tab_shows_every_owned_config_label() {
-        let mut app = App::new();
-        app.active_tab = crate::tui::app::Tab::Settings;
-        let backend = TestBackend::new(120, 50);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| super::render(f, &mut app)).unwrap();
-        let joined = (0..50)
-            .map(|y| row_text(terminal.backend(), y))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for label in [
-            "proxy.url",
-            "proxy.no_proxy",
-            "cache.ttl",
-            "network.max_concurrent",
-            "tui.auto_refresh_interval_secs",
-            "use.safety_margin_7d",
-            "use.team_priority",
-            "use.restart_app_server",
-            "launch.restore_delay_secs",
-        ] {
-            assert!(joined.contains(label), "missing {label}:\n{joined}");
+            for label in [
+                "proxy.url",
+                "proxy.no_proxy",
+                "cache.ttl",
+                "network.max_concurrent",
+                "tui.auto_refresh_interval_secs",
+                "use.safety_margin_7d",
+                "use.team_priority",
+                "use.restart_app_server",
+                "launch.restore_delay_secs",
+            ] {
+                assert!(
+                    joined.contains(label),
+                    "missing {label} at height {height}:\n{joined}"
+                );
+            }
         }
     }
 

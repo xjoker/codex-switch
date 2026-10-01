@@ -4408,12 +4408,22 @@ mod tests {
         terminal
             .draw(|frame| crate::tui::ui::render(frame, &mut app))
             .unwrap();
-        let list = app
-            .hitmap
-            .provider_list
-            .expect("rendered provider hit region");
+        let buffer = terminal.backend().buffer();
+        let second_alias = (0..buffer.area.height)
+            .find_map(|y| {
+                let row = (0..buffer.area.width)
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .expect("cell inside test buffer")
+                            .symbol()
+                    })
+                    .collect::<String>();
+                row.find("second").map(|x| (x as u16, y))
+            })
+            .expect("second provider alias must be rendered");
 
-        app.handle_mouse(left_click(list.rows_area.x + 1, list.rows_area.y + 1));
+        app.handle_mouse(left_click(second_alias.0, second_alias.1));
 
         assert_eq!(app.provider_selected, 1);
         assert!(app.provider_launch.is_none());

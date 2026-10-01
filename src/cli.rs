@@ -435,11 +435,25 @@ mod tests {
 
     #[test]
     fn provider_help_marks_beta_and_explains_its_scope() {
+        let top_help = Cli::try_parse_from(["codex-switch", "--help"])
+            .err()
+            .expect("--help should exit with a clap display error")
+            .to_string();
+        let provider_command = top_help
+            .lines()
+            .find(|line| line.split_whitespace().next() == Some("provider"))
+            .expect("top-level help should list the provider command");
+        assert!(provider_command.contains("(Beta)"), "{top_help}");
+
         let help = Cli::try_parse_from(["codex-switch", "provider", "--help"])
             .err()
             .expect("--help should exit with a clap display error")
             .to_string();
-        assert!(help.contains("(Beta)"), "{help}");
+        let heading = help
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .expect("provider help should have a heading");
+        assert!(heading.contains("(Beta)"), "{help}");
         assert!(
             help.contains("Responses-compatible API endpoints"),
             "{help}"
@@ -455,7 +469,11 @@ mod tests {
             .err()
             .expect("--help should exit with a clap display error")
             .to_string();
-        assert!(add_help.contains("(Beta)"), "{add_help}");
+        let add_heading = add_help
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .expect("provider add help should have a heading");
+        assert!(add_heading.contains("(Beta)"), "{add_help}");
         assert!(add_help.contains("third-party models"), "{add_help}");
     }
 
