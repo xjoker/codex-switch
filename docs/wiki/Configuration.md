@@ -16,7 +16,7 @@ Explicit `keyring`, `auto`, and `ephemeral` modes are rejected. ChatGPT operatio
 
 ChatGPT file-login operations are refused when `OPENAI_FEDERATION_RULE_ID` or `OPENAI_IDENTITY_TOKEN_FILE` is present, including an empty value, because Codex selects workload identity federation ahead of stored OAuth credentials. codex-switch does not unset these variables or edit managed policy. API provider keys remain a separate launch path.
 
-A managed configuration with `forced_login_method = "api"`, an allowlist excluding ChatGPT, or no permitted ChatGPT workspace is incompatible with ChatGPT login profiles. Non-default `chatgpt_base_url` routing is not supported; relevant ChatGPT requests are refused before network access rather than sent to the default backend. Unreadable, oversized or invalid policy is reported explicitly.
+A managed configuration with `forced_login_method = "api"`, an allowlist excluding ChatGPT, or no permitted ChatGPT workspace is incompatible with ChatGPT login profiles. Non-default `chatgpt_base_url` routing is not supported by codex-switch's own ChatGPT requests (usage, refresh, workspace metadata, warmup, models, Reset Cards): they are refused before network access rather than sent to the default backend. Purely local commands (`use`, `import`, `login`, `launch`) are not affected by it, because Codex itself, not codex-switch, talks to that endpoint. Unreadable, oversized or invalid policy is reported explicitly.
 
 ### Why only the file store is supported
 

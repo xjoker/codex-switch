@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **A custom `chatgpt_base_url` no longer blocks switching or importing.** The non-default endpoint check applied to every ChatGPT file-credential command, so a user with a proxy or mirror configured for Codex could not run `use`, `import`, `login` or `launch`. It is now enforced only where codex-switch itself calls the ChatGPT backend (usage, token refresh, workspace metadata, warmup, models, Reset Cards); the file credential store, login-method and workspace checks still apply everywhere.
+
 ## v20261001.5.0 — 2026-10-01
 
 Stable release candidate covering every development build since v20260804.1.0. Read the upgrade notes first: this release removes the background daemon.

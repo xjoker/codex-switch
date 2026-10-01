@@ -466,7 +466,7 @@ fn update_profile_tokens_if_refresh_matches_after_launch(
     // policy update during the request cannot discard the only usable token.
     write_auth(&profile_path, &updated)?;
     if read_current() == alias {
-        if let Err(error) = crate::auth::ensure_chatgpt_backend_supported(&format!(
+        if let Err(error) = crate::auth::ensure_file_oauth_supported(&format!(
             "update live auth for refreshed profile '{alias}'"
         )) {
             tracing::warn!(

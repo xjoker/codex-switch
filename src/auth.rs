@@ -109,14 +109,27 @@ pub(crate) fn codex_auth_path_unchecked() -> Result<PathBuf> {
     Ok(codex_home.join("auth.json"))
 }
 
+/// Local-only gate: file-backed credential store and login-method policy.
+/// It deliberately ignores `chatgpt_base_url`, which only matters when
+/// codex-switch itself talks to the ChatGPT backend.
 pub(crate) fn ensure_file_credentials_store() -> Result<()> {
-    ensure_chatgpt_backend_supported("use ChatGPT OAuth")
+    ensure_file_oauth_supported("use ChatGPT OAuth")
 }
 
-pub(crate) fn ensure_chatgpt_backend_supported(operation: &str) -> Result<()> {
+pub(crate) fn ensure_file_oauth_supported(operation: &str) -> Result<()> {
     let codex_home = user_codex_home()?;
     crate::auth_policy::ensure_file_oauth_environment(operation)?;
     crate::auth_policy::load_auth_policy(&codex_home)?.validate_file_oauth(operation)
+}
+
+/// Gate for operations where codex-switch itself calls the ChatGPT backend:
+/// the local checks plus a refusal of a non-default `chatgpt_base_url`.
+pub(crate) fn ensure_chatgpt_backend_supported(operation: &str) -> Result<()> {
+    let codex_home = user_codex_home()?;
+    crate::auth_policy::ensure_file_oauth_environment(operation)?;
+    let policy = crate::auth_policy::load_auth_policy(&codex_home)?;
+    policy.validate_file_oauth(operation)?;
+    policy.validate_backend_url(operation)
 }
 
 fn codex_home_from_values(
@@ -1429,6 +1442,39 @@ mod tests {
                 .unwrap();
 
         assert_eq!(codex_home, user_home.join(".codex"));
+    }
+
+    #[test]
+    fn custom_chatgpt_base_url_only_blocks_backend_operations() {
+        let _lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "chatgpt_base_url = \"https://mirror.example/backend-api\"
+",
+        )
+        .unwrap();
+        let old = std::env::var_os("CODEX_HOME");
+        unsafe { std::env::set_var("CODEX_HOME", dir.path()) };
+        let local = ensure_file_credentials_store();
+        let local_path = codex_auth_path();
+        let backend = ensure_chatgpt_backend_supported("fetch ChatGPT usage");
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        local.unwrap();
+        local_path.unwrap();
+        assert!(
+            backend
+                .unwrap_err()
+                .to_string()
+                .contains("non-default endpoint")
+        );
     }
 
     #[test]

@@ -77,6 +77,16 @@ impl AuthPolicy {
                     .unwrap_or("Codex managed policy")
             );
         }
+        Ok(())
+    }
+
+    /// Refuse a non-default `chatgpt_base_url`. codex-switch's own ChatGPT
+    /// backend calls (usage, refresh metadata, warmup, models, reset credits)
+    /// are pinned to the official endpoints, so they must not run when policy
+    /// redirects Codex elsewhere. Purely local operations (switching, import,
+    /// staging auth.json for a launch) never contact the backend and must not
+    /// call this.
+    pub(crate) fn validate_backend_url(&self, operation: &str) -> Result<()> {
         if let Some(base_url) = &self.chatgpt_base_url
             && !DEFAULT_CHATGPT_BASE_URLS
                 .iter()
@@ -696,11 +706,14 @@ mod tests {
         };
         assert!(
             policy
-                .validate_file_oauth("launch")
+                .validate_backend_url("fetch usage")
                 .unwrap_err()
                 .to_string()
                 .contains("does not support")
         );
+        // Local-only operations (use/import/launch) must not be blocked by a
+        // proxy or mirror endpoint that only Codex itself talks to.
+        policy.validate_file_oauth("use ChatGPT OAuth").unwrap();
     }
 
     #[test]
@@ -711,6 +724,7 @@ mod tests {
                 ..AuthPolicy::default()
             };
             policy.validate_file_oauth("login").unwrap();
+            policy.validate_backend_url("fetch usage").unwrap();
         }
     }
 

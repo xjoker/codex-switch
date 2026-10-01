@@ -125,3 +125,25 @@ fn invalid_auth_setting_is_reported_before_login_or_credential_changes() {
     assert_single_json_error(&output, "forced_login_method");
     homes.assert_unchanged();
 }
+
+#[test]
+fn custom_chatgpt_base_url_does_not_block_local_use_or_import() {
+    // A proxy/mirror endpoint only matters to calls codex-switch makes to the
+    // ChatGPT backend; switching and importing are purely local.
+    for args in [&["use", "known"][..], &["import", "missing-input.json"][..]] {
+        let homes = Homes::new();
+        fs::write(
+            homes.root.path().join("codex/config.toml"),
+            "chatgpt_base_url = 'https://mirror.example/backend-api'
+",
+        )
+        .unwrap();
+        let output = homes.command(args).output().unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).to_string()
+            + &String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !text.contains("chatgpt_base_url"),
+            "{args:?} was refused by the endpoint policy: {text}"
+        );
+    }
+}
