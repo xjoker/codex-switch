@@ -427,7 +427,7 @@ pub fn render_settings_tab(
     settings: &SettingsState,
     area: Rect,
     hitmap: &mut HitMap,
-    compatibility_notice: Option<&str>,
+    upgrade_instructions: Option<&[String]>,
 ) {
     let title = if settings.dirty {
         " Settings * "
@@ -446,12 +446,14 @@ pub fn render_settings_tab(
     let mut focused_line = 0usize;
     let mut lines = vec![Line::from(Span::styled("Proxy / network / TUI", header()))];
     let mut line_focus: Vec<Option<Focus>> = vec![None];
-    if let Some(notice) = compatibility_notice {
-        lines.push(Line::from(Span::styled(
-            notice.to_string(),
-            base().fg(super::theme::C_YELLOW),
-        )));
-        line_focus.push(None);
+    if let Some(instructions) = upgrade_instructions {
+        for instruction in instructions {
+            lines.push(Line::from(Span::styled(
+                instruction.clone(),
+                base().fg(super::theme::C_YELLOW),
+            )));
+            line_focus.push(None);
+        }
     }
 
     push_field(

@@ -8,6 +8,7 @@ use serde::Serialize;
 
 pub(crate) const MINIMUM_CODEX_VERSION: &str = "0.159.2";
 pub(crate) const ALIGNED_CODEX_VERSION: &str = "0.159.2";
+pub(crate) const CLI_UPGRADE_NPM_COMMAND: &str = "npm install -g @openai/codex@latest";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -197,8 +198,10 @@ pub(crate) fn probe_optional_desktop(path: Option<&Path>) -> VersionReport {
 }
 
 pub(crate) fn doctor_report(desktop_path: Option<&Path>) -> DoctorReport {
-    let path_cli = probe_path_cli();
-    let desktop_codex = probe_optional_desktop(desktop_path);
+    let mut path_cli = probe_path_cli();
+    set_below_minimum_note(&mut path_cli, path_cli_upgrade_note());
+    let mut desktop_codex = probe_optional_desktop(desktop_path);
+    set_below_minimum_note(&mut desktop_codex, desktop_engine_upgrade_note());
     let comparison = path_cli
         .version
         .as_deref()
@@ -238,11 +241,43 @@ pub(crate) fn ensure_launch_version(path: &Path) -> Result<()> {
         return Ok(());
     }
     let report = probe.report();
-    let version = report.version.as_deref().unwrap_or("unknown");
-    let reason = report.note.as_deref().unwrap_or("version is below minimum");
-    anyhow::bail!(
-        "Codex at '{}' has version {version}; codex-switch launch requires Codex {MINIMUM_CODEX_VERSION} or newer ({reason}). Run `codex-switch doctor` to inspect the PATH CLI, or install/update Codex.",
-        path.display()
+    match report.status {
+        CompatibilityStatus::BelowMinimum => {
+            let version = report.version.as_deref().unwrap_or("unknown");
+            anyhow::bail!(
+                "Codex CLI at '{}' has version {version}; `codex-switch launch` requires Codex {MINIMUM_CODEX_VERSION} or newer. Upgrade using the original installation method. For npm/fnm installs, run `{CLI_UPGRADE_NPM_COMMAND}` in the same Node.js environment, restart the terminal, then verify with `codex --version` or `codex-switch doctor`.",
+                path.display()
+            )
+        }
+        CompatibilityStatus::Unknown => {
+            let reason = report
+                .note
+                .as_deref()
+                .unwrap_or("the version probe did not return a usable version");
+            anyhow::bail!(
+                "Could not verify the Codex CLI version at '{}': {reason}. `codex-switch launch` requires {MINIMUM_CODEX_VERSION} or newer. Run `codex-switch doctor` to inspect version detection, then install or update Codex if needed.",
+                path.display()
+            )
+        }
+        _ => unreachable!("a version that meets the minimum was already accepted"),
+    }
+}
+
+fn set_below_minimum_note(report: &mut VersionReport, note: String) {
+    if report.status == CompatibilityStatus::BelowMinimum {
+        report.note = Some(note);
+    }
+}
+
+fn path_cli_upgrade_note() -> String {
+    format!(
+        "Upgrade the Codex CLI to version {MINIMUM_CODEX_VERSION} or newer using its original installation method. For npm/fnm installs, run `{CLI_UPGRADE_NPM_COMMAND}` in the same Node.js environment; restart the terminal, then verify with `codex --version` or `codex-switch doctor`."
+    )
+}
+
+fn desktop_engine_upgrade_note() -> String {
+    format!(
+        "The bundled Codex engine is below {MINIMUM_CODEX_VERSION}. Update the desktop app that bundles this engine to obtain a newer version, then rerun `codex-switch doctor --desktop-codex <PATH>`; npm updates only affect the PATH CLI."
     )
 }
 
@@ -373,6 +408,58 @@ mod tests {
 
         let prerelease = executable(dir.path(), "prerelease-codex", "echo 0.159.2-rc.1");
         assert!(!probe_executable(&prerelease).meets_minimum());
+    }
+
+    #[test]
+    fn below_minimum_diagnostics_give_source_specific_upgrade_steps() {
+        let _env = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let old = executable(dir.path(), "old-codex", "echo 0.159.1");
+        let error = ensure_launch_version(&old).unwrap_err().to_string();
+        assert!(error.contains("requires Codex 0.159.2 or newer"), "{error}");
+        assert!(
+            error.contains("npm install -g @openai/codex@latest"),
+            "{error}"
+        );
+        assert!(error.contains("codex --version"), "{error}");
+        assert!(error.contains("codex-switch doctor"), "{error}");
+
+        let mut path_report = VersionReport {
+            executable: Some("codex".to_string()),
+            version: Some("0.159.1".to_string()),
+            status: CompatibilityStatus::BelowMinimum,
+            note: None,
+        };
+        set_below_minimum_note(&mut path_report, path_cli_upgrade_note());
+        let path_note = path_report.note.unwrap();
+        assert!(path_note.contains("npm install -g @openai/codex@latest"));
+        assert!(path_note.contains("same Node.js environment"));
+
+        let mut desktop_report = VersionReport {
+            executable: Some("desktop-codex".to_string()),
+            version: Some("0.159.1".to_string()),
+            status: CompatibilityStatus::BelowMinimum,
+            note: None,
+        };
+        set_below_minimum_note(&mut desktop_report, desktop_engine_upgrade_note());
+        let desktop_note = desktop_report.note.unwrap();
+        assert!(desktop_note.contains("Update the desktop app that bundles this engine"));
+        assert!(desktop_note.contains("npm updates only affect the PATH CLI"));
+        assert!(!desktop_note.contains("npm install -g"));
+
+        let mut unknown_report = VersionReport {
+            executable: Some("codex".to_string()),
+            version: None,
+            status: CompatibilityStatus::Unknown,
+            note: Some("version probe returned no usable semantic version".to_string()),
+        };
+        set_below_minimum_note(&mut unknown_report, path_cli_upgrade_note());
+        assert_eq!(
+            unknown_report.note.as_deref(),
+            Some("version probe returned no usable semantic version")
+        );
     }
 
     #[test]

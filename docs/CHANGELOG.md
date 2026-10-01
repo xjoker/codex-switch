@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v20261001.3.0 (candidate) — 2026-10-01
+
+- **Below-minimum Codex versions prompt an upgrade** — CLI and TUI compatibility guidance distinguishes the PATH-installed CLI from the desktop app's bundled engine and points users to the updater for the installation they need to change.
+
 ## v20261001.2.0 (candidate) — 2026-10-01
 
 - **Reset cards use their own expiry colors** — Each reset-card expiry is colored independently instead of using one earliest-card expiry for the whole account summary.

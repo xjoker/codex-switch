@@ -66,13 +66,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
         }
         Tab::Providers => render_providers_tab(f, app, vertical[1]),
         Tab::Settings => {
-            let compatibility_notice = app.codex_path_version_detail();
+            let upgrade_instructions = app.codex_upgrade_instructions();
             super::settings::render_settings_tab(
                 f,
                 &app.settings,
                 vertical[1],
                 &mut app.hitmap,
-                compatibility_notice.as_deref(),
+                upgrade_instructions.as_deref(),
             )
         }
         Tab::Logs => render_logs(f, app, vertical[1]),
@@ -83,9 +83,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // Overlays (rendered last, on top of everything).
     // Help popup takes top priority since the user invoked it explicitly.
     let active_tab = app.active_tab;
-    let compatibility_notice = app.codex_compatibility_warning();
+    let upgrade_instructions = app.codex_upgrade_instructions();
     if let Some(state) = app.help_popup.as_mut() {
-        let panel = render_help_popup(f, state, active_tab, area, compatibility_notice.as_deref());
+        let panel = render_help_popup(f, state, active_tab, area, upgrade_instructions.as_deref());
         app.hitmap.overlay = match panel {
             Some(panel) => super::hitmap::OverlayHit::Dismissible { panel },
             None => super::hitmap::OverlayHit::Modal,
@@ -176,7 +176,7 @@ fn render_help_popup(
     state: &mut popup::PopupState,
     active_tab: Tab,
     area: ratatui::layout::Rect,
-    compatibility_notice: Option<&str>,
+    upgrade_instructions: Option<&[String]>,
 ) -> Option<Rect> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let key_style = base().fg(C_YELLOW).add_modifier(Modifier::BOLD);
@@ -184,11 +184,13 @@ fn render_help_popup(
     let heading_style = base().fg(C_CYAN).add_modifier(Modifier::BOLD);
     let dim_style = base().fg(DIM);
 
-    if let Some(notice) = compatibility_notice {
-        lines.push(Line::from(Span::styled(
-            notice.to_string(),
-            base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
-        )));
+    if let Some(instructions) = upgrade_instructions {
+        for instruction in instructions {
+            lines.push(Line::from(Span::styled(
+                instruction.clone(),
+                base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+            )));
+        }
         lines.push(Line::from(""));
     }
 
@@ -1372,7 +1374,8 @@ fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let mut load_warning = app
+    let mut load_warning = app.codex_compatibility_warning().unwrap_or_default();
+    let stale_warning = app
         .profile_load_error
         .as_deref()
         .map(|error| format!("Account data stale/incomplete: {error}"))
@@ -1384,11 +1387,11 @@ fn render_status_bar(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .collect::<Vec<_>>()
         .join("; ");
-    if let Some(compatibility_warning) = app.codex_compatibility_warning() {
+    if !stale_warning.is_empty() {
         if !load_warning.is_empty() {
             load_warning.push_str("; ");
         }
-        load_warning.push_str(&compatibility_warning);
+        load_warning.push_str(&stale_warning);
     }
     if !load_warning.is_empty() {
         let warning_color = if app.codex_compatibility_warning().is_some()
@@ -1888,7 +1891,8 @@ fn format_auto_refresh_remaining(secs: u64) -> String {
 }
 
 fn status_bar_height(app: &App, width: u16) -> usize {
-    if app.status_msg.is_some()
+    if app.codex_compatibility_warning().is_some()
+        || app.status_msg.is_some()
         || app.profile_load_error.is_some()
         || app.provider_load_error.is_some()
         || app.rename.is_some()
@@ -2000,6 +2004,32 @@ mod tests {
             .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
             .unwrap();
         assert!(row_text(terminal.backend(), 0).contains("Usage refresh finished"));
+
+        app.codex_path_version = Some(crate::codex_compat::VersionReport {
+            executable: Some("C:/very/long/fnm/multishell/path/codex.cmd".into()),
+            version: Some("0.154.0".into()),
+            status: crate::codex_compat::CompatibilityStatus::BelowMinimum,
+            note: None,
+        });
+        let mut narrow = Terminal::new(TestBackend::new(42, 1)).unwrap();
+        narrow
+            .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
+            .unwrap();
+        assert!(
+            row_text(narrow.backend(), 0).starts_with("UPGRADE CODEX CLI"),
+            "{}",
+            row_text(narrow.backend(), 0)
+        );
+        app.profile_load_error = Some("stale profile state ".repeat(12));
+        app.provider_load_error = Some("stale provider state".into());
+        narrow
+            .draw(|frame| render_status_bar(frame, &mut app, frame.area()))
+            .unwrap();
+        assert!(
+            row_text(narrow.backend(), 0).starts_with("UPGRADE CODEX CLI"),
+            "the long stale warning must not hide the upgrade action: {}",
+            row_text(narrow.backend(), 0)
+        );
     }
 
     #[test]
@@ -2023,9 +2053,63 @@ mod tests {
         assert!(rendered.contains("0.154.0"), "{rendered}");
         assert!(rendered.contains("0.159.2"), "{rendered}");
         assert!(
+            rendered.contains("npm install -g @openai/codex@latest"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Node.js/fnm"), "{rendered}");
+        assert!(
+            rendered.contains("Restart the terminal and TUI"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("codex --version"), "{rendered}");
+        assert!(
             rendered.contains("fnm_multishells/9876/codex.cmd"),
             "{rendered}"
         );
+
+        let mut narrow = Terminal::new(TestBackend::new(60, 40)).unwrap();
+        narrow.draw(|frame| super::render(frame, &mut app)).unwrap();
+        let narrow_rendered = (0..40)
+            .map(|y| row_text(narrow.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            narrow_rendered.contains("npm install -g @openai/codex@latest"),
+            "the standalone command line must remain copyable at narrow widths:\n{narrow_rendered}"
+        );
+    }
+
+    #[test]
+    fn help_popup_lists_codex_upgrade_command_for_old_path_cli() {
+        let mut app = App::new();
+        app.codex_path_version = Some(crate::codex_compat::VersionReport {
+            executable: Some("C:/fnm_multishells/codex.cmd".into()),
+            version: Some("0.154.0".into()),
+            status: crate::codex_compat::CompatibilityStatus::BelowMinimum,
+            note: None,
+        });
+        app.help_popup = Some(crate::tui::popup::PopupState::new());
+        let mut terminal = Terminal::new(TestBackend::new(100, 35)).unwrap();
+        terminal
+            .draw(|frame| super::render(frame, &mut app))
+            .unwrap();
+        let rendered = (0..35)
+            .map(|y| row_text(terminal.backend(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("UPGRADE REQUIRED"), "{rendered}");
+        assert!(rendered.contains("0.154.0"), "{rendered}");
+        assert!(rendered.contains("0.159.2"), "{rendered}");
+        assert!(
+            rendered.contains("npm install -g @openai/codex@latest"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Node.js/fnm"), "{rendered}");
+        assert!(
+            rendered.contains("Restart the terminal and TUI"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("codex --version"), "{rendered}");
     }
 
     #[test]

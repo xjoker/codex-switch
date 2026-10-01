@@ -57,7 +57,7 @@ pub struct AccountMenuInfo {
     pub usage: Option<Box<crate::usage::UsageInfo>>,
     pub usage_meta: Vec<String>,
     pub models: Vec<String>,
-    pub codex_compatibility_warning: Option<String>,
+    pub codex_upgrade_instructions: Option<Vec<String>>,
     pub reset_cards: Option<u64>,
     pub reset_card_expiries: Vec<String>,
     pub reset_card_expiry_colors: Vec<Color>,
@@ -485,6 +485,15 @@ impl MenuState {
                         left_lines.push(Line::from(Span::styled(expiry.clone(), dim)));
                     }
                 }
+                if let Some(instructions) = &info.codex_upgrade_instructions {
+                    left_lines.push(Line::from(""));
+                    for instruction in instructions {
+                        left_lines.push(Line::from(Span::styled(
+                            instruction.clone(),
+                            base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
+                        )));
+                    }
+                }
                 left_lines.push(Line::from(""));
                 left_lines.push(Line::from(Span::styled(
                     "Quota pools",
@@ -540,12 +549,6 @@ impl MenuState {
                     ]));
                 }
                 left_lines.push(Line::from(""));
-                if let Some(warning) = &info.codex_compatibility_warning {
-                    left_lines.push(Line::from(Span::styled(
-                        warning.clone(),
-                        base().fg(C_YELLOW).add_modifier(Modifier::BOLD),
-                    )));
-                }
                 left_lines.push(Line::from(Span::styled(
                     format!("Models ({})", info.models.len()),
                     header_style.add_modifier(Modifier::BOLD),
@@ -804,7 +807,7 @@ mod tests {
             usage: Some(Box::new(usage)),
             usage_meta: Vec::new(),
             models: Vec::new(),
-            codex_compatibility_warning: None,
+            codex_upgrade_instructions: None,
             reset_cards: Some(1),
             reset_card_expiries: vec!["expires soon".into()],
             reset_card_expiry_colors: vec![super::super::ui::reset_card_expiry_color(Some(
@@ -872,21 +875,28 @@ mod tests {
     }
 
     #[test]
-    fn account_model_details_show_low_path_cli_warning() {
+    fn account_details_show_explicit_codex_upgrade_steps() {
         let mut menu = account_menu_with_reset_card_expiring_in(6 * 24 * 60 * 60);
         let MenuState::Account { info, .. } = &mut menu else {
             unreachable!();
         };
-        info.codex_compatibility_warning =
-            Some("PATH Codex 0.154.0 < required 0.159.2; model catalog may be incomplete.".into());
+        info.codex_upgrade_instructions = Some(vec![
+            "UPGRADE REQUIRED: PATH CLI 0.154.0 < minimum 0.159.2.".into(),
+            "Upgrade using your original installation method.".into(),
+            "npm example (same Node.js/fnm environment):".into(),
+            "npm install -g @openai/codex@latest".into(),
+            "Restart the terminal and TUI after upgrading.".into(),
+            "Verify with codex --version or codex-switch doctor.".into(),
+            "PATH: C:/Users/test/fnm_multishells/codex.cmd".into(),
+        ]);
 
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal
             .draw(|frame| {
                 let _ = menu.render(frame, frame.area());
             })
             .unwrap();
-        let rendered = (0..30)
+        let rendered = (0..40)
             .map(|y| {
                 (0..120)
                     .map(|x| terminal.backend().buffer().cell((x, y)).unwrap().symbol())
@@ -894,8 +904,24 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("PATH Codex 0.154.0"), "{rendered}");
-        assert!(rendered.contains("required 0.159.2"), "{rendered}");
+        assert!(rendered.contains("UPGRADE REQUIRED"), "{rendered}");
+        assert!(rendered.contains("0.154.0"), "{rendered}");
+        assert!(rendered.contains("0.159.2"), "{rendered}");
+        assert!(
+            rendered.contains("npm install -g @openai/codex@latest"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("original installation method"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Node.js/fnm"), "{rendered}");
+        assert!(
+            rendered.contains("Restart the terminal and TUI"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("codex --version"), "{rendered}");
+        assert!(rendered.contains("fnm_multishells/codex.cmd"), "{rendered}");
         assert!(rendered.contains("Models"), "{rendered}");
     }
 
@@ -915,7 +941,7 @@ mod tests {
             usage: Some(Box::new(usage)),
             usage_meta: Vec::new(),
             models: Vec::new(),
-            codex_compatibility_warning: None,
+            codex_upgrade_instructions: None,
             reset_cards: Some(0),
             reset_card_expiries: Vec::new(),
             reset_card_expiry_colors: Vec::new(),
@@ -982,7 +1008,7 @@ mod tests {
             usage: None,
             usage_meta: Vec::new(),
             models: Vec::new(),
-            codex_compatibility_warning: None,
+            codex_upgrade_instructions: None,
             reset_cards: None,
             reset_card_expiries: Vec::new(),
             reset_card_expiry_colors: Vec::new(),
@@ -1020,7 +1046,7 @@ mod tests {
             usage: None,
             usage_meta: Vec::new(),
             models: Vec::new(),
-            codex_compatibility_warning: None,
+            codex_upgrade_instructions: None,
             reset_cards: None,
             reset_card_expiries: Vec::new(),
             reset_card_expiry_colors: Vec::new(),
@@ -1051,7 +1077,7 @@ mod tests {
             usage: None,
             usage_meta: vec!["usage metadata".into(); 4],
             models: (0..16).map(|idx| format!("model-{idx}")).collect(),
-            codex_compatibility_warning: None,
+            codex_upgrade_instructions: None,
             reset_cards: Some(0),
             reset_card_expiries: Vec::new(),
             reset_card_expiry_colors: Vec::new(),
@@ -1180,7 +1206,7 @@ mod tests {
             usage: Some(Box::new(usage)),
             usage_meta: vec!["  updated now".into()],
             models: vec!["  Official Model".into(), "    Official description".into()],
-            codex_compatibility_warning: None,
+            codex_upgrade_instructions: None,
             reset_cards: Some(0),
             reset_card_expiries: Vec::new(),
             reset_card_expiry_colors: Vec::new(),

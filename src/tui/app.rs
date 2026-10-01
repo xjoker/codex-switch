@@ -434,21 +434,34 @@ impl App {
             return None;
         }
         Some(format!(
-            "PATH Codex {} < required {}; model catalog may be incomplete. Run codex-switch doctor.",
+            "UPGRADE CODEX CLI: {} < {}",
             report.version.as_deref().unwrap_or("unknown"),
             crate::codex_compat::MINIMUM_CODEX_VERSION,
         ))
     }
 
-    pub fn codex_path_version_detail(&self) -> Option<String> {
+    pub fn codex_upgrade_instructions(&self) -> Option<Vec<String>> {
         let report = self.codex_path_version.as_ref()?;
         (report.status == crate::codex_compat::CompatibilityStatus::BelowMinimum).then(|| {
-            format!(
-                "PATH Codex {} at {} is below minimum {}; model catalog may be incomplete. Run codex-switch doctor.",
-                report.version.as_deref().unwrap_or("unknown"),
-                report.executable.as_deref().unwrap_or("unresolved executable"),
-                crate::codex_compat::MINIMUM_CODEX_VERSION,
-            )
+            vec![
+                format!(
+                    "UPGRADE REQUIRED: PATH CLI {} < minimum {}.",
+                    report.version.as_deref().unwrap_or("unknown"),
+                    crate::codex_compat::MINIMUM_CODEX_VERSION,
+                ),
+                "Upgrade using your original installation method.".to_string(),
+                "npm example (same Node.js/fnm environment):".to_string(),
+                crate::codex_compat::CLI_UPGRADE_NPM_COMMAND.to_string(),
+                "Restart the terminal and TUI after upgrading.".to_string(),
+                "Verify with codex --version or codex-switch doctor.".to_string(),
+                format!(
+                    "PATH: {}",
+                    report
+                        .executable
+                        .as_deref()
+                        .unwrap_or("unresolved executable")
+                ),
+            ]
         })
     }
 
@@ -762,7 +775,7 @@ impl App {
                 usage: loaded_usage.cloned().map(Box::new),
                 usage_meta,
                 models,
-                codex_compatibility_warning: self.codex_compatibility_warning(),
+                codex_upgrade_instructions: self.codex_upgrade_instructions(),
                 reset_cards,
                 reset_card_expiries,
                 reset_card_expiry_colors,
@@ -5232,7 +5245,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_compatibility_warning_only_appears_below_minimum_and_reports_path_version() {
+    fn codex_upgrade_warning_only_appears_below_minimum_and_shows_actionable_steps() {
         let mut app = App::new();
         app.codex_path_version = Some(crate::codex_compat::VersionReport {
             executable: Some("C:/Users/test/fnm_multishells/9876/codex.cmd".into()),
@@ -5242,10 +5255,36 @@ mod tests {
         });
 
         let warning = app.codex_compatibility_warning().unwrap();
+        assert!(warning.contains("UPGRADE CODEX CLI"));
         assert!(warning.contains("0.154.0"));
         assert!(warning.contains("0.159.2"));
-        let detail = app.codex_path_version_detail().unwrap();
-        assert!(detail.contains("C:/Users/test/fnm_multishells/9876/codex.cmd"));
+        let instructions = app.codex_upgrade_instructions().unwrap();
+        assert!(
+            instructions
+                .iter()
+                .any(|line| { line == "npm install -g @openai/codex@latest" })
+        );
+        assert!(
+            instructions
+                .iter()
+                .any(|line| line.contains("original installation method"))
+        );
+        assert!(instructions.iter().any(|line| line.contains("Node.js/fnm")));
+        assert!(
+            instructions
+                .iter()
+                .any(|line| line.contains("Restart the terminal and TUI"))
+        );
+        assert!(
+            instructions
+                .iter()
+                .any(|line| line.contains("codex --version"))
+        );
+        assert!(
+            instructions
+                .iter()
+                .any(|line| line.contains("C:/Users/test/fnm_multishells/9876/codex.cmd"))
+        );
 
         app.codex_path_version = Some(crate::codex_compat::VersionReport {
             executable: Some("C:/codex.exe".into()),
@@ -5254,7 +5293,7 @@ mod tests {
             note: None,
         });
         assert!(app.codex_compatibility_warning().is_none());
-        assert!(app.codex_path_version_detail().is_none());
+        assert!(app.codex_upgrade_instructions().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
