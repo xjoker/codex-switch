@@ -345,6 +345,15 @@ impl ProviderProfile {
     /// Reject anything Codex (or our launch translation) would choke on before
     /// it is written to disk.
     pub fn validate(&self) -> Result<()> {
+        self.validate_inner(true)
+    }
+
+    /// `enforce_auth_overrides = false` is only for maintenance paths (remove,
+    /// rename) that must still be able to act on a legacy profile whose saved
+    /// `model_providers.<id>.auth` override is no longer supported. Everything
+    /// that would use the profile (launch, probe, fetch, save) keeps the strict
+    /// check through `validate()`.
+    fn validate_inner(&self, enforce_auth_overrides: bool) -> Result<()> {
         crate::profile::validate_alias(&self.alias)?;
         if self.identity_id.trim().is_empty()
             || !self
@@ -375,7 +384,16 @@ impl ProviderProfile {
             anyhow::bail!("provider name must equal alias");
         }
         validate_base_url(&self.base_url, self.allow_insecure_http)?;
-        validate_provider_auth_overrides(&self.provider_id, &self.codex_config)?;
+        if enforce_auth_overrides {
+            validate_provider_auth_overrides(&self.provider_id, &self.codex_config).map_err(
+                |error| {
+                    anyhow::anyhow!(
+                        "{error}; this provider needs attention: edit its provider.toml, or discard it with `codex-switch provider remove {}` and add it again",
+                        self.alias
+                    )
+                },
+            )?;
+        }
         if !is_valid_env_key(&self.env_key) {
             anyhow::bail!(
                 "env_key '{}' is not a valid environment variable name",
@@ -4524,6 +4542,16 @@ pub fn list_providers() -> Result<Vec<String>> {
 
 /// Load a provider profile by alias.
 pub fn load(alias: &str) -> Result<ProviderProfile> {
+    load_inner(alias, true)
+}
+
+/// Load for remove/rename only: tolerates a legacy unsupported provider auth
+/// override so such a profile can still be discarded. Do not use for launch.
+fn load_for_maintenance(alias: &str) -> Result<ProviderProfile> {
+    load_inner(alias, false)
+}
+
+fn load_inner(alias: &str, enforce_auth_overrides: bool) -> Result<ProviderProfile> {
     let path = existing_provider_dir(alias)?.join("provider.toml");
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("reading provider profile {}", path.display()))?;
@@ -4560,7 +4588,7 @@ pub fn load(alias: &str) -> Result<ProviderProfile> {
         let locked_needs_identity = profile.identity_id.trim().is_empty();
         profile.normalize();
         profile
-            .validate()
+            .validate_inner(enforce_auth_overrides)
             .with_context(|| format!("validating provider profile {}", path.display()))?;
         if locked_needs_identity {
             let toml = toml::to_string_pretty(&profile)
@@ -4574,7 +4602,7 @@ pub fn load(alias: &str) -> Result<ProviderProfile> {
     }
     profile.normalize();
     profile
-        .validate()
+        .validate_inner(enforce_auth_overrides)
         .with_context(|| format!("validating provider profile {}", path.display()))?;
     Ok(profile)
 }
@@ -4673,7 +4701,7 @@ fn provider_has_live_runs(identity_id: &str) -> Result<bool> {
 
 /// Remove a provider profile and its stored key.
 pub fn remove(alias: &str) -> Result<()> {
-    let profile = load(alias)?;
+    let profile = load_for_maintenance(alias)?;
     let dir = existing_provider_dir(alias)?;
     if provider_has_live_runs(&profile.identity_id)? {
         anyhow::bail!(
@@ -4717,7 +4745,17 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     if crate::profile::list_profiles()?.iter().any(|p| p == new) {
         anyhow::bail!("'{new}' already names a ChatGPT profile; choose a different alias");
     }
-    let mut profile = load(old)?;
+    let mut profile = load_for_maintenance(old)?;
+    // The auth override is keyed by the old provider id and cannot be carried
+    // over to the renamed one, so refuse before touching the directory rather
+    // than leave a profile that `save` would then reject half-renamed.
+    validate_provider_auth_overrides(&profile.provider_id, &profile.codex_config).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "{error}; cannot rename provider '{old}' until that override is removed from its provider.toml, or run `codex-switch provider remove {old}` and add it again under the new name"
+            )
+        },
+    )?;
     let old_dir = existing_provider_dir(old)?;
     let new_dir = provider_dir(new)?;
     std::fs::rename(&old_dir, &new_dir).with_context(|| {
@@ -4887,6 +4925,67 @@ mod tests {
         let renamed = load("renamed").unwrap();
         assert_eq!(renamed.identity_id, identity_id);
         assert_eq!(renamed.alias, "renamed");
+    }
+
+    /// Write a provider the way an older release could have: with an `auth`
+    /// override in `codex_config` that current validation rejects.
+    fn save_legacy_auth_override_profile(alias: &str) -> ProviderProfile {
+        let mut profile = sample(alias);
+        profile.codex_config = vec![format!(
+            "model_providers.{}.auth.command=\"helper\"",
+            profile.provider_id
+        )];
+        let dir = provider_dir(alias).unwrap();
+        ensure_private_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("provider.toml"),
+            toml::to_string_pretty(&profile).unwrap(),
+        )
+        .unwrap();
+        profile
+    }
+
+    #[test]
+    fn legacy_auth_override_profile_needs_attention_but_can_be_removed() {
+        let _home = TestHome::new();
+        save_legacy_auth_override_profile("legacy-auth");
+
+        // Strict load (used by launch, list and the TUI) still refuses it and
+        // says how to recover.
+        let error = format!("{:#}", load("legacy-auth").unwrap_err());
+        assert!(error.contains("auth"), "{error}");
+        assert!(error.contains("provider remove legacy-auth"), "{error}");
+        assert_eq!(list_providers().unwrap(), vec!["legacy-auth"]);
+
+        remove("legacy-auth").unwrap();
+        assert!(!exists("legacy-auth"));
+        assert!(list_providers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_auth_override_profile_rename_gives_an_actionable_error_and_changes_nothing() {
+        let _home = TestHome::new();
+        save_legacy_auth_override_profile("legacy-auth");
+
+        let error = format!("{:#}", rename("legacy-auth", "fresh").unwrap_err());
+        assert!(error.contains("cannot rename provider 'legacy-auth'"), "{error}");
+        assert!(exists("legacy-auth"));
+        assert!(!exists("fresh"));
+    }
+
+    #[test]
+    fn maintenance_load_still_rejects_other_invalid_profiles() {
+        let _home = TestHome::new();
+        let mut profile = sample("broken");
+        profile.base_url = "not a url".to_string();
+        let dir = provider_dir("broken").unwrap();
+        ensure_private_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("provider.toml"),
+            toml::to_string_pretty(&profile).unwrap(),
+        )
+        .unwrap();
+        assert!(remove("broken").is_err());
     }
 
     #[test]

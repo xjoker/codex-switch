@@ -132,7 +132,7 @@ codex-switch launch openrouter -- -s workspace-write -a never
 - Codex 目前只支持 `wire_api = "responses"`；DeepSeek 官方 Chat Completions API 不能直连，须走 OpenRouter 等网关。同一网关上 `/models` 有 slug 也不等于 `/responses` 能用。`provider probe` 只 POST `{"model":"..."}`（不带 `input`），不走补全。探测结果保存 7 天；`launch` 遇到已保存的“不支持”结论时不会直接拒绝，而是先做一次实时探测：仅在再次确认不支持时才拒绝，探测结果为支持则放行并更新记录，结果不确定或请求失败则放行并在 stderr 给出警告、清除该过期结论。
 - 提供方 `launch` 不再使用隔离的 Codex home，而是在共享的 `$CODEX_HOME` 中为每次运行生成 `cs-*.config.toml` 并用 `--profile` 选中，只保存本次的模型、提供方和目录；MCP、skills、插件、hooks、提示词和会话都直接用你现有的，不需要复制或退出时合并，也不会改写用户 `config.toml` 里的 ChatGPT 键。可同时开多个提供方。不能再另行传入 `--profile` / `-p`。
 - 提供方 `http_headers` / `env_http_headers` 中的非 ASCII 头值现在可以正常使用，不会再让模型拉取、探测和指纹计算失败。
-- 提供方保存的 API key 通过 `env_key` 使用，不能同时为当前提供方设置 `auth` / `auth.command`；添加时会在读取密钥或拉取模型前拒绝这类配置。
+- 提供方保存的 API key 通过 `env_key` 使用，不能同时为当前提供方设置 `auth` / `auth.command`；添加时会在读取密钥或拉取模型前拒绝这类配置。旧版本保存的此类提供方会显示为需要处理：启动等使用会被拒绝，但仍可用 `provider remove`（或 TUI 删除）移除；`provider rename` 会提示先删除该覆盖项或重新添加。
 - `use` 与无别名的 `launch` 自动选号**仅面向 ChatGPT**，不会自动选提供方。
 - 提供方别名不能与 ChatGPT profile、其他提供方或 Codex 保留 id（`openai` / `ollama` / `lmstudio`）冲突。
 - 删除提供方**不可恢复**（不像 ChatGPT profile 会进 `deleted-profiles/`）。

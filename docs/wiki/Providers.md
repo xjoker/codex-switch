@@ -75,7 +75,7 @@ Older single-`model` files still load: the model becomes the only `[[models]]` e
 
 ## Launch Codex with a provider
 
-Providers use the saved API key through the generated `env_key`. Overrides adding `model_providers.<id>.auth`, including `auth.command`, conflict with this authentication mode and are rejected when saving, loading or launching. `provider add` checks this before reading a key or fetching models. Overrides for an unrelated provider are not treated as the active provider's authentication.
+Providers use the saved API key through the generated `env_key`. Overrides adding `model_providers.<id>.auth`, including `auth.command`, conflict with this authentication mode and are rejected when saving, loading or launching. `provider add` checks this before reading a key or fetching models. A profile saved by an older release with such an override is reported as needing attention: `launch` and other uses refuse it, `provider remove` (and TUI delete) still discard it, and `provider rename` asks you to remove the override or re-add the provider. Overrides for an unrelated provider are not treated as the active provider's authentication.
 
 Name the provider alias. Auto-select (`launch` with no alias) stays ChatGPT-only.
 

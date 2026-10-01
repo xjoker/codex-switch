@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Providers saved with an unsupported `auth` override can be removed.** Since v20261001.5.0 such a profile failed to load, so `provider remove`, the TUI delete and `provider rename` all errored and the TUI showed a permanent damaged status. `provider remove` (and the TUI delete) now work on it; `launch`, `show`, probe and fetch still refuse it, and `provider rename` stops with an actionable message before changing anything (remove it and add it again, or delete the override from `provider.toml`). The load error now names `provider remove <alias>`.
 - **A custom `chatgpt_base_url` no longer blocks switching or importing.** The non-default endpoint check applied to every ChatGPT file-credential command, so a user with a proxy or mirror configured for Codex could not run `use`, `import`, `login` or `launch`. It is now enforced only where codex-switch itself calls the ChatGPT backend (usage, token refresh, workspace metadata, warmup, models, Reset Cards); the file credential store, login-method and workspace checks still apply everywhere.
 
 ## v20261001.5.0 — 2026-10-01
