@@ -281,10 +281,21 @@ fn optional_string(value: &toml::Value, key: &str, source: &str) -> Result<Optio
 
 fn merge_requirements(policy: &mut AuthPolicy, value: &toml::Value, source: &str) -> Result<()> {
     if let Some(methods) = string_array(value, "allowed_login_methods", source)? {
-        if methods.is_empty() || methods.iter().any(|m| m != "chatgpt" && m != "api") {
-            anyhow::bail!("{source}: allowed_login_methods must contain chatgpt and/or api");
+        // A newer Codex may add login methods this build does not know. Drop
+        // them with a warning rather than failing every operation, but keep
+        // the allowlist itself: filtering can only narrow it, so a list that
+        // names only unknown methods (or is empty) ends up allowing no known
+        // method and still blocks ChatGPT login, never widens access.
+        let (known, unknown): (Vec<String>, Vec<String>) = methods
+            .into_iter()
+            .partition(|method| method == "chatgpt" || method == "api");
+        if !unknown.is_empty() {
+            tracing::warn!(
+                "{source}: ignoring unknown allowed_login_methods entries: {}",
+                unknown.join(", ")
+            );
         }
-        policy.allowed_login_methods = Some(methods);
+        policy.allowed_login_methods = Some(known);
         policy.allowed_login_methods_source = Some(source.to_owned());
     }
     if let Some(workspaces) = string_array(value, "allowed_chatgpt_workspaces", source)? {
@@ -292,8 +303,14 @@ fn merge_requirements(policy: &mut AuthPolicy, value: &toml::Value, source: &str
         policy.allowed_chatgpt_workspaces_source = Some(source.to_owned());
     }
     if let Some(store) = optional_string(value, "cli_auth_credentials_store", source)? {
+        // An unknown store is kept, not ignored: ignoring an administrator's
+        // requirement would widen what is allowed. Any value other than "file"
+        // makes `validate_file_oauth` refuse file-backed ChatGPT operations
+        // with a message naming the value, while unrelated operations run.
         if !["file", "keyring", "auto", "ephemeral"].contains(&store.as_str()) {
-            anyhow::bail!("{source}: cli_auth_credentials_store has an unsupported value");
+            tracing::warn!(
+                "{source}: unknown cli_auth_credentials_store value \"{store}\"; treating it as not \"file\""
+            );
         }
         policy.cli_auth_credentials_store = Some(store);
         policy.cli_auth_credentials_store_source = Some(source.to_owned());
@@ -368,10 +385,22 @@ pub(crate) fn resolve_from_texts(
 ) -> Result<AuthPolicy> {
     let mut policy = AuthPolicy::default();
     if let Some(text) = user {
-        let document: toml::Value = toml::from_str(text).context("parsing Codex config.toml")?;
-        merge_managed_config(&mut policy, &document, "user config")?;
-        if let Some(managed) = config_table(&document, "managed_config", "Codex config.toml")? {
-            merge_managed_config(&mut policy, managed, "managed_config")?;
+        // The user's own config.toml is not a security boundary (it cannot
+        // loosen administrator policy), and Codex reports a broken file
+        // itself, so unparseable TOML must not disable every codex-switch
+        // operation. Wrongly typed policy fields below are still errors.
+        match toml::from_str::<toml::Value>(text) {
+            Ok(document) => {
+                merge_managed_config(&mut policy, &document, "user config")?;
+                if let Some(managed) =
+                    config_table(&document, "managed_config", "Codex config.toml")?
+                {
+                    merge_managed_config(&mut policy, managed, "managed_config")?;
+                }
+            }
+            Err(error) => {
+                tracing::warn!("ignoring Codex config.toml for authentication policy: {error}");
+            }
         }
     }
     if let Some(text) = managed_file {
@@ -401,7 +430,17 @@ pub(crate) fn resolve_from_texts(
 
 pub(crate) fn load_auth_policy(codex_home: &Path) -> Result<AuthPolicy> {
     let (requirements, mdm_requirements, mdm_config) = read_platform_policy_sources()?;
-    let config = read_limited(&codex_home.join("config.toml"))?;
+    // See `resolve_from_texts`: an unreadable, oversized or non-UTF-8 user
+    // config.toml is warned about and skipped. Administrator-controlled
+    // sources (system requirements, managed config, MDM) still fail closed,
+    // because skipping them would silently drop enforced policy.
+    let config = match read_limited(&codex_home.join("config.toml")) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!("ignoring Codex config.toml for authentication policy: {error:#}");
+            None
+        }
+    };
     #[cfg(test)]
     let managed_path = codex_home.join("managed_config.toml");
     #[cfg(not(test))]
@@ -796,9 +835,6 @@ mod tests {
     #[test]
     fn invalid_requirement_array_fails_closed() {
         assert!(
-            resolve_from_texts(Some("allowed_login_methods = []"), None, None, None, None).is_err()
-        );
-        assert!(
             resolve_from_texts(
                 Some("allowed_chatgpt_workspaces = ['ok', 1]"),
                 None,
@@ -807,6 +843,94 @@ mod tests {
                 None
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_login_methods_are_ignored_but_never_widen_the_allowlist() {
+        let policy = resolve_from_texts(
+            Some("allowed_login_methods = ['chatgpt', 'sso']"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.allowed_login_methods.as_deref(),
+            Some(["chatgpt".to_string()].as_slice())
+        );
+        policy.validate_file_oauth("login").unwrap();
+
+        // Only unknown methods: nothing known remains, so ChatGPT stays blocked.
+        for text in [
+            "allowed_login_methods = ['sso']",
+            "allowed_login_methods = []",
+        ] {
+            let policy = resolve_from_texts(Some(text), None, None, None, None).unwrap();
+            assert!(
+                policy
+                    .validate_file_oauth("login")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("does not allow ChatGPT login"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_credential_store_is_kept_as_a_restriction_not_a_parse_error() {
+        let policy = resolve_from_texts(
+            Some("cli_auth_credentials_store = 'vault'"),
+            Some("cli_auth_credentials_store = 'file'"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(policy.cli_auth_credentials_store.as_deref(), Some("vault"));
+        let error = policy.validate_file_oauth("login").unwrap_err().to_string();
+        assert!(error.contains("\"vault\""), "{error}");
+    }
+
+    #[test]
+    fn malformed_user_config_is_ignored_but_malformed_admin_policy_still_fails() {
+        let policy = resolve_from_texts(None, Some("this is [not toml"), None, None, None).unwrap();
+        assert_eq!(policy, AuthPolicy::default());
+        // Administrator sources are a security boundary and keep failing.
+        assert!(resolve_from_texts(Some("this is [not toml"), None, None, None, None).is_err());
+        assert!(resolve_from_texts(None, None, Some("this is [not toml"), None, None).is_err());
+        // A mistyped field in the user's config is still reported.
+        assert!(
+            resolve_from_texts(None, Some("forced_login_method = 42"), None, None, None).is_err()
+        );
+    }
+
+    #[test]
+    fn oversized_user_config_does_not_disable_the_policy_load() {
+        let _lock = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            vec![b'#'; MAX_POLICY_BYTES + 1],
+        )
+        .unwrap();
+        assert_eq!(load_auth_policy(dir.path()).unwrap(), AuthPolicy::default());
+
+        // The same oversize file in an administrator location still fails.
+        std::fs::write(
+            dir.path().join("managed_config.toml"),
+            vec![b'#'; MAX_POLICY_BYTES + 1],
+        )
+        .unwrap();
+        assert!(
+            load_auth_policy(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("safety limit")
         );
     }
 }
