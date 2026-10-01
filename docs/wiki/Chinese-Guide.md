@@ -72,7 +72,7 @@ codex-switch import ~/auth-backups
 
 数据默认在 `~/.codex-switch`（可用 `CODEX_SWITCH_HOME` 迁移）；活号在 `~/.codex/auth.json`（可用 `CODEX_HOME` 迁移）。
 
-如果旧版本安装过 daemon：旧的 LaunchAgent、systemd 用户单元或 Windows 计划任务（以及旧版 `self-update` 的 daemon 重启）启动新二进制时，新版本会删除这条旧注册并退出，不会再反复启动失败。也可以手动运行 `codex-switch daemon uninstall` 完成清理；清理失败时按提示的命令处理。完整迁移说明见 [Updating](Updating#migrate-from-the-removed-daemon)。
+如果旧版本安装过 daemon：旧的 LaunchAgent、systemd 用户单元或 Windows 计划任务（以及旧版 `self-update` 的 daemon 重启）启动新二进制时，新版本会删除这条旧注册并退出，不会再反复启动失败。也可以手动运行 `codex-switch daemon uninstall` 完成清理；清理失败时按提示的命令处理（Windows 上是在普通 PowerShell 运行 `schtasks /Delete /TN "\codex-switch-daemon" /F`，该任务由你自己的账户以非提升权限创建；只有被拒绝时才需要管理员 PowerShell）。完整迁移说明见 [Updating](Updating#migrate-from-the-removed-daemon)。
 
 ## 自定义 API 提供方（Beta）
 

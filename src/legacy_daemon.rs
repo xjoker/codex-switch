@@ -145,7 +145,12 @@ fn systemd_unit_path(home: &Path) -> PathBuf {
 #[cfg(any(target_os = "linux", test))]
 fn remove_systemd_unit(home: &Path, systemctl: &mut dyn FnMut(&[&str]) -> bool) -> Cleanup {
     let path = systemd_unit_path(home);
-    if !path.exists() {
+    // `exists()` follows symlinks, so a unit symlinked to a target that is
+    // gone would read as absent and stay registered. Look at the link itself.
+    if matches!(
+        std::fs::symlink_metadata(&path),
+        Err(ref error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
         return Cleanup::NothingFound;
     }
     // A failed disable leaves only a dangling wants/ link once the unit file
@@ -206,8 +211,11 @@ fn remove_scheduled_task(
     if schtasks(&["/Delete", "/TN", WINDOWS_TASK_NAME, "/F"]) {
         Cleanup::Removed(format!("scheduled task {WINDOWS_TASK_NAME}"))
     } else {
+        // The task was registered by this same user with a limited run level,
+        // so a normal shell is the first thing to try; elevation only helps
+        // when something else (a policy, another account) owns the task.
         Cleanup::Failed(format!(
-            "run `schtasks /Delete /TN \"{WINDOWS_TASK_NAME}\" /F` from an elevated PowerShell"
+            "run `schtasks /Delete /TN \"{WINDOWS_TASK_NAME}\" /F` in a normal PowerShell; if that is denied, run the same command from an elevated PowerShell"
         ))
     }
 }
@@ -287,6 +295,29 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_unit_is_still_removed() {
+        let home = tempfile::tempdir().unwrap();
+        let unit = systemd_unit_path(home.path());
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(home.path().join("no-such-target.service"), &unit).unwrap();
+        assert!(!unit.exists(), "the link must dangle for this test");
+
+        let mut calls = Vec::new();
+        let result = remove_systemd_unit(home.path(), &mut |args| {
+            calls.push(args.join(" "));
+            true
+        });
+
+        assert!(matches!(result, Cleanup::Removed(_)));
+        assert!(std::fs::symlink_metadata(&unit).is_err());
+        assert_eq!(
+            calls,
+            ["--user disable codex-switch-daemon", "--user daemon-reload"]
+        );
+    }
+
     #[test]
     fn scheduled_task_is_deleted_without_ending_the_task_running_the_shim() {
         let mut calls = Vec::new();
@@ -302,7 +333,21 @@ mod tests {
             calls.push(args[0].to_string());
             args[0] != "/Delete"
         });
-        assert!(matches!(result, Cleanup::Failed(detail) if detail.contains("elevated")));
+        match result {
+            Cleanup::Failed(detail) => {
+                // The normal-shell command comes first; elevation is only the
+                // fallback because the task was created unelevated.
+                let normal = detail
+                    .find("normal PowerShell")
+                    .expect("normal shell advice");
+                let elevated = detail
+                    .find("elevated PowerShell")
+                    .expect("elevation fallback");
+                assert!(normal < elevated, "{detail}");
+                assert!(detail.contains("schtasks /Delete"), "{detail}");
+            }
+            other => panic!("expected a failed cleanup, got {other:?}"),
+        }
         assert_eq!(calls, ["/Query", "/End", "/Delete"]);
 
         assert_eq!(
