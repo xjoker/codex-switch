@@ -9,7 +9,9 @@ use serde::Serialize;
 pub(crate) const MINIMUM_CODEX_VERSION: &str = "0.159.2";
 pub(crate) const ALIGNED_CODEX_VERSION: &str = "0.159.2";
 pub(crate) const CLI_UPGRADE_NPM_COMMAND: &str = "npm install -g @openai/codex@latest";
-const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+/// A cold Windows `codex.cmd` start (Node + fnm shim) can take several seconds;
+/// match the 10 s budget of the app-server help probe.
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,10 +58,8 @@ impl Probe {
     pub fn report(&self) -> VersionReport {
         let status = match &self.version {
             None => CompatibilityStatus::Unknown,
-            Some(version) if version.cmp_precedence(&minimum_version()).is_lt() => {
-                CompatibilityStatus::BelowMinimum
-            }
-            Some(version) if version.cmp_precedence(&aligned_version()).is_eq() => {
+            Some(version) if !version_meets_minimum(version) => CompatibilityStatus::BelowMinimum,
+            Some(version) if same_release_core(version, &aligned_version()) => {
                 CompatibilityStatus::Aligned
             }
             Some(_) => CompatibilityStatus::AboveBaselineUnverified,
@@ -79,8 +79,23 @@ impl Probe {
     pub fn meets_minimum(&self) -> bool {
         self.version
             .as_ref()
-            .is_some_and(|version| !version.cmp_precedence(&minimum_version()).is_lt())
+            .is_some_and(version_meets_minimum)
     }
+}
+
+/// Compare `major.minor.patch` only. Semver orders `0.159.2-rc.1` below
+/// `0.159.2`, but a prerelease build of the minimum release already carries
+/// its behavior, so it must not be refused or flagged as outdated.
+fn version_meets_minimum(version: &Version) -> bool {
+    (version.major, version.minor, version.patch)
+        >= {
+            let minimum = minimum_version();
+            (minimum.major, minimum.minor, minimum.patch)
+        }
+}
+
+fn same_release_core(left: &Version, right: &Version) -> bool {
+    (left.major, left.minor, left.patch) == (right.major, right.minor, right.patch)
 }
 
 pub(crate) fn minimum_version() -> Version {
@@ -250,14 +265,20 @@ pub(crate) fn ensure_launch_version(path: &Path) -> Result<()> {
             )
         }
         CompatibilityStatus::Unknown => {
+            // A slow or odd `codex --version` (cold Windows shim, wrapper
+            // script) says nothing about the real version, so it must not
+            // block a launch that has no other override. Only a definitively
+            // parsed below-minimum version is refused.
             let reason = report
                 .note
                 .as_deref()
                 .unwrap_or("the version probe did not return a usable version");
-            anyhow::bail!(
-                "Could not verify the Codex CLI version at '{}': {reason}. `codex-switch launch` requires {MINIMUM_CODEX_VERSION} or newer. Run `codex-switch doctor` to inspect version detection, then install or update Codex if needed.",
+            tracing::warn!(path = %path.display(), "could not verify the Codex CLI version: {reason}");
+            eprintln!(
+                "warning: could not verify the Codex CLI version at '{}': {reason}. Continuing; `codex-switch launch` expects {MINIMUM_CODEX_VERSION} or newer. Run `codex-switch doctor` to inspect version detection.",
                 path.display()
-            )
+            );
+            Ok(())
         }
         _ => unreachable!("a version that meets the minimum was already accepted"),
     }
@@ -369,7 +390,8 @@ mod tests {
                 ),
             )
         };
-        let report = probe_executable(&slow).report();
+        let report =
+            probe_executable_with_timeout(&slow, Duration::from_secs(2)).report();
         assert_eq!(report.status, CompatibilityStatus::Unknown);
         assert!(
             report
@@ -406,8 +428,40 @@ mod tests {
         assert!(probe.meets_minimum());
         assert_eq!(probe.report().status, CompatibilityStatus::Aligned);
 
+        // A prerelease of the minimum release already has its behavior.
         let prerelease = executable(dir.path(), "prerelease-codex", "echo 0.159.2-rc.1");
-        assert!(!probe_executable(&prerelease).meets_minimum());
+        let probe = probe_executable(&prerelease);
+        assert!(probe.meets_minimum());
+        assert_eq!(probe.report().status, CompatibilityStatus::Aligned);
+        ensure_launch_version(&prerelease).unwrap();
+
+        let old_prerelease = executable(dir.path(), "old-pre-codex", "echo 0.159.1-rc.1");
+        assert!(!probe_executable(&old_prerelease).meets_minimum());
+        assert_eq!(
+            probe_executable(&old_prerelease).report().status,
+            CompatibilityStatus::BelowMinimum
+        );
+    }
+
+    #[test]
+    fn unverifiable_launch_version_warns_and_continues_but_below_minimum_still_refuses() {
+        let _env = crate::profile::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // Probe failure and unparseable output are both `Unknown`.
+        let failed = executable(dir.path(), "failed-codex", "exit 7");
+        ensure_launch_version(&failed).unwrap();
+        let garbage = executable(dir.path(), "garbage-codex", "echo Codex CLI");
+        ensure_launch_version(&garbage).unwrap();
+
+        let old = executable(dir.path(), "old-codex", "echo 0.159.1");
+        assert!(ensure_launch_version(&old).is_err());
+    }
+
+    #[test]
+    fn version_probe_budget_covers_a_cold_windows_shim_start() {
+        assert!(VERSION_PROBE_TIMEOUT >= Duration::from_secs(10));
     }
 
     #[test]

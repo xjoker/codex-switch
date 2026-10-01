@@ -136,7 +136,16 @@ async fn launch_interactive(
     // Resolve and validate the exact executable once, before profile selection
     // can consume a reset card or provider launch can create a native run.
     let codex_command = ensure_codex_available()?;
-    crate::codex_compat::ensure_launch_version(&codex_command)?;
+    // The probe spawns `codex --version` and can wait up to its timeout, so
+    // keep it off the async worker (and the TUI event loop that awaits this).
+    {
+        let probe_path = codex_command.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::codex_compat::ensure_launch_version(&probe_path)
+        })
+        .await
+        .context("Codex version probe task failed")??;
+    }
 
     // A custom API provider profile takes a separate, simpler path: it has no
     // OAuth auth.json to stage, so it never touches ~/.codex/auth.json. It is

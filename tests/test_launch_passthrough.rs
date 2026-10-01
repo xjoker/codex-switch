@@ -2329,33 +2329,64 @@ fn auto_launch_checks_version_before_reset_card_selection_or_auth_staging() {
 }
 
 #[test]
-fn launch_rejects_timed_out_version_probe_before_staging_or_child_spawn() {
-    let home = temp_home("launch-version-timeout");
+fn launch_accepts_a_slow_version_probe_within_the_budget() {
+    // A cold Windows `codex.cmd` start can take several seconds; 6 s used to
+    // exceed the 4 s probe budget and abort the launch.
+    let home = temp_home("launch-slow-version");
     let (fake_bin, log) = install_fake_codex(&home);
     setup_chatgpt(&home);
-    let live_auth = home.join(".codex/auth.json");
-    write_auth(&live_auth, "original@example.com", "acct_original");
-    let original = fs::read(&live_auth).unwrap();
     let output = run_env(
         &home,
         &fake_bin,
         &log,
-        &["--json", "launch", "work"],
-        &[("CS_FAKE_CODEX_VERSION_DELAY", "6")],
+        &["launch", "work", "--", "exec", "review"],
+        &[
+            ("CS_FAKE_CODEX_VERSION_DELAY", "6"),
+            ("CS_FAKE_CODEX_NO_DAEMON", "1"),
+        ],
     );
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let report: Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|error| panic!("expected one JSON error envelope ({error}): {stdout}"));
-    assert_eq!(report["ok"], false);
     assert!(
-        report["error"]
-            .as_str()
-            .unwrap()
-            .contains("version probe timed out")
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(fs::read(live_auth).unwrap(), original);
-    assert!(recorded_launches(&log).is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("could not verify"));
+    assert_eq!(
+        last_non_version_argv(&log),
+        ["--no-daemon", "exec", "review"]
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn launch_warns_and_continues_when_the_version_cannot_be_verified() {
+    let home = temp_home("launch-unverifiable-version");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_chatgpt(&home);
+    let output = run_env(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "work", "--", "exec", "review"],
+        &[
+            ("CS_FAKE_CODEX_VERSION_FAIL", "1"),
+            ("CS_FAKE_CODEX_NO_DAEMON", "1"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("could not verify the Codex CLI version"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        last_non_version_argv(&log),
+        ["--no-daemon", "exec", "review"]
+    );
     let _ = fs::remove_dir_all(home);
 }
 
