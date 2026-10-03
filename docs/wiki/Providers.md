@@ -96,6 +96,16 @@ Provider launches record a run directory under `$CODEX_SWITCH_HOME/provider-runs
 
 `codex-switch use` does not accept a provider alias. A provider is applied only for the launched Codex process; a later bare `codex` invocation is unchanged.
 
+## Tool and subagent compatibility
+
+Provider sessions retain your normal Codex home, including MCP, skills and agent definitions. Those files being available does not certify every tool or gateway protocol. `provider probe` checks the Responses route without generating a completion; it does not test tools or subagents.
+
+Use `provider fetch-models <alias>` to save native capability metadata when the gateway supplies it. A provider created only with `--model` starts with generated metadata, which may omit capabilities the real model supports. Save every model intended for child agents as well as the main model. A successful parent request does not establish that a configured child model is reachable.
+
+With Codex 0.159.3, isolated real-engine tests passed local MCP echo and V1/V2 spawn/wait, including different parent/child models through one provider. Cross-provider child routing, remote connectors, WebSockets and real gateway behavior are separate concerns. See the [2026-10-03 capability review](https://github.com/xjoker/codex-switch/blob/dev/docs/audits/20261003-provider-capabilities.md) for evidence, remaining findings and CLIProxyAPI guidance.
+
+Avoid literal secrets in Extra `-c` / `--set`: arbitrary overrides are currently printed by inspection commands and passed in argv. Use the dedicated key input and environment-backed headers for credentials. Saved web-search choices apply at launch; switching with Codex's `/model` does not rerun the provider launch picker.
+
 ## OpenRouter and DeepSeek
 
 OpenRouter is the intended first provider: its `/api/v1` base URL plus a full model slug (including the vendor prefix) is what Codex expects. One OpenRouter provider can hold every slug that shares that key:
