@@ -2139,6 +2139,56 @@ fn json_use_keeps_the_daemon_report_off_stdout() {
 }
 
 #[test]
+fn launch_provider_selects_embedded_mode_when_supported() {
+    let home = temp_home("provider-no-daemon");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+
+    for (support, passthrough, expected_count) in [
+        ("1", vec!["hello"], 1),
+        ("1", vec!["exec", "--json", "hello"], 1),
+        ("0", vec!["hello"], 0),
+        ("1", vec!["--no-daemon", "hello"], 1),
+        ("1", vec!["--remote", "ws://127.0.0.1:1"], 0),
+    ] {
+        let mut args = vec!["launch", "openrouter", "--"];
+        args.extend(passthrough.iter().copied());
+        let output = run_env(
+            &home,
+            &fake_bin,
+            &log,
+            &args,
+            &[("CS_FAKE_CODEX_NO_DAEMON", support)],
+        );
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let argv = last_non_version_argv(&log);
+        assert_eq!(
+            argv.iter().filter(|arg| *arg == "--no-daemon").count(),
+            expected_count,
+            "provider must explicitly select embedded mode when available: {argv:?}"
+        );
+        assert!(argv.windows(2).any(|pair| pair[0] == "--profile"));
+        if passthrough[0] == "exec" {
+            assert_eq!(&argv[..2], ["--no-daemon", "exec"]);
+            assert!(
+                argv[2..]
+                    .windows(2)
+                    .any(|pair| { pair[0] == "-c" && pair[1].starts_with("model_provider=") })
+            );
+            assert_eq!(&argv[argv.len() - 2..], ["--json", "hello"]);
+        } else {
+            assert!(argv.ends_with(&strings(&passthrough)));
+        }
+    }
+    assert!(daemon_argv(&log).is_empty());
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
 fn launch_chatgpt_runs_codex_without_the_shared_daemon_when_supported() {
     let home = temp_home("launch-no-daemon");
     let (fake_bin, log) = install_fake_codex(&home);

@@ -430,12 +430,14 @@ pub(crate) fn chatgpt_codex_argv(
     splice_after_subcommand(extra, passthrough)
 }
 
-/// Keep a launched ChatGPT session on the staged `auth.json`.
+/// Keep a launched session on its process-local credentials and configuration.
 ///
 /// Codex 0.157 and newer attaches an interactive session to the shared
 /// app-server daemon, which keeps the account it loaded when it started, so
 /// the staged credentials would never be read. `--no-daemon` runs the session
-/// in process instead. It is a root option, so it goes before any subcommand.
+/// in process instead. Provider profiles also require embedded mode; selecting
+/// it explicitly avoids Codex's automatic-fallback startup warning.
+/// It is a root option, so it goes before any subcommand.
 /// An argv that already picks its server (`--no-daemon`, `--remote`, or the
 /// daemon-only `agents` command) is left alone.
 pub(crate) fn embedded_codex_argv(supports_no_daemon: bool, mut argv: Vec<String>) -> Vec<String> {
@@ -955,6 +957,8 @@ async fn launch_provider(
             "provider launch selects its own Codex profile; remove the forwarded --profile/-p option"
         );
     }
+    let supports_no_daemon =
+        !codex_argv_selects_server(&args) && codex_supports_no_daemon(&codex_command)?;
     let (mut legacy_session, mut native_session, _lease, codex_args, codex_home, run_path) =
         if let Some((record, resume_args)) = resume.as_ref()
             && !provider::ProviderLaunchProfile::is_native_run(&record.run_path)?
@@ -1028,6 +1032,7 @@ async fn launch_provider(
                 run_path,
             )
         };
+    let codex_args = embedded_codex_argv(supports_no_daemon, codex_args);
 
     if !json {
         let reasoning_note = match &reasoning {
