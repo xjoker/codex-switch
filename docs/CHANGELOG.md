@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v20261003.1.0 — 2026-10-03
 
 - **Provider inspection redacts sensitive overrides.** `show`, JSON `list`, and the TUI Extra `-c` field mask credential/header/environment values; environment-variable references remain visible. Saved literal HTTP headers are resolved into child-only environment variables at launch, keeping their values out of Codex argv and native profiles while preserving header precedence.
 - **JSON provider lists report incomplete results.** Valid providers remain in `providers`; `ok` / `complete` become false, `errors` identifies failed aliases without raw TOML, and the command exits nonzero. Complete lists include an empty `errors` array.
