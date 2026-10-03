@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 
 use super::render::confirm_default_no;
 use crate::cli::ProviderCommand;
-use crate::output::{JsonOk, print_json, user_println};
+use crate::output::{JsonOk, OutputAlreadyReported, print_json, user_println};
+use crate::provider::privacy::{redact_url, redacted_overrides};
 use crate::provider::{self, ProviderProfile};
 
 pub(crate) async fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()> {
@@ -39,6 +40,7 @@ pub(crate) async fn provider_cmd(cmd: ProviderCommand, json: bool) -> Result<()>
         }
         ProviderCommand::List => list(json),
         ProviderCommand::Show { alias } => show(&alias, json),
+        ProviderCommand::Diagnose { alias, child_model } => diagnose(&alias, &child_model, json),
         ProviderCommand::Rename { old, new } => rename(&old, &new, json),
         ProviderCommand::Remove { alias, yes } => remove(&alias, yes, json),
         ProviderCommand::FetchModels { alias, model } => refresh_models(&alias, model, json).await,
@@ -132,7 +134,8 @@ fn print_added(profile: &ProviderProfile, json: bool) -> Result<()> {
     } else {
         user_println(&format!(
             "Added provider '{}' -> {}",
-            profile.alias, profile.base_url
+            profile.alias,
+            redact_url(&profile.base_url)
         ));
         user_println(&format!(
             "  {} model(s); default {}",
@@ -259,26 +262,40 @@ fn models_json(p: &ProviderProfile) -> Vec<serde_json::Value> {
 fn list(json: bool) -> Result<()> {
     let aliases = provider::list_providers()?;
     if json {
+        let mut errors = Vec::new();
         let items: Vec<serde_json::Value> = aliases
             .iter()
-            .filter_map(|alias| provider::load(alias).ok())
+            .filter_map(|alias| match provider::load(alias) {
+                Ok(profile) => Some(profile),
+                Err(_) => {
+                    errors.push(serde_json::json!({"alias": alias, "error": "Provider could not be read or validated; inspect its provider.toml locally."}));
+                    None
+                }
+            })
             .map(|p| {
                 serde_json::json!({
                     "alias": p.alias,
                     "provider_id": p.provider_id,
-                    "base_url": p.base_url,
+                    "base_url": redact_url(&p.base_url),
                     "allow_insecure_http": p.allow_insecure_http,
                     "default_model": p.default_model,
                     "models": models_json(&p),
                     "wire_api": p.wire_api,
                     "env_key": p.env_key,
-                    "codex_config": p.codex_config,
+                    "codex_config": redacted_overrides(&p.codex_config),
                     "has_key": !p.api_key.is_empty(),
                 })
             })
             .collect();
-        print_json(&serde_json::json!({ "providers": items }));
-        return Ok(());
+        let complete = errors.is_empty();
+        print_json(
+            &serde_json::json!({ "ok": complete, "complete": complete, "providers": items, "errors": errors }),
+        );
+        return if complete {
+            Ok(())
+        } else {
+            Err(OutputAlreadyReported.into())
+        };
     }
     if aliases.is_empty() {
         user_println(
@@ -292,7 +309,7 @@ fn list(json: bool) -> Result<()> {
                 "{}  {}  [{}]",
                 p.alias,
                 p.models_label(),
-                p.base_url
+                redact_url(&p.base_url)
             )),
             Err(e) => user_println(&format!("{alias}  (error: {e})")),
         }
@@ -306,20 +323,21 @@ fn show(alias: &str, json: bool) -> Result<()> {
         print_json(&serde_json::json!({
             "alias": p.alias,
             "provider_id": p.provider_id,
-            "base_url": p.base_url,
+            "base_url": redact_url(&p.base_url),
             "allow_insecure_http": p.allow_insecure_http,
             "default_model": p.default_model,
             "models": models_json(&p),
             "wire_api": p.wire_api,
             "env_key": p.env_key,
-            "codex_config": p.codex_config,
+            "codex_config": redacted_overrides(&p.codex_config),
             "key": p.redacted_key(),
+            "catalog": provider::diagnostics::catalog_report(&p),
         }));
         return Ok(());
     }
     user_println(&format!("alias       {}", p.alias));
     user_println(&format!("provider_id {}", p.provider_id));
-    user_println(&format!("base_url    {}", p.base_url));
+    user_println(&format!("base_url    {}", redact_url(&p.base_url)));
     user_println(&format!(
         "https_only  {}",
         if p.allow_insecure_http { "no" } else { "yes" }
@@ -351,12 +369,65 @@ fn show(alias: &str, json: bool) -> Result<()> {
     if p.codex_config.is_empty() {
         user_println("codex_config (none)");
     } else {
-        for entry in &p.codex_config {
+        for entry in redacted_overrides(&p.codex_config) {
             user_println(&format!("codex_config {entry}"));
         }
     }
     user_println(&format!("key         {}", p.redacted_key()));
+    let catalog = provider::diagnostics::catalog_report(&p);
+    user_println(&format!(
+        "catalog     {} (metadata only; run provider diagnose {alias})",
+        catalog["source"].as_str().unwrap_or("unknown")
+    ));
     Ok(())
+}
+
+fn diagnose(alias: &str, children: &[String], json: bool) -> Result<()> {
+    let profile = provider::load(alias)?;
+    let report = provider::diagnostics::diagnose(&profile, children);
+    if json {
+        print_json(&report);
+    } else {
+        user_println(&format!("Provider {alias}: offline configuration check"));
+        user_println(report["scope"].as_str().unwrap_or_default());
+        user_println(report["capability_evidence"].as_str().unwrap_or_default());
+        user_println(&format!(
+            "Catalog: {}",
+            report["catalog"]["source"].as_str().unwrap_or("unknown")
+        ));
+        for model in report["models"].as_array().into_iter().flatten() {
+            user_println(&format!(
+                "  {} [{}] {}",
+                model["id"].as_str().unwrap_or_default(),
+                model["source"].as_str().unwrap_or_default(),
+                model["capabilities"]
+            ));
+        }
+        for child in report["child_models"].as_array().into_iter().flatten() {
+            user_println(&format!(
+                "  child {} ({}): {}",
+                child["model"].as_str().unwrap_or_default(),
+                child["origin"].as_str().unwrap_or_default(),
+                if child["available"] == true {
+                    "in catalog"
+                } else {
+                    "MISSING"
+                }
+            ));
+        }
+        for issue in report["issues"].as_array().into_iter().flatten() {
+            user_println(&format!(
+                "{}: {}",
+                issue["severity"].as_str().unwrap_or_default(),
+                issue["message"].as_str().unwrap_or_default()
+            ));
+        }
+    }
+    if report["ok"] == true {
+        Ok(())
+    } else {
+        Err(OutputAlreadyReported.into())
+    }
 }
 
 fn rename(old: &str, new: &str, json: bool) -> Result<()> {

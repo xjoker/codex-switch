@@ -69,7 +69,7 @@ codex-switch provider remove openrouter
 
 `show` prints a redacted key (`…` plus the last four characters). Rename moves the on-disk directory and re-derives `provider_id` / `env_key` from the new alias. Removal deletes the stored key immediately; unlike ChatGPT profile deletion, it is not archived under `deleted-profiles/`. Removal is refused while any of the provider's runs still has a live Codex (running child or an in-flight launch); it also deletes that provider's `cs-*.config.toml` files. Non-interactive and `--json` runs require `--yes`.
 
-`--json` is supported on `provider add`, `list`, `show`, `rename`, `remove`, `fetch-models`, and `probe`. JSON never includes the raw key.
+`--json` is supported on `provider add`, `list`, `show`, `rename`, `remove`, `fetch-models`, `probe`, and `diagnose`. The dedicated API key is never included raw. Sensitive override values are replaced by `[REDACTED]`; environment variable references remain visible. JSON `list` retains valid providers when another fails, includes `ok`, `complete`, and per-alias `errors`, and exits nonzero for a partial inventory. Error entries omit credential-bearing TOML source.
 
 Older single-`model` files still load: the model becomes the only `[[models]]` entry, and a provider-level `model_reasoning_effort` / `web_search=disabled` is moved onto that model.
 
@@ -104,7 +104,18 @@ Use `provider fetch-models <alias>` to save native capability metadata when the 
 
 With Codex 0.159.3, isolated real-engine tests passed local MCP echo and V1/V2 spawn/wait, including different parent/child models through one provider. Cross-provider child routing, remote connectors, WebSockets and real gateway behavior are separate concerns. See the [2026-10-03 capability review](https://github.com/xjoker/codex-switch/blob/dev/docs/audits/20261003-provider-capabilities.md) for evidence, remaining findings and CLIProxyAPI guidance.
 
-Avoid literal secrets in Extra `-c` / `--set`: arbitrary overrides are currently printed by inspection commands and passed in argv. Use the dedicated key input and environment-backed headers for credentials. Saved web-search choices apply at launch; switching with Codex's `/model` does not rerun the provider launch picker.
+Inspect configuration without a gateway request:
+
+```bash
+codex-switch provider diagnose my-gateway
+codex-switch --json provider diagnose my-gateway --child-model my-coding-model
+```
+
+The report shows catalog source, local file age, advertised agent version, Lite, patch, modalities and reasoning levels. Sources distinguish `native_gateway`, `native_fallback`, `generic_gateway`, `generic_fallback`, `generated`, `explicit`, and `legacy_unknown`; mixed catalogs retain a source per model. Re-fetch an old catalog to record provenance. File age is not proof that upstream metadata is current.
+
+Diagnostics check saved connection settings, catalog membership of requested children, `agents.default_subagent_model`, and role `config_file` references in `CODEX_HOME/config.toml` plus saved overrides. An absent child/default model, unreadable explicit catalog or invalid connection makes the command fail. Generic metadata and unadvertised reasoning produce warnings. This checks local configuration only: project/system policy, forwarded CLI settings and resumed profiles are outside its scope. Catalog membership does not prove model reachability, tool execution or gateway protocol support. `probe` remains a route check.
+
+Avoid literal secrets in Extra `-c` / `--set`; use the dedicated key input and environment-backed headers. Inspection masks recognized credential fields, all literal headers, query parameters and environment maps. At launch, saved dotted `http_headers` overrides for the active provider are converted to private child environment references, including table/leaf overrides; valid environment headers retain precedence and unset/invalid environment values retain their static fallback. Use `env_http_headers` for MCP or other providers so their inherited settings remain intact. Whole parent tables containing literal headers are refused with migration guidance; quoted header names should use inline header tables. Other arbitrary override values and arguments explicitly forwarded after `--` are still command-line configuration; inspection redaction does not make them a secure secret store. Saved web-search choices apply at launch; switching with Codex's `/model` does not rerun the provider launch picker.
 
 ## OpenRouter and DeepSeek
 
@@ -188,7 +199,7 @@ On the Providers tab:
 
 Add and edit use the same form. Add starts typing the alias immediately; Enter commits a field and continues Alias → Base URL → API key → Models (env key, wire API, and extra `-c` stay on their defaults). Tab visits every field, including those three. `j`/`k` move inside the model list. Alias through Extra `-c` and the help line stay pinned; only the model rows scroll, and the viewport follows the cursor (the heading shows `n/N` when the list is taller than the form). The last row is `+ add model` — Enter (or `+` / `=` / `a`) adds a model and starts typing its id; `f` GETs `{base_url}/models` and replaces the list with chat slugs (embedding/reranker omitted). Catalogs larger than 48 open a picker: `/` filters, `space` toggles, Enter applies, Esc cancels. If a model id is being edited, Esc first. `d` / `-` / Delete ask for confirmation (`y` removes, `n` / Esc keeps it). A provider must keep at least one model, so the last model cannot be removed. `←` / `→` cycle reasoning, `w` toggles web_search, `*` marks the default, `s` saves, Esc cancels. Edit starts on Base URL in navigation mode (Enter edits the focused cell). The API key is masked. On edit, an empty key keeps the stored one. Alias is the only name; rename is `n` on the list, not a second field. Extra `-c` accepts one raw `KEY=VALUE` or a JSON array of strings such as `["temperature=0","instructions=a, b=c"]`; commas are never used to split overrides. Edit preloads this field as a JSON array so every saved value is preserved exactly.
 
-The stored key is never rendered in the table. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, optional extra Codex argv (Tab), and a one-shot reasoning override, then Enter (or `o`) starts Codex. On the Providers list, Enter also opens that picker; `e` edits (including env key, wire API, and extra `-c` overrides). `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
+The stored key is never rendered in the table. Sensitive Extra `-c` values are hidden while editing and redacted in the preview without altering the saved contents. The launch picker shows catalog source/age and the selected model's advertised capabilities, labelled as metadata only. `o` launches Codex on both tabs: Accounts starts the selected ChatGPT profile immediately; Providers opens a picker for a saved model, optional extra Codex argv (Tab), and a one-shot reasoning override, then Enter (or `o`) starts Codex. On the Providers list, Enter also opens that picker; `e` edits (including env key, wire API, and extra `-c` overrides). `←`/`→` in the picker change reasoning for this session only (the saved profile is unchanged). `l` is re-login on Accounts, never launch. Codex runs in the foreground; the TUI resumes when it exits.
 
 ## Storage and security
 

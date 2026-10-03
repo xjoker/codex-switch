@@ -606,13 +606,20 @@ fn spawn_codex(
     json: bool,
     isolated_codex_home: Option<&std::path::Path>,
 ) -> std::io::Result<std::process::Child> {
-    spawn_codex_with_capture(command, args, extra_env, json, isolated_codex_home, None)
+    spawn_codex_with_capture(
+        command,
+        args,
+        &extra_env.into_iter().collect::<Vec<_>>(),
+        json,
+        isolated_codex_home,
+        None,
+    )
 }
 
 fn spawn_codex_with_capture(
     command: &std::path::Path,
     args: &[String],
-    extra_env: Option<(String, String)>,
+    extra_env: &[(String, String)],
     json: bool,
     codex_home: Option<&std::path::Path>,
     capture: Option<&ProviderOutput>,
@@ -634,9 +641,7 @@ fn spawn_codex_with_capture(
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
     }
-    if let Some((name, value)) = extra_env {
-        cmd.env(name, value);
-    }
+    cmd.envs(extra_env.iter().map(|(name, value)| (name, value)));
     if let Some(home) = codex_home {
         cmd.env("CODEX_HOME", home);
     }
@@ -942,7 +947,7 @@ async fn launch_provider(
             shown_model,
         );
     }
-    let (env_name, env_value) = profile.launch_env();
+    let (private_profile, launch_env) = profile.with_private_headers()?;
     if args
         .iter()
         .take_while(|arg| arg.as_str() != "--")
@@ -965,7 +970,7 @@ async fn launch_provider(
         {
             let lease = provider::ProviderRunLease::acquire(&record.run_path)?;
             let session = provider::ProviderCodexHome::open_existing(&profile, &record.run_path)?;
-            let overrides = profile.codex_config_args_from_saved_catalog_at(
+            let overrides = private_profile.codex_config_args_from_saved_catalog_at(
                 Some(&selected.id),
                 reasoning.clone(),
                 &session.path,
@@ -1004,7 +1009,8 @@ async fn launch_provider(
                     args.clone(),
                 ),
             };
-            let runtime_profile = profile.for_runtime_provider_id(&session.runtime_provider_id);
+            let runtime_profile =
+                private_profile.for_runtime_provider_id(&session.runtime_provider_id);
             let mut overrides = runtime_profile.codex_config_args_from_saved_catalog_at(
                 Some(&selected.id),
                 reasoning.clone(),
@@ -1054,7 +1060,7 @@ async fn launch_provider(
     let mut child = match spawn_codex_with_capture(
         &codex_command,
         &codex_args,
-        Some((env_name, env_value)),
+        &launch_env,
         json,
         Some(&codex_home),
         capture.as_ref(),

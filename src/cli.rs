@@ -46,7 +46,7 @@ pub enum ProviderCommand {
         #[arg(long, action = clap::ArgAction::Count)]
         no_web_search: u8,
         /// Extra `codex -c KEY=VALUE` override to apply at launch (repeatable);
-        /// passed through verbatim, so any value Codex accepts works
+        /// saved literal HTTP headers are transported through child environment variables
         #[arg(long = "set", value_name = "KEY=VALUE")]
         set: Vec<String>,
         /// Catalog metadata fallback after the gateway `/models` call: HTTP(S)
@@ -69,6 +69,14 @@ pub enum ProviderCommand {
     Show {
         /// Provider alias
         alias: String,
+    },
+    /// (Beta) Inspect saved catalog capabilities and agent models without network requests
+    Diagnose {
+        /// Provider alias
+        alias: String,
+        /// Additional intended child model to check against the launch catalog (repeatable)
+        #[arg(long)]
+        child_model: Vec<String>,
     },
     /// (Beta) Rename a custom API provider
     Rename {
@@ -119,7 +127,7 @@ pub enum ProviderCommand {
     after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, launch, warmup, reset-card, rename, delete, login, import, self-update, doctor, provider add/list/show/rename/remove/fetch-models/probe)
+    /// Output as compact JSON (supported by list, use, launch, warmup, reset-card, rename, delete, login, import, self-update, doctor, provider add/list/show/rename/remove/fetch-models/probe/diagnose)
     #[arg(long, global = true)]
     pub json: bool,
 

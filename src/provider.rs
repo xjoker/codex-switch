@@ -32,6 +32,9 @@ use tracing::debug;
 
 use crate::auth;
 
+pub(crate) mod diagnostics;
+pub(crate) mod privacy;
+
 /// Provider ids Codex reserves for its built-ins; a custom provider may not
 /// reuse them.
 const RESERVED_PROVIDER_IDS: [&str; 3] = ["openai", "ollama", "lmstudio"];
@@ -755,7 +758,7 @@ impl ProviderProfile {
         let dir = provider_dir(&self.alias)?;
         ensure_private_dir(&dir)?;
         let path = dir.join("models.json");
-        let json = build_model_catalog(
+        let mut json = build_model_catalog(
             &self.saved_model_slugs(default_slug),
             &self.models,
             remote,
@@ -764,6 +767,27 @@ impl ProviderProfile {
             override_context_window(&self.codex_config),
             default_reasoning,
         );
+        let sources: BTreeMap<_, _> = self
+            .models
+            .iter()
+            .map(|model| {
+                let primary = remote.iter().find(|remote| remote.slug == model.id);
+                let fallback = fallback.iter().find(|remote| remote.slug == model.id);
+                let source = if primary.is_some_and(|remote| remote.catalog_entry.is_some()) {
+                    "native_gateway"
+                } else if fallback.is_some_and(|remote| remote.catalog_entry.is_some()) {
+                    "native_fallback"
+                } else if primary.is_some() {
+                    "generic_gateway"
+                } else if fallback.is_some() {
+                    "generic_fallback"
+                } else {
+                    "generated"
+                };
+                (model.id.clone(), source)
+            })
+            .collect();
+        json["_codex_switch"] = serde_json::json!({"saved_at": now_rfc3339(), "sources": sources});
         let body =
             serde_json::to_vec_pretty(&json).context("serializing provider model catalog")?;
         auth::atomic_write_private(&path, &body)

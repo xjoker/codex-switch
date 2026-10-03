@@ -34,7 +34,11 @@ python scripts/ci/provider-capability-smoke.py --codex C:/path/to/codex.exe --sw
 
 Omit `--catalog native --child-model` to exercise generic metadata and inherited model selection. Output includes request captures, command logs and a summary. All credentials in these fixtures are synthetic. The script fails if MCP, child result return, model routing or isolation assertions fail.
 
-## Actionable findings still open
+## Findings and remediation
+
+Remediation on `dev` after this review: the two P2 reproductions below are now fixed for the stated paths. Inspection redacts sensitive overrides and saved literal HTTP headers travel through child-only environment references. JSON inventory reports partial failures with nonzero status. `provider diagnose` and CLI/TUI catalog displays now expose local provenance/capabilities and validate child-model membership. Other arbitrary `--set` secrets remain the caller's responsibility; use environment references. The original evidence below is retained as the basis for the regressions, not as a description of current output.
+
+The real 0.159.3 generic and native/different-child-model smokes passed again after these changes, including private-header delivery on both parent and child requests, offline diagnostic behavior and recorded catalog provenance. Real deployed gateway translation and the unexecuted tool categories remain unverified.
 
 ### P2: arbitrary extra configuration is not covered by key redaction
 

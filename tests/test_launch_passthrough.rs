@@ -85,6 +85,7 @@ data.append({
     "argv": sys.argv[1:],
     "pid": os.getpid(),
     "codex_home": os.environ.get("CODEX_HOME"),
+    "header_env": {k: v for k, v in os.environ.items() if k.startswith("CODEX_SWITCH_HEADER_")},
 })
 # Write to a temp file and rename it into place so a concurrent reader never
 # sees a truncated, half-written log.
@@ -807,6 +808,59 @@ fn launch_provider_puts_c_overrides_after_exec_and_keeps_json() {
         !argv.iter().any(|a| a.contains("sk-test-passthrough")),
         "API key must not appear in argv: {argv:?}"
     );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn provider_header_secrets_reach_child_environment_without_argv_or_profile_leaks() {
+    let home = temp_home("provider-header-secrets");
+    let (fake_bin, log) = install_fake_codex(&home);
+    setup_provider(&home);
+    let path = provider_toml(&home);
+    let mut profile: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    profile.as_table_mut().unwrap().insert("codex_config".into(), toml::Value::try_from(vec![
+        r#"model_providers.openrouter.http_headers={X-Api-Key="obsolete-secret",X-Other="other-secret"}"#,
+        r#"model_providers.openrouter.http_headers.X-Api-Key="effective-secret""#,
+    ]).unwrap());
+    fs::write(&path, toml::to_string(&profile).unwrap()).unwrap();
+    let output = run(
+        &home,
+        &fake_bin,
+        &log,
+        &["launch", "openrouter", "--", "exec", "hi"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let argv = last_non_version_argv(&log);
+    for secret in ["obsolete-secret", "other-secret", "effective-secret"] {
+        assert!(
+            !argv.iter().any(|a| a.contains(secret)),
+            "secret in argv: {secret}"
+        );
+    }
+    let log: Value = serde_json::from_slice(&fs::read(&log).unwrap()).unwrap();
+    let env = log.as_array().unwrap().last().unwrap()["header_env"]
+        .as_object()
+        .unwrap();
+    assert!(env.values().any(|v| v == "effective-secret"));
+    assert!(env.values().any(|v| v == "other-secret"));
+    assert!(!env.values().any(|v| v == "obsolete-secret"));
+    for entry in fs::read_dir(home.join(".codex")).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".config.toml")
+        {
+            let config = fs::read_to_string(path).unwrap();
+            assert!(!config.contains("effective-secret"));
+            assert!(!config.contains("other-secret"));
+        }
+    }
     let _ = fs::remove_dir_all(home);
 }
 

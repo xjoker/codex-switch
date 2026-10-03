@@ -31,6 +31,7 @@ struct LaunchModel {
     saved_reasoning: Option<String>,
     no_web_search: bool,
     is_default: bool,
+    capability_note: Option<String>,
 }
 
 pub struct ProviderLaunchState {
@@ -62,6 +63,7 @@ pub enum LaunchPickerOutcome {
 
 impl ProviderLaunchState {
     pub fn from_profile(profile: &ProviderProfile) -> Self {
+        let catalog = crate::provider::diagnostics::catalog_report(profile);
         let models: Vec<LaunchModel> = profile
             .models
             .iter()
@@ -71,6 +73,32 @@ impl ProviderLaunchState {
                 saved_reasoning: model.reasoning.clone(),
                 no_web_search: model.no_web_search,
                 is_default: model.id.trim() == profile.default_model.trim(),
+                capability_note: catalog["models"]
+                    .as_array()
+                    .and_then(|models| models.iter().find(|entry| entry["id"] == model.id))
+                    .map(|entry| {
+                        let cap = &entry["capabilities"];
+                        format!(
+                            "{} | agents {} | Lite {} | patch {} | {}",
+                            entry["source"].as_str().unwrap_or("unknown"),
+                            cap["multi_agent_version"].as_str().unwrap_or("unspecified"),
+                            cap["use_responses_lite"]
+                                .as_bool()
+                                .map(|v| if v { "yes" } else { "no" })
+                                .unwrap_or("unspecified"),
+                            cap["apply_patch_tool_type"]
+                                .as_str()
+                                .unwrap_or("unspecified"),
+                            cap["input_modalities"]
+                                .as_array()
+                                .map(|values| values
+                                    .iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(","))
+                                .unwrap_or_default()
+                        )
+                    }),
             })
             .collect();
         let selected = models
@@ -94,7 +122,15 @@ impl ProviderLaunchState {
             extra_editing: false,
             extra_cursor: 0,
             last_model_click: None,
-            catalog_status: None,
+            catalog_status: Some(format!(
+                "Catalog: {} | saved {} | metadata only; provider diagnose {} for checks",
+                catalog["source"].as_str().unwrap_or("unknown"),
+                catalog["file_age_seconds"]
+                    .as_u64()
+                    .map(|age| format!("{}h ago", age / 3600))
+                    .unwrap_or_else(|| "not yet".into()),
+                profile.alias
+            )),
         }
     }
 
@@ -107,6 +143,7 @@ impl ProviderLaunchState {
             saved_reasoning: None,
             no_web_search: false,
             is_default: true,
+            capability_note: None,
         }];
         for model in crate::warmup::sorted_models_for_display(models) {
             let title = model
@@ -122,6 +159,7 @@ impl ProviderLaunchState {
                 saved_reasoning: model.default_reasoning_effort.clone(),
                 no_web_search: false,
                 is_default: false,
+                capability_note: None,
             });
         }
         Self {
@@ -493,6 +531,14 @@ pub fn render_provider_launch(
 
     lines.push(Line::from(""));
     hits.push(None);
+    if let Some(note) = state
+        .models
+        .get(state.selected)
+        .and_then(|model| model.capability_note.as_ref())
+    {
+        lines.push(Line::from(Span::styled(note.clone(), dim())));
+        hits.push(None);
+    }
     lines.push(Line::from(vec![
         Span::styled("reasoning  ", dim()),
         Span::styled(state.reasoning_label().to_string(), header()),
@@ -692,12 +738,13 @@ mod tests {
         );
 
         let mut provider = ProviderLaunchState::from_profile(&profile());
+        let original_status = provider.catalog_status.clone();
         provider.update_chatgpt_catalog(
             "or",
             None,
             Some("should not affect provider picker".into()),
         );
-        assert!(provider.catalog_status.is_none());
+        assert_eq!(provider.catalog_status, original_status);
         assert_eq!(provider.models.len(), 2);
     }
 

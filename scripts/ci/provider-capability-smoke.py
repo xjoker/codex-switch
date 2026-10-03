@@ -254,8 +254,13 @@ def main():
             run("add", [switch, "provider", "add", "audit", "--base-url",
                         f"http://127.0.0.1:{server.server_port}/v1", "--fetch-models",
                         "--allow-insecure-http", "--metadata-fallback", "none",
+                        "--set", 'model_providers.audit.http_headers.X-Audit-Key="audit-header-secret"',
                         "--api-key-stdin"], "audit-fake-key\n")
             run("probe", [switch, "--json", "provider", "probe", "audit"])
+            before_diagnose = len(fixture.requests)
+            diagnostic = json.loads(run("diagnose", [switch, "--json", "provider", "diagnose", "audit",
+                "--child-model", "audit-child-model" if args.child_model else "audit-model"]).stdout)
+            diagnostic_offline = len(fixture.requests) == before_diagnose and not diagnostic["network_checked"]
             result = run("launch", [switch, "launch", "audit", "--", "exec",
                          "--skip-git-repo-check", "--json", "-s", "read-only",
                          "Run the deterministic local audit."])
@@ -281,6 +286,9 @@ def main():
                 "base_config_unchanged": (codex_home / "config.toml").read_text(encoding="utf-8") == config,
                 "auth_untouched": not (codex_home / "auth.json").exists(),
                 "all_requests_authenticated": all(r["headers"].get("authorization") == "Bearer audit-fake-key" for r in model_requests),
+                "all_requests_have_private_header": all(r["headers"].get("x-audit-key") == "audit-header-secret" for r in model_requests),
+                "diagnostic_offline": diagnostic_offline,
+                "catalog_provenance_correct": diagnostic["catalog"]["source"] == ("native_gateway" if args.catalog == "native" else "generic_gateway"),
                 "child_model_routed": any(r["headers"].get("x-openai-subagent")
                     and r["body"].get("model") == ("audit-child-model" if args.child_model else "audit-model")
                     for r in model_requests),
@@ -289,7 +297,7 @@ def main():
             print(json.dumps(summary, indent=2))
             required = ("mcp_roundtrip", "child_result_returned", "parent_completed",
                         "base_config_unchanged", "auth_untouched", "all_requests_authenticated",
-                        "child_model_routed")
+                        "child_model_routed", "all_requests_have_private_header", "diagnostic_offline", "catalog_provenance_correct")
             if not all(summary[key] for key in required):
                 raise RuntimeError("Capability smoke did not satisfy every round-trip assertion")
             if args.catalog == "native" and not summary["responses_lite_seen"]:

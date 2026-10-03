@@ -57,6 +57,8 @@ Run cleanup holds each run's lease while checking its child and scanning the fir
 
 The TUI isolates the two kinds of profile on separate tabs so quota/scoring bindings never mix with provider add/edit/rename/remove. See [Custom API providers](Providers).
 
+Provider privacy and offline diagnostics live in `src/provider/privacy.rs` and `src/provider/diagnostics.rs`. Privacy resolves saved literal headers into per-launch environment references before either native or legacy argv is assembled; inspection uses the same redaction policy in CLI and TUI. Diagnostics read saved model metadata and home-level agent configuration without inference/network calls. Model catalogs carry a `_codex_switch` provenance object alongside Codex's `models` array; native model fields remain intact and older catalogs remain compatible.
+
 ## Usage, refresh, and selection
 
 The [`src/usage/`](https://github.com/xjoker/codex-switch/tree/dev/src/usage) module is split by responsibility:

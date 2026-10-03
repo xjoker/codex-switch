@@ -1149,6 +1149,26 @@ fn field_value<'a>(
     stored: &'a str,
     secret: bool,
 ) -> String {
+    if focus == Focus::Extra {
+        let raw = if form.editing && form.focus == focus {
+            &form.input
+        } else {
+            stored
+        };
+        match parse_extra_sets(raw) {
+            Ok(entries) => {
+                let redacted = crate::provider::privacy::redacted_overrides(&entries);
+                if redacted != entries {
+                    return if form.editing && form.focus == focus {
+                        "[sensitive override hidden while editing] #".into()
+                    } else {
+                        serde_json::to_string(&redacted).unwrap_or_default()
+                    };
+                }
+            }
+            Err(_) => return "[invalid override hidden]".into(),
+        }
+    }
     if form.editing && form.focus == focus {
         if secret {
             format!("{}#", "*".repeat(form.input.chars().count()))
@@ -2247,6 +2267,29 @@ mod tests {
         assert_eq!(profile.metadata_fallback, "none");
         assert_eq!(profile.wire_api, "responses");
         assert_eq!(profile.codex_config, ["temperature=0", "foo=bar"]);
+    }
+
+    #[test]
+    fn extra_secret_preview_and_editing_do_not_reveal_or_replace_saved_values() {
+        let _home = EnvHome::new();
+        let mut original = ProviderProfile::build(
+            "hidden",
+            "https://example.invalid/v1",
+            vec![ProviderModel::from_id("m")],
+            "sk-test",
+        );
+        original.codex_config =
+            vec![r#"model_providers.hidden.http_headers={X-Token="private-header"}"#.into()];
+        let mut form = ProviderFormState::edit(&original);
+        assert!(!render_form_text(&mut form, 100, 26).contains("private-header"));
+        form.focus = Focus::Extra;
+        form.editing = true;
+        form.input = form.extra_sets.clone();
+        assert!(!render_form_text(&mut form, 100, 26).contains("private-header"));
+        assert_eq!(
+            super::parse_extra_sets(&form.extra_sets).unwrap(),
+            original.codex_config
+        );
     }
 
     #[test]

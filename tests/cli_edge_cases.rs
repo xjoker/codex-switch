@@ -162,6 +162,276 @@ fn run(home: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn provider_inspection_redacts_nested_credentials() {
+    let home = tempfile::tempdir().unwrap();
+    seed_provider_alias(home.path(), "audit");
+    let path = home
+        .path()
+        .join(".codex-switch/providers/audit/provider.toml");
+    let mut profile: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    profile.as_table_mut().unwrap().insert("codex_config".into(), toml::Value::try_from(vec![
+        r#"model_providers.audit.http_headers={X-Api-Key="audit-header-secret",X-Custom="opaque-secret"}"#,
+        r#"mcp_servers.example.env={TOKEN="audit-mcp-secret"}"#,
+        r#"model_providers.audit.query_params={access_token="audit-query-secret"}"#,
+        r#"model_providers.audit.env_http_headers.X-Api-Key="SAFE_ENV_NAME""#,
+        "temperature=0",
+    ]).unwrap());
+    fs::write(&path, toml::to_string(&profile).unwrap()).unwrap();
+    for args in [
+        vec!["provider", "show", "audit"],
+        vec!["--json", "provider", "show", "audit"],
+        vec!["--json", "provider", "list"],
+    ] {
+        let output = run(home.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        for secret in [
+            "audit-header-secret",
+            "opaque-secret",
+            "audit-mcp-secret",
+            "audit-query-secret",
+        ] {
+            assert!(!text.contains(secret), "inspection exposed {secret}");
+        }
+        assert!(text.contains("SAFE_ENV_NAME"));
+        assert!(text.contains("temperature=0"));
+    }
+}
+
+#[test]
+fn provider_list_reports_partial_inventory_without_raw_parse_errors() {
+    let home = tempfile::tempdir().unwrap();
+    seed_provider_alias(home.path(), "valid");
+    let broken = home.path().join(".codex-switch/providers/broken");
+    fs::create_dir_all(&broken).unwrap();
+    fs::write(
+        broken.join("provider.toml"),
+        "api_key = \"private-broken-secret",
+    )
+    .unwrap();
+    let output = run(home.path(), &["--json", "provider", "list"]);
+    assert!(!output.status.success(), "partial inventory must fail");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["complete"], false);
+    assert_eq!(report["providers"].as_array().unwrap().len(), 1);
+    assert_eq!(report["providers"][0]["alias"], "valid");
+    assert_eq!(report["errors"][0]["alias"], "broken");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-broken-secret"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("private-broken-secret"));
+    fs::remove_dir_all(broken).unwrap();
+    let output = run(home.path(), &["--json", "provider", "list"]);
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["errors"], serde_json::json!([]));
+}
+
+#[test]
+fn provider_diagnose_is_offline_and_checks_child_models() {
+    let home = tempfile::tempdir().unwrap();
+    seed_provider_alias(home.path(), "audit");
+    let output = run(
+        home.path(),
+        &[
+            "--json",
+            "provider",
+            "diagnose",
+            "audit",
+            "--child-model",
+            "missing",
+        ],
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("one JSON diagnostic report");
+    assert!(!output.status.success());
+    assert_eq!(report["network_checked"], false);
+    assert_eq!(report["catalog"]["source"], "generated");
+    assert_eq!(report["child_models"][0]["available"], false);
+    assert!(
+        report["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["code"] == "child_model_missing")
+    );
+    let output = run(
+        home.path(),
+        &[
+            "--json",
+            "provider",
+            "diagnose",
+            "audit",
+            "--child-model",
+            "test-model",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["child_models"][0]["available"], true);
+    assert_eq!(
+        report["models"][0]["capabilities"]["multi_agent_version"],
+        Value::Null
+    );
+    assert!(!home.path().join(".codex/auth.json").exists());
+    assert!(
+        !home
+            .path()
+            .join(".codex-switch/providers/audit/models.json")
+            .exists()
+    );
+}
+
+#[test]
+fn provider_diagnose_tracks_native_legacy_and_invalid_catalogs_and_agent_roles() {
+    let home = tempfile::tempdir().unwrap();
+    seed_provider_alias(home.path(), "audit");
+    let catalog_path = home
+        .path()
+        .join(".codex-switch/providers/audit/models.json");
+    let mut catalog = serde_json::json!({"models": [{"slug":"test-model", "multi_agent_version":"v2", "use_responses_lite":true, "supported_reasoning_levels":[{"effort":"high"}]}], "_codex_switch":{"saved_at":"2026-10-03T00:00:00Z", "sources":{"test-model":"native_gateway"}}});
+    write_json(&catalog_path, &catalog);
+    let codex_home = home.path().join(".codex");
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(codex_home.join("config.toml"), "[agents]\ndefault_subagent_model=\"missing\"\n[agents.worker]\nconfig_file=\"worker.toml\"\n").unwrap();
+    fs::write(
+        codex_home.join("worker.toml"),
+        "model=\"test-model\"\nmodel_reasoning_effort=\"high\"\n",
+    )
+    .unwrap();
+    let output = run(home.path(), &["--json", "provider", "diagnose", "audit"]);
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["catalog"]["source"], "native_gateway");
+    assert_eq!(
+        report["models"][0]["capabilities"]["multi_agent_version"],
+        "v2"
+    );
+    let children = report["child_models"].as_array().unwrap();
+    assert!(
+        children
+            .iter()
+            .any(|child| child["origin"] == "agents.worker" && child["available"] == true)
+    );
+    assert!(
+        children
+            .iter()
+            .any(|child| child["origin"] == "agents.default_subagent_model"
+                && child["available"] == false)
+    );
+    assert!(
+        !report["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["code"] == "child_reasoning_unadvertised")
+    );
+    fs::write(codex_home.join("config.toml"), "").unwrap();
+    catalog.as_object_mut().unwrap().remove("_codex_switch");
+    write_json(&catalog_path, &catalog);
+    let output = run(home.path(), &["--json", "provider", "diagnose", "audit"]);
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["catalog"]["source"], "legacy_unknown");
+    fs::write(&catalog_path, "broken-private-catalog").unwrap();
+    let output = run(home.path(), &["--json", "provider", "diagnose", "audit"]);
+    assert!(
+        output.status.success(),
+        "launch regenerates an invalid managed catalog"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["catalog"]["source"], "generated");
+    assert!(
+        report["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["code"] == "catalog_replaced_at_launch")
+    );
+    assert_eq!(
+        fs::read_to_string(&catalog_path).unwrap(),
+        "broken-private-catalog"
+    );
+}
+
+#[test]
+fn provider_diagnose_resolves_saved_role_paths_from_working_directory_and_checks_inherited_effort()
+{
+    let home = tempfile::tempdir().unwrap();
+    seed_provider_alias(home.path(), "audit");
+    let path = home
+        .path()
+        .join(".codex-switch/providers/audit/provider.toml");
+    let mut profile: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    profile.as_table_mut().unwrap().insert(
+        "codex_config".into(),
+        toml::Value::try_from(vec![
+            "agents.worker.config_file=worker.toml",
+            "agents.default_subagent_reasoning_effort=high",
+        ])
+        .unwrap(),
+    );
+    fs::write(&path, toml::to_string(&profile).unwrap()).unwrap();
+    fs::write(
+        home.path().join("worker.toml"),
+        "developer_instructions=\"local test\"\n",
+    )
+    .unwrap();
+    let output = command(home.path(), &["--json", "provider", "diagnose", "audit"])
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["child_models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|child| child["origin"] == "agents.worker"
+                && child["model"] == "test-model"
+                && child["reasoning"] == "high")
+    );
+    assert!(
+        report["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["code"] == "child_reasoning_unadvertised")
+    );
+    profile.as_table_mut().unwrap().insert(
+        "codex_config".into(),
+        toml::Value::try_from(vec!["model_catalog_json=missing.json"]).unwrap(),
+    );
+    fs::write(&path, toml::to_string(&profile).unwrap()).unwrap();
+    let output = command(home.path(), &["--json", "provider", "diagnose", "audit"])
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["catalog"]["source"], "explicit");
+    assert!(
+        report["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["code"] == "catalog_unreadable")
+    );
+}
+
+#[test]
 fn command_failure_is_reported_once_and_kept_in_file_logs() {
     for json in [false, true] {
         for logging in ["default", "debug", "rust-log"] {
