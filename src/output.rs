@@ -152,6 +152,8 @@ pub struct JsonOk {
 pub struct JsonError {
     pub ok: bool,
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -519,9 +521,14 @@ pub fn print_json<T: serde::Serialize>(val: &T) {
 }
 
 pub fn print_error(msg: &str) {
+    print_error_with_code(msg, None);
+}
+
+pub fn print_error_with_code(msg: &str, code: Option<&'static str>) {
     let e = JsonError {
         ok: false,
         error: msg.to_string(),
+        code,
     };
     println!("{}", serialize(&e));
 }

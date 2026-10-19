@@ -64,6 +64,11 @@ tar = "0.4"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 libc = "0.2"
 rpassword = "7"
+# Export bundles: AES-256-GCM/HMAC/CSPRNG from ring (already in the lockfile via
+# rustls) plus Argon2id for the passphrase KDF.
+ring = "0.17"
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
@@ -80,6 +85,13 @@ windows-sys = { version = "=0.61.2", features = [
 [dev-dependencies]
 axum = "0.8"
 chrono = { version = "0.4", features = ["clock"] }
+
+# The 64 MiB Argon2id KDF is unbearably slow unoptimised; keep debug tests fast.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 strip = true

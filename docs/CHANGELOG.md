@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **整机导出／导入。** `codex-switch export [FILE]` 把全部账号、提供方（含 API 密钥和模型目录）与 `config.toml` 写入一个 `.csbundle`，用 Argon2id（64 MiB、t=3、p=1）派生密钥、AES-256-GCM 加密，文件权限 `0600`；`--plaintext` 需要确认。`codex-switch import <导出包>` 按内容识别导出包并离线导入（仍执行管理员策略和身份检查），支持 `--dry-run`、`--strategy skip|overwrite|merge`、`--activate`，被替换的文件备份到 `import-backups/`，出错时回滚。原有的 `auth.json` 导入不变。refresh token 只能用一次，两条命令都会提示同一账号不要在两台机器上同时使用。
+- 导入只在当前账号的 live `auth.json` 属于同一账号、且能证明比导入内容旧时才替换它：`merge` 遇到更新或无法比较的 live 会跳过，`overwrite` 需要再加 `--replace-live`；live 属于其他账号（如未跟踪的 `codex login`）时不会被改动，`--activate` 也不会在无确认时覆盖它。计划和 `--json` 中新增 `replaces_live`。
+- 同一导出包里同一账号出现多次时只写入能证明最新的一份，无法判断时整组跳过；本地有多个同账号 profile 时标为 `ambiguous`。
+- 导入未加密的导出包、或会新增带 `codex_config` 覆盖项的提供方时，也需要交互确认或 `--yes`；计划中列出提供方的 `base_url` 和覆盖项数量。
+- 中断的导入会在日志中记录每个被替换文件与其备份的对应关系，下次导入给出逐条恢复步骤；`import --dry-run`、`use`、`launch`、`export` 会提示存在未完成的导入。KDF 参数上限收紧为 256 MiB／t=6；`--json` 下的参数用法错误也输出 JSON。
+
 ## v20261015.2.0 — 2026-10-15
 
 - TUI 主面板和账号菜单隐藏已确认无 Daybreak Blue／Red 资格的详情行；未知状态、查询失败和已有资格仍保留展示。

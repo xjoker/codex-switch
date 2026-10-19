@@ -7,6 +7,7 @@ mod misc;
 pub(crate) mod profile;
 mod provider;
 mod render;
+mod transfer;
 mod update;
 
 pub(crate) use crate::launch::{launch_cmd, launch_for_tui};
@@ -17,4 +18,5 @@ pub(crate) use misc::{format_resync_confirm_prompt, open_cmd, reset_card_cmd, wa
 pub(crate) use profile::{delete_cmd, list_cmd, rename_cmd, use_cmd};
 pub(crate) use provider::provider_cmd;
 pub(crate) use render::confirm;
+pub(crate) use transfer::{ImportBundleArgs, export_cmd, import_bundle_cmd};
 pub(crate) use update::self_update_cmd;

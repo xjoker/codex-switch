@@ -4566,6 +4566,37 @@ pub fn list_providers() -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Parse and validate `provider.toml` text the way `load` does, without
+/// touching disk. Used to reject a bad import before anything is written.
+pub(crate) fn parse_and_validate(alias: &str, text: &str) -> Result<ProviderProfile> {
+    crate::profile::validate_alias(alias)?;
+    let mut profile: ProviderProfile =
+        toml::from_str(text).with_context(|| format!("parsing provider profile '{alias}'"))?;
+    profile.alias = alias.to_string();
+    profile.normalize();
+    profile
+        .validate_inner(true)
+        .with_context(|| format!("validating provider profile '{alias}'"))?;
+    Ok(profile)
+}
+
+/// Rewrite imported `provider.toml` text for a different alias, applying the
+/// same alias-derived field updates as [`rename`]. Returns the new TOML text.
+pub(crate) fn retarget_provider_text(old: &str, new: &str, text: &str) -> Result<String> {
+    let mut profile = parse_and_validate(old, text)?;
+    crate::profile::validate_alias(new)?;
+    validate_provider_auth_overrides(&profile.provider_id, &profile.codex_config)?;
+    profile.alias = new.to_string();
+    profile.provider_id = sanitize_provider_id(new);
+    if profile.env_key == derive_env_key(old) {
+        profile.env_key = derive_env_key(new);
+    }
+    profile.name = new.to_string();
+    profile.normalize();
+    profile.validate()?;
+    toml::to_string_pretty(&profile).context("serializing imported provider profile")
+}
+
 /// Load a provider profile by alias.
 pub fn load(alias: &str) -> Result<ProviderProfile> {
     load_inner(alias, true)

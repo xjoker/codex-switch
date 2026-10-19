@@ -127,7 +127,7 @@ pub enum ProviderCommand {
     after_help = "Examples:\n  codex-switch list\n  codex-switch use\n  codex-switch rename old-alias new-alias\n  codex-switch import ./auth-backups\n  codex-switch self-update --check\n\nRun `codex-switch <command> --help` for command-specific options."
 )]
 pub struct Cli {
-    /// Output as compact JSON (supported by list, use, launch, warmup, reset-card, rename, delete, login, import, self-update, doctor, provider add/list/show/rename/remove/fetch-models/probe/diagnose)
+    /// Output as compact JSON (supported by list, use, launch, warmup, reset-card, rename, delete, login, import, export, self-update, doctor, provider add/list/show/rename/remove/fetch-models/probe/diagnose)
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -214,12 +214,59 @@ pub enum Commands {
         #[arg(long)]
         device: bool,
     },
-    /// Import an auth.json file, or recursively scan a directory for JSON files to validate and import
+    /// Import an auth.json file, a directory of JSON files, or an export bundle
+    #[command(
+        after_help = "A file whose JSON has \"format\": \"codex-switch-export\" is imported as an export bundle (see `export --help`); anything else uses the auth.json import, which validates each token through the Usage API.\nBundle import is offline: tokens are not sent anywhere, but the managed workspace policy and identity checks still apply. Conflicts (same account or provider with different content, or a different config.toml) follow --strategy; a different account under a taken alias is always imported under a new alias. The live auth.json is replaced only for the current profile, only when it belongs to the same account, and only when it is provably older than the imported credentials (or with --replace-live). Replaced files are backed up under import-backups/. Unencrypted bundles, overwrites, merges and providers with codex_config overrides need --yes or interactive confirmation.\nThe current account is never switched unless --activate is given.\n\nExamples:\n  codex-switch import ./auth.json work\n  codex-switch import backup.csbundle --dry-run\n  codex-switch import backup.csbundle --strategy merge --yes --activate"
+    )]
     Import {
-        /// Path to an auth.json file or a directory containing JSON files
+        /// Path to an auth.json file, a directory containing JSON files, or a .csbundle export
         path: String,
-        /// Optional profile alias (single-file import only; directories auto-assign aliases)
+        /// Optional profile alias (single auth.json import only; not for bundles)
         alias: Option<String>,
+        /// [bundle] What to do when an item conflicts with local data
+        #[arg(long, value_enum)]
+        strategy: Option<crate::transfer::plan::Strategy>,
+        /// [bundle] Show what would happen without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// [bundle] Confirm overwrite/merge without prompting (required with --json or non-TTY)
+        #[arg(long, short)]
+        yes: bool,
+        /// [bundle] After importing, switch to ALIAS (default: the source machine's current account)
+        #[arg(long, value_name = "ALIAS", num_args = 0..=1, require_equals = true)]
+        activate: Option<Option<String>>,
+        /// [bundle] Read the passphrase from the first line of stdin
+        #[arg(long)]
+        passphrase_stdin: bool,
+        /// [bundle] With --strategy overwrite: also replace the current profile's live auth.json when it cannot be shown to be older than the imported credentials
+        #[arg(long)]
+        replace_live: bool,
+    },
+    /// Export all profiles, providers and config.toml into one passphrase-encrypted bundle
+    #[command(
+        after_help = "The bundle (default name codex-switch-YYYYMMDD-HHMMSS.csbundle, mode 0600) holds every saved ChatGPT profile, custom provider (with its API key and model catalog) and config.toml, encrypted with AES-256-GCM under an Argon2id-derived key. Caches, logs, deleted profiles and Codex's own files are not exported.\n\nRefresh tokens are single-use: the exported accounts stay usable here too, and if both machines keep using the same account one of them will have to log in again.\n\nExamples:\n  codex-switch export\n  codex-switch export ~/backup.csbundle --no-config\n  printf '%s\\n' \"$PASS\" | codex-switch export out.csbundle --passphrase-stdin"
+    )]
+    Export {
+        /// Destination file (default: ./codex-switch-<timestamp>.csbundle)
+        file: Option<PathBuf>,
+        /// Write an UNENCRYPTED bundle (needs confirmation, or --yes)
+        #[arg(long)]
+        plaintext: bool,
+        /// Confirm --plaintext without prompting
+        #[arg(long, short)]
+        yes: bool,
+        /// Overwrite an existing destination file
+        #[arg(long)]
+        force: bool,
+        /// Read the passphrase from the first line of stdin
+        #[arg(long)]
+        passphrase_stdin: bool,
+        /// Do not include custom API providers
+        #[arg(long)]
+        no_providers: bool,
+        /// Do not include config.toml
+        #[arg(long)]
+        no_config: bool,
     },
     /// Manually check GitHub Releases (`--check`) or update this binary
     #[command(

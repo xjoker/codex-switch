@@ -42,6 +42,8 @@ mod provider;
 #[allow(dead_code)]
 mod signals;
 #[allow(dead_code)]
+mod transfer;
+#[allow(dead_code)]
 mod tui;
 #[allow(dead_code)]
 mod update;
