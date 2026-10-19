@@ -173,6 +173,9 @@ pub(crate) struct ImportBundleArgs<'a> {
 #[derive(Serialize)]
 struct JsonImportBundle<'a> {
     ok: bool,
+    /// `nothing_imported` or `partial_import` when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
     dry_run: bool,
     strategy: &'static str,
     encrypted: bool,
@@ -182,6 +185,10 @@ struct JsonImportBundle<'a> {
     source_current_target: Option<&'a str>,
     backup_dir: Option<String>,
     activated: Option<String>,
+    /// Items written (dry run: that would be written).
+    written: usize,
+    /// Items skipped or ambiguous whose content stays only in the bundle.
+    not_imported: usize,
     warning: &'static str,
 }
 
@@ -222,6 +229,100 @@ fn live_is_untracked() -> Result<bool> {
     Ok(live.exists() && profile::find_matching_profile(&live).is_none())
 }
 
+/// `--activate` runs `use`, which overwrites a live auth.json that matches no
+/// saved profile after an interactive y/N. When that live file is the same
+/// account as the profile being activated and is not provably older than it
+/// (typically Codex refreshed it and it was never synced back), answering y
+/// would replace the newest single-use refresh_token with an older one, so
+/// import refuses outright instead of asking — on a terminal too.
+fn refuse_activate_over_newer_live(
+    alias: &str,
+    target: &serde_json::Value,
+    import_finished: bool,
+) -> Result<()> {
+    let live_path = auth::codex_auth_path()?;
+    if !live_path.exists() || profile::find_matching_profile(&live_path).is_some() {
+        return Ok(());
+    }
+    let Ok(live) = auth::read_auth(&live_path) else {
+        return Ok(());
+    };
+    // The looser identity rule on purpose: matching more means refusing more.
+    if profile::same_account_identity(&live, target)
+        && !profile::credentials_not_older(&live, target)
+    {
+        anyhow::bail!(
+            "refusing to --activate {alias}: the live auth.json ({}) holds credentials of the same \
+             account that are not saved in any profile and cannot be shown to be older than \
+             profile '{alias}' (live: {}; profile: {}), so switching would replace them with \
+             older ones. {} Keep using the live login (run `codex-switch save {alias}` to store \
+             it in the profile){}.",
+            live_path.display(),
+            profile::describe_refresh_state(&live),
+            profile::describe_refresh_state(target),
+            if import_finished {
+                "The import itself finished; only the switch was refused."
+            } else {
+                "Nothing was imported."
+            },
+            if import_finished {
+                ""
+            } else {
+                ", and import without --activate"
+            }
+        );
+    }
+    Ok(())
+}
+
+/// The alias `--activate` will switch to, if it can be known from the plan.
+fn activate_alias(requested: &Option<String>, plan: &plan::ImportPlan) -> Option<String> {
+    requested
+        .clone()
+        .or_else(|| plan.source_current_target.clone())
+}
+
+/// Before any write: what `--activate` would do to the live auth.json.
+fn precheck_activate(
+    args: &ImportBundleArgs<'_>,
+    preview: &plan::ImportPlan,
+    can_prompt: bool,
+) -> Result<()> {
+    let Some(requested) = &args.activate else {
+        return Ok(());
+    };
+    // --activate replaces the live auth.json; like `use`, it must not discard
+    // a login that belongs to no saved profile without asking.
+    if !can_prompt && live_is_untracked()? {
+        anyhow::bail!(
+            "the live auth.json belongs to no saved profile and --activate would overwrite it; import without --activate, then run `codex-switch use <alias>` interactively"
+        );
+    }
+    let Some(alias) = activate_alias(requested, preview) else {
+        return Ok(());
+    };
+    if profile::validate_alias(&alias).is_err() {
+        return Ok(());
+    }
+    let profile_key = transfer::LogicalKey::ProfileAuth(alias.clone());
+    let writes_profile = preview
+        .items
+        .iter()
+        .find(|i| i.action.writes() && i.write.as_ref().is_some_and(|(k, _)| *k == profile_key));
+    // The import itself replaces live with this profile's new content.
+    if writes_profile.is_some_and(|i| i.replaces_live) {
+        return Ok(());
+    }
+    let target = match writes_profile.and_then(|i| i.write.as_ref()) {
+        Some((_, text)) => serde_json::from_str(text.trim_start_matches('\u{feff}')).ok(),
+        None => auth::read_auth(&profile::profile_auth_path(&alias)?).ok(),
+    };
+    match target {
+        Some(target) => refuse_activate_over_newer_live(&alias, &target, false),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
     auth::ensure_file_credentials_store()?;
     let bundle = transfer::read_bundle(args.path)?;
@@ -235,6 +336,24 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
     let payload = transfer::open_payload(&bundle, passphrase.as_ref().map(|p| p.as_str()))?;
     drop(passphrase);
     let preview = plan::classify(&payload, args.strategy, args.replace_live)?;
+    let not_imported_message = |plan: &plan::ImportPlan| -> Option<String> {
+        let missing = plan.not_imported();
+        if missing == 0 {
+            return None;
+        }
+        let written = plan.written();
+        Some(if written == 0 {
+            format!(
+                "nothing was imported: {missing} item(s) were skipped or ambiguous (see the plan above); keep {} until they are resolved",
+                args.path.display()
+            )
+        } else {
+            format!(
+                "the import is incomplete: {written} item(s) written, but {missing} item(s) were skipped or ambiguous (see the plan above); keep {} until they are resolved",
+                args.path.display()
+            )
+        })
+    };
 
     if args.dry_run {
         if let Some(w) = transfer::apply::unfinished_import_warning() {
@@ -243,6 +362,7 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
         if args.json {
             print_json(&JsonImportBundle {
                 ok: true,
+                code: None,
                 dry_run: true,
                 strategy: args.strategy.as_str(),
                 encrypted,
@@ -252,11 +372,19 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
                 source_current_target: preview.source_current_target.as_deref(),
                 backup_dir: None,
                 activated: None,
+                written: preview.written(),
+                not_imported: preview.not_imported(),
                 warning: SINGLE_USE_WARNING,
             });
         } else {
             print_plan(&preview);
             println!("Dry run: nothing was written.");
+            let missing = preview.not_imported();
+            if missing > 0 {
+                warn(&format!(
+                    "{missing} item(s) would not be imported (skip or ambiguous); the import would exit non-zero and the bundle should be kept"
+                ));
+            }
         }
         warn(SINGLE_USE_WARNING);
         return Ok(());
@@ -264,6 +392,8 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
 
     transfer::apply::ensure_no_unfinished_import()?;
     let can_prompt = !args.json && std::io::stdin().is_terminal() && !args.passphrase_stdin;
+    // Activation is checked first: a refusal must not follow a y/N prompt.
+    precheck_activate(&args, &preview, can_prompt)?;
     // A plaintext bundle carries no authentication: whoever can write the
     // file chooses its accounts, endpoints and Codex overrides. Importing one
     // is confirmed exactly like writing one.
@@ -284,14 +414,6 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
             return Err(crate::error::CsError::Aborted.into());
         }
     }
-    // --activate replaces the live auth.json; like `use`, it must not discard
-    // a login that belongs to no saved profile without asking.
-    if args.activate.is_some() && !can_prompt && live_is_untracked()? {
-        anyhow::bail!(
-            "the live auth.json belongs to no saved profile and --activate would overwrite it; import without --activate, then run `codex-switch use <alias>` interactively"
-        );
-    }
-
     let result = {
         let _transaction = profile::lock_auth_transaction()?;
         let locked = plan::classify(&payload, args.strategy, args.replace_live)?;
@@ -300,6 +422,7 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
                 "the local store changed while the import was being prepared; rerun the import"
             );
         }
+        transfer::apply::test_hook_before_apply()?;
         let applied = transfer::apply::apply(&locked)?;
         (locked, applied)
     };
@@ -308,17 +431,17 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
     let activated = match &args.activate {
         None => None,
         Some(requested) => {
-            let alias = requested
-                .clone()
-                .or_else(|| final_plan.source_current_target.clone())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--activate has no alias: the bundle records no current account"
-                    )
-                })?;
+            let alias = activate_alias(requested, &final_plan).ok_or_else(|| {
+                anyhow::anyhow!("--activate has no alias: the bundle records no current account")
+            })?;
             profile::validate_alias(&alias)?;
-            if !profile::profile_auth_path(&alias)?.exists() {
+            let profile_path = profile::profile_auth_path(&alias)?;
+            if !profile_path.exists() {
                 anyhow::bail!("cannot activate '{alias}': no such profile after import");
+            }
+            // Live may have changed since the pre-check.
+            if let Ok(target) = auth::read_auth(&profile_path) {
+                refuse_activate_over_newer_live(&alias, &target, true)?;
             }
             profile::cmd_use(&alias, can_prompt).with_context(|| {
                 format!(
@@ -334,9 +457,17 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
         }
     };
 
+    let incomplete = not_imported_message(&final_plan);
     if args.json {
         print_json(&JsonImportBundle {
-            ok: true,
+            ok: incomplete.is_none(),
+            code: incomplete.as_ref().map(|_| {
+                if final_plan.written() == 0 {
+                    "nothing_imported"
+                } else {
+                    "partial_import"
+                }
+            }),
             dry_run: false,
             strategy: args.strategy.as_str(),
             encrypted,
@@ -346,15 +477,13 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
             source_current_target: final_plan.source_current_target.as_deref(),
             backup_dir: applied.backup_dir.as_ref().map(|p| p.display().to_string()),
             activated: activated.clone(),
+            written: final_plan.written(),
+            not_imported: final_plan.not_imported(),
             warning: SINGLE_USE_WARNING,
         });
     } else {
         print_plan(&final_plan);
-        let written = final_plan
-            .items
-            .iter()
-            .filter(|i| i.action.writes())
-            .count();
+        let written = final_plan.written();
         println!(
             "{}",
             color::success(&format!("Import finished: {written} item(s) written."))
@@ -373,7 +502,9 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
             ),
             _ => {}
         }
-        if !encrypted {
+        // Only when every item is on this machine: otherwise the bundle is
+        // still the only copy of what was skipped.
+        if !encrypted && incomplete.is_none() {
             println!(
                 "Delete {} now that it has been imported.",
                 args.path.display()
@@ -381,5 +512,12 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
         }
     }
     warn(SINGLE_USE_WARNING);
+    if let Some(message) = incomplete {
+        if args.json {
+            // The JSON above already is the single result value (ok:false).
+            std::process::exit(1);
+        }
+        anyhow::bail!("{message}");
+    }
     Ok(())
 }

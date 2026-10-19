@@ -7,6 +7,10 @@
 - 同一导出包里同一账号出现多次时只写入能证明最新的一份，无法判断时整组跳过；本地有多个同账号 profile 时标为 `ambiguous`。
 - 导入未加密的导出包、或会新增带 `codex_config` 覆盖项的提供方时，也需要交互确认或 `--yes`；计划中列出提供方的 `base_url` 和覆盖项数量。
 - 中断的导入会在日志中记录每个被替换文件与其备份的对应关系，下次导入给出逐条恢复步骤；`import --dry-run`、`use`、`launch`、`export` 会提示存在未完成的导入。KDF 参数上限收紧为 256 MiB／t=6；`--json` 下的参数用法错误也输出 JSON。
+- **行为变更：非交互导入需要 `--yes`。** 没有终端（或使用 `--json`）时，导入未加密导出包的任何写入，以及会新增或替换带 `codex_config` 覆盖项的提供方，都必须加 `--yes`，否则在写入任何文件之前以 exit 1 拒绝；有终端时改为交互确认。用脚本调用 `codex-switch import <导出包>` 的地方需要相应加上 `--yes`。
+- **导入不完整时退出码非 0。** 只要有条目被跳过（`skip`）或判为 `ambiguous`，内容仍只存在于导出包里：命令以 exit 1 结束，`--json` 输出单个 `ok:false` 对象，`code` 为 `nothing_imported`（一条都没写入）或 `partial_import`（其余条目已写入并保留，备份照常），并新增 `written`、`not_imported` 计数；文字输出说明有几项未导入、请保留导出包，不再提示“导入完成后删除”明文导出包。全部写入或与本地完全相同时仍为 exit 0、`ok:true`。`--dry-run` 不受影响，会提前提示有几项不会被导入。同一账号在包内出现多份完全相同的内容时先去重，不再因此整组判为 `ambiguous`。
+- **`--activate` 不再覆盖更新的同账号 live。** 如果 live `auth.json` 不属于任何已保存 profile、和要激活的 profile 是同一账号、又不能证明比它旧（通常是 Codex 刷新过还没同步回来），`import --activate` 在终端上也直接拒绝，不再询问 y/N；这个检查在导入写入任何文件之前进行（导入完成后切换前还会再查一次）。普通的 `codex-switch use` 不变。
+- 导入判断 live `auth.json` 是否属于同一账号时，要求两边都有相同的 `account_id` 和 email；缺 `account_id` 的 live 只会被保留，不会被替换（profile 照常更新）。写入前复检发现 live 已变化时，报错单独说明 live 文件和恢复方式；新建的备份目录和 profile 目录会同步父目录（Unix）。
 
 ## v20261015.2.0 — 2026-10-15
 

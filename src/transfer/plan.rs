@@ -204,6 +204,11 @@ pub(crate) struct PlanItem {
     pub allow_older: bool,
     #[serde(skip)]
     pub allow_older_live: bool,
+    /// A duplicate of another entry for the same account in this bundle that
+    /// was chosen instead (identical, or provably newer): nothing of this
+    /// entry is lost when it is not written.
+    #[serde(skip)]
+    pub superseded: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -225,6 +230,19 @@ impl ImportPlan {
     }
     pub(crate) fn has_writes(&self) -> bool {
         self.items.iter().any(|i| i.action.writes())
+    }
+    pub(crate) fn written(&self) -> usize {
+        self.items.iter().filter(|i| i.action.writes()).count()
+    }
+    /// Bundle items whose content is not on this machine after the import:
+    /// `skip` and `ambiguous`, except entries superseded by another copy of
+    /// the same account in the bundle. While this is non-zero the bundle is
+    /// still the only copy of something and must be kept.
+    pub(crate) fn not_imported(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| matches!(i.action, Action::Skip | Action::Ambiguous) && !i.superseded)
+            .count()
     }
     /// A comparable fingerprint of the decisions, to detect that the store
     /// changed between the confirmation and taking the lock.
@@ -331,6 +349,7 @@ fn item(
         write: None,
         allow_older: false,
         allow_older_live: false,
+        superseded: false,
     }
 }
 
@@ -361,13 +380,23 @@ struct BundleProfile<'a> {
     identity: profile::AccountIdentity,
 }
 
+/// A bundle entry that is not written because another entry for the same
+/// account is: `identical` when the two carry the same credentials.
+struct Superseded {
+    winner: String,
+    identical: bool,
+}
+
 /// Several aliases in one bundle may carry the same account. Writing each of
 /// them would hit the same local target (last write wins) or create two
-/// profiles for one account, so each account is written at most once: the
-/// entry whose credentials are provably newest wins; with no provable winner
-/// none is written. Returns, per bundle alias, `Some(winner alias)` for losers
-/// and an `Err(reason)` for unresolvable groups.
-fn bundle_duplicates(profiles: &[BundleProfile<'_>]) -> BTreeMap<String, Result<String, String>> {
+/// profiles for one account, so each account is written at most once.
+/// Identical entries count once; of the distinct ones, the entry whose
+/// credentials are provably newest wins; with no provable winner none is
+/// written. Returns, per bundle alias, `Ok` for losers and an `Err(reason)`
+/// for unresolvable groups.
+fn bundle_duplicates(
+    profiles: &[BundleProfile<'_>],
+) -> BTreeMap<String, Result<Superseded, String>> {
     let mut groups: BTreeMap<(Option<String>, Option<String>), Vec<usize>> = BTreeMap::new();
     for (idx, p) in profiles.iter().enumerate() {
         groups
@@ -377,18 +406,20 @@ fn bundle_duplicates(profiles: &[BundleProfile<'_>]) -> BTreeMap<String, Result<
     }
     let mut out = BTreeMap::new();
     for members in groups.values().filter(|m| m.len() > 1) {
-        let identical = members
-            .iter()
-            .all(|&i| profiles[i].value == profiles[members[0]].value);
-        let winner = if identical {
-            Some(members[0])
-        } else {
-            members.iter().copied().find(|&w| {
-                members
-                    .iter()
-                    .all(|&o| o == w || strictly_newer(&profiles[o].value, &profiles[w].value))
-            })
-        };
+        let mut distinct: Vec<usize> = Vec::new();
+        for &i in members {
+            if !distinct
+                .iter()
+                .any(|&d| profiles[d].value == profiles[i].value)
+            {
+                distinct.push(i);
+            }
+        }
+        let winner = distinct.iter().copied().find(|&w| {
+            distinct
+                .iter()
+                .all(|&o| o == w || strictly_newer(&profiles[o].value, &profiles[w].value))
+        });
         let keys = members
             .iter()
             .map(|&i| profiles[i].entry.key.as_str())
@@ -398,15 +429,22 @@ fn bundle_duplicates(profiles: &[BundleProfile<'_>]) -> BTreeMap<String, Result<
             match winner {
                 Some(w) if w == i => {}
                 Some(w) => {
-                    out.insert(profiles[i].alias.clone(), Ok(profiles[w].alias.clone()));
+                    out.insert(
+                        profiles[i].alias.clone(),
+                        Ok(Superseded {
+                            winner: profiles[w].alias.clone(),
+                            identical: profiles[i].value == profiles[w].value,
+                        }),
+                    );
                 }
                 None => {
                     out.insert(
                         profiles[i].alias.clone(),
                         Err(format!(
-                            "the same account appears {} times in this bundle ({keys}) and none \
-                             is provably newest (last_refresh); skipped",
-                            members.len()
+                            "the same account appears {} times in this bundle ({keys}) with {} \
+                             different credentials and none is provably newest (last_refresh); skipped",
+                            members.len(),
+                            distinct.len()
                         )),
                     );
                 }
@@ -515,15 +553,19 @@ pub(crate) fn classify(
         } = bp;
         let (key, alias, value) = (*key, *alias, value);
         match duplicates.get(alias.as_str()) {
-            Some(Ok(winner)) => {
-                items.push(item(
-                    key,
-                    Action::Skip,
-                    None,
+            Some(Ok(Superseded { winner, identical })) => {
+                let reason = if *identical {
+                    format!(
+                        "identical to profiles/{winner}/auth.json in this bundle; imported once from there"
+                    )
+                } else {
                     format!(
                         "same account as profiles/{winner}/auth.json in this bundle, which is newer; skipped"
-                    ),
-                ));
+                    )
+                };
+                let mut it = item(key, Action::Skip, None, reason);
+                it.superseded = true;
+                items.push(it);
                 duplicate_of.push((alias.clone(), winner.clone()));
                 continue;
             }
@@ -583,14 +625,17 @@ pub(crate) fn classify(
             } else {
                 match &live_value {
                     None => LiveState::Absent,
-                    Some(Some(v)) if profile::same_account_identity(v, value) => {
+                    // Strict: live must carry the same account_id and email.
+                    // A live file without an account_id cannot be shown to be
+                    // this workspace and is treated like another account.
+                    Some(Some(v)) if profile::same_account_identity_strict(v, value) => {
                         LiveState::Same(v.clone())
                     }
                     Some(_) => LiveState::Foreign,
                 }
             };
             let use_hint = format!(
-                "live auth.json is another account or unreadable and is left untouched; run `codex-switch use {}` to switch",
+                "live auth.json is another account, lacks an account_id, or is unreadable and is left untouched; run `codex-switch use {}` to switch",
                 local.alias
             );
             let mut replaces_live = false;

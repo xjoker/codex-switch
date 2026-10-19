@@ -141,7 +141,9 @@ fn command(home: &Path, args: &[&str]) -> Command {
         .env_remove("HTTPS_PROXY")
         .env_remove("ALL_PROXY")
         .env_remove("CS_PROXY")
-        .env_remove("CODEX_SWITCH_TEST_IMPORT_FAIL_AT");
+        .env_remove("CODEX_SWITCH_TEST_IMPORT_FAIL_AT")
+        .env_remove("CODEX_SWITCH_TEST_IMPORT_ABORT_AT")
+        .env_remove("CODEX_SWITCH_TEST_IMPORT_LIVE_BEFORE_APPLY");
     cmd
 }
 
@@ -254,6 +256,15 @@ fn action_of(v: &Value, key: &str) -> String {
         .find(|(k, _, _)| k == key)
         .map(|(_, a, _)| a)
         .unwrap_or_else(|| panic!("no item {key} in {v}"))
+}
+
+/// The import finished but bundle items were skipped or ambiguous: exit 1 and
+/// a single JSON value with `ok:false` and a code (follow-up to PR #119, N3).
+fn assert_incomplete(out: &Output, v: &Value, code: &str) {
+    assert_eq!(out.status.code(), Some(1), "{}", text(out));
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["code"], code, "{v}");
+    assert!(v["not_imported"].as_u64().unwrap() > 0, "{v}");
 }
 
 fn read_json(path: &Path) -> Value {
@@ -421,7 +432,7 @@ fn strategy_skip_keeps_local_by_default() {
     let b = machine_b_with_conflict("2026-10-01T00:00:00Z");
     let local = fs::read(app(&b).join("profiles/work/auth.json")).unwrap();
     let (out, v) = json_import(&b, &bundle, &[], PASS);
-    assert!(out.status.success(), "{}", text(&out));
+    assert_incomplete(&out, &v, "partial_import");
     assert_eq!(v["strategy"], "skip");
     assert_eq!(action_of(&v, "profiles/work/auth.json"), "skip");
     assert_eq!(action_of(&v, "profiles/personal/auth.json"), "create");
@@ -503,7 +514,7 @@ fn strategy_merge_keeps_newer_credentials_and_local_config() {
         ),
     );
     let (out, v) = json_import(&b, &bundle, &["--strategy", "merge", "--yes"], PASS);
-    assert!(out.status.success(), "{}", text(&out));
+    assert_incomplete(&out, &v, "partial_import");
     assert_eq!(action_of(&v, "profiles/work/auth.json"), "overwrite");
     assert_eq!(
         fs::read(app(&b).join("profiles/work/auth.json")).unwrap(),
@@ -525,7 +536,7 @@ fn strategy_merge_keeps_newer_credentials_and_local_config() {
     let b2 = machine_b_with_conflict("2026-10-20T00:00:00Z");
     let local = fs::read(app(&b2).join("profiles/work/auth.json")).unwrap();
     let (out, v) = json_import(&b2, &bundle, &["--strategy", "merge", "--yes"], PASS);
-    assert!(out.status.success(), "{}", text(&out));
+    assert_incomplete(&out, &v, "partial_import");
     assert_eq!(action_of(&v, "profiles/work/auth.json"), "skip");
     assert_eq!(
         fs::read(app(&b2).join("profiles/work/auth.json")).unwrap(),
@@ -1008,7 +1019,7 @@ fn r1_merge_never_replaces_newer_live_credentials() {
     let (_a, bundle) = bundle_of("r1h1a");
     let b = machine_b_live_newer();
     let (out, v) = json_import(&b, &bundle, &["--strategy", "merge", "--yes"], PASS);
-    assert!(out.status.success(), "{}", text(&out));
+    assert_incomplete(&out, &v, "partial_import");
     assert_eq!(live_refresh(&b), "refresh-work-live", "{v}");
     assert_eq!(action_of(&v, "profiles/work/auth.json"), "skip", "{v}");
     assert_eq!(profile_refresh(&b, "work"), "refresh-work-b");
@@ -1021,7 +1032,7 @@ fn r1_overwrite_keeps_newer_live_unless_replace_live() {
     let (_a, bundle) = bundle_of("r1h1b");
     let b = machine_b_live_newer();
     let (out, v) = json_import(&b, &bundle, &["--strategy", "overwrite", "--yes"], PASS);
-    assert!(out.status.success(), "{}", text(&out));
+    assert_incomplete(&out, &v, "partial_import");
     assert_eq!(live_refresh(&b), "refresh-work-live", "{v}");
     let it = item_of(&v, "profiles/work/auth.json");
     assert_eq!(it["replaces_live"], false, "{it}");
@@ -1078,8 +1089,8 @@ fn r1_overwrite_without_timestamps_is_flagged() {
     );
     assert_eq!(it["replaces_live"], false, "{it}");
 
-    let (out, _) = json_import(&b, &bundle, &["--strategy", "overwrite", "--yes"], PASS);
-    assert!(out.status.success(), "{}", text(&out));
+    let (out, v) = json_import(&b, &bundle, &["--strategy", "overwrite", "--yes"], PASS);
+    assert_incomplete(&out, &v, "nothing_imported");
     assert_eq!(live_refresh(&b), "refresh-work-b");
 }
 
@@ -1126,12 +1137,17 @@ fn r1_live_of_another_account_is_never_overwritten() {
     let it = item_of(&v, "profiles/work/auth.json");
     assert_eq!(it["replaces_live"], false, "{it}");
 
-    // --activate must not silently replace an untracked live login either.
+    // --activate must not silently replace an untracked live login either,
+    // and without a terminal it is refused before the import writes anything
+    // (no profile, no backup, no journal), not after.
     let b = temp_home("b");
     put_live(&b, &stranger);
+    let before = tree(&b);
     let (out, _) = json_import(&b, &bundle, &["--activate"], PASS);
     assert!(!out.status.success(), "{}", text(&out));
     assert_eq!(read_json(&b.join(".codex/auth.json")), stranger);
+    assert_eq!(before, tree(&b), "{}", text(&out));
+    assert!(!app(&b).join("import-backups").exists(), "{}", text(&out));
 }
 
 // R1-M1: one account under two aliases in a bundle writes one target once,
@@ -1349,4 +1365,346 @@ fn r1_interrupted_import_is_recoverable() {
             text(&out)
         );
     }
+}
+
+// ── Review round 2 follow-ups (PR #119, N1–N7) ────────────
+
+fn auth_text(email: &str, account_id: &str, tag: &str, last_refresh: &str) -> String {
+    serde_json::to_string(&auth(email, account_id, tag, last_refresh)).unwrap()
+}
+
+fn plain_import(home: &Path, bundle: &Path, extra: &[&str]) -> (Output, Value) {
+    let mut args = vec!["--json", "import", bundle.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    let out = run(home, &args, None);
+    let value: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not one JSON value ({e}): {}", text(&out)));
+    (out, value)
+}
+
+// N3: an import that writes nothing because every item is ambiguous fails
+// (exit 1, ok:false, nothing_imported) and does not tell the user to delete
+// the bundle.
+#[test]
+fn fu_n3_nothing_imported_is_an_error_and_keeps_bundle() {
+    let one = auth_text(
+        "work@example.com",
+        "acct-work",
+        "dupA",
+        "2026-10-05T00:00:00Z",
+    );
+    let two = auth_text(
+        "work@example.com",
+        "acct-work",
+        "dupB",
+        "2026-10-05T00:00:00Z",
+    );
+    let bundle = plaintext_bundle(&[
+        ("profiles/x1/auth.json", "profile_auth", &one),
+        ("profiles/x2/auth.json", "profile_auth", &two),
+    ]);
+    let b = temp_home("b");
+    let before = tree(&b);
+    let (out, v) = plain_import(&b, &bundle, &["--yes"]);
+    assert_incomplete(&out, &v, "nothing_imported");
+    assert_eq!(v["written"], 0, "{v}");
+    assert_eq!(v["not_imported"], 2, "{v}");
+    assert_eq!(before, tree(&b));
+
+    let out = run(&b, &["import", bundle.to_str().unwrap(), "--yes"], None);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let all = text(&out);
+    assert!(!all.contains("now that it has been imported"), "{all}");
+    assert!(all.contains("nothing was imported"), "{all}");
+    assert!(all.contains(&format!("keep {}", bundle.display())), "{all}");
+}
+
+// N3: a partial import keeps what it wrote but still exits 1 (partial_import),
+// names how many items were left behind, and prints no delete hint.
+#[test]
+fn fu_n3_partial_import_keeps_bundle() {
+    let one = auth_text(
+        "work@example.com",
+        "acct-work",
+        "dupA",
+        "2026-10-05T00:00:00Z",
+    );
+    let two = auth_text(
+        "work@example.com",
+        "acct-work",
+        "dupB",
+        "2026-10-05T00:00:00Z",
+    );
+    let good = auth_text("ok@example.com", "acct-ok", "ok", "2026-10-01T00:00:00Z");
+    let bundle = plaintext_bundle(&[
+        ("profiles/x1/auth.json", "profile_auth", &one),
+        ("profiles/x2/auth.json", "profile_auth", &two),
+        ("profiles/ok/auth.json", "profile_auth", &good),
+    ]);
+    let b = temp_home("b");
+    let (out, v) = plain_import(&b, &bundle, &["--yes"]);
+    assert_incomplete(&out, &v, "partial_import");
+    assert_eq!(v["written"], 1, "{v}");
+    assert_eq!(v["not_imported"], 2, "{v}");
+    assert_eq!(profile_refresh(&b, "ok"), "refresh-ok");
+
+    let b = temp_home("b");
+    let out = run(&b, &["import", bundle.to_str().unwrap(), "--yes"], None);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let all = text(&out);
+    assert!(!all.contains("now that it has been imported"), "{all}");
+    assert!(all.contains("1 item(s) written, but 2 item(s)"), "{all}");
+    assert!(app(&b).join("profiles/ok/auth.json").exists());
+}
+
+// N3: identical copies of one account count once, so two identical entries
+// and one older entry import the identical one, and the import is complete.
+#[test]
+fn fu_n3_identical_duplicates_are_deduped() {
+    let same = auth_text(
+        "work@example.com",
+        "acct-work",
+        "dupA",
+        "2026-10-05T00:00:00Z",
+    );
+    let older = auth_text(
+        "work@example.com",
+        "acct-work",
+        "dupB",
+        "2026-10-02T00:00:00Z",
+    );
+    let bundle = plaintext_bundle(&[
+        ("profiles/x1/auth.json", "profile_auth", &same),
+        ("profiles/x2/auth.json", "profile_auth", &same),
+        ("profiles/x3/auth.json", "profile_auth", &older),
+    ]);
+    let b = temp_home("b");
+    let (out, v) = plain_import(&b, &bundle, &["--yes"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["written"], 1, "{v}");
+    assert_eq!(v["not_imported"], 0, "{v}");
+    assert_eq!(action_of(&v, "profiles/x1/auth.json"), "create", "{v}");
+    assert_eq!(action_of(&v, "profiles/x2/auth.json"), "skip", "{v}");
+    assert_eq!(action_of(&v, "profiles/x3/auth.json"), "skip", "{v}");
+    let profiles: Vec<_> = fs::read_dir(app(&b).join("profiles"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(profiles.len(), 1, "{v}");
+    assert_eq!(profile_refresh(&b, "x1"), "refresh-dupA");
+
+    // A complete plaintext import still says to delete the bundle.
+    let b = temp_home("b");
+    let out = run(&b, &["import", bundle.to_str().unwrap(), "--yes"], None);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("now that it has been imported"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// Run `cmd` with stdin on a fresh pseudo-terminal whose input already holds
+/// `typed`, so a prompt reading a line would get it. stdout/stderr are piped.
+#[cfg(unix)]
+fn run_on_tty(mut cmd: Command, typed: &str) -> Output {
+    use std::os::fd::FromRawFd;
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: openpty writes two fresh descriptors on success; null name,
+    // termios and winsize pointers are allowed.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty failed");
+    // SAFETY: both descriptors were just returned by openpty and are owned here.
+    let (mut master, slave) =
+        unsafe { (fs::File::from_raw_fd(master), fs::File::from_raw_fd(slave)) };
+    master.write_all(typed.as_bytes()).unwrap();
+    cmd.stdin(Stdio::from(slave));
+    let out = cmd.output().unwrap();
+    drop(master);
+    out
+}
+
+// N4: on a real terminal, `import --activate` refuses outright — no y/N — to
+// switch over a live auth.json of the same account that is newer than the
+// profile, and refuses before the import writes anything. A live login of
+// another account still gets the usual `use` prompt (control).
+#[cfg(unix)]
+#[test]
+fn fu_n4_activate_refuses_newer_live_on_a_tty() {
+    let work = auth_text(
+        "work@example.com",
+        "acct-work",
+        "work-x",
+        "2026-10-10T00:00:00Z",
+    );
+    let bundle = plaintext_bundle(&[("profiles/work/auth.json", "profile_auth", &work)]);
+    let args = |strategy: &'static str| -> Vec<String> {
+        vec![
+            "import".into(),
+            bundle.to_str().unwrap().into(),
+            "--yes".into(),
+            "--strategy".into(),
+            strategy.into(),
+            "--activate=work".into(),
+        ]
+    };
+    for strategy in ["merge", "overwrite", "skip"] {
+        let b = machine_b_live_newer();
+        let before = tree(&b);
+        let argv = args(strategy);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let out = run_on_tty(command(&b, &argv), "y\n");
+        let all = text(&out);
+        assert_eq!(out.status.code(), Some(1), "{strategy}: {all}");
+        assert!(
+            all.contains("refusing to --activate work"),
+            "{strategy}: {all}"
+        );
+        assert!(all.contains("Nothing was imported"), "{strategy}: {all}");
+        assert!(!all.contains("[y/N]"), "{strategy}: prompted: {all}");
+        assert_eq!(live_refresh(&b), "refresh-work-live", "{strategy}: {all}");
+        assert_eq!(before, tree(&b), "{strategy}: {all}");
+
+        // Without a terminal: refused before any write as well.
+        let out = run(&b, &argv, None);
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+        assert_eq!(before, tree(&b), "{}", text(&out));
+    }
+
+    // Control: the pty really drives the `use` prompt. Live is another
+    // account: answering y switches, answering n aborts.
+    for (answer, switched) in [("y\n", true), ("n\n", false)] {
+        let b = temp_home("b");
+        let stranger = auth(
+            "stranger@example.com",
+            "acct-stranger",
+            "stranger",
+            "2026-10-18T00:00:00Z",
+        );
+        put_live(&b, &stranger);
+        let argv = args("skip");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let out = run_on_tty(command(&b, &argv), answer);
+        let all = text(&out);
+        assert!(all.contains("[y/N]"), "{all}");
+        assert_eq!(out.status.success(), switched, "{all}");
+        let expected = if switched {
+            "refresh-work-x"
+        } else {
+            "refresh-stranger"
+        };
+        assert_eq!(live_refresh(&b), expected, "{all}");
+    }
+}
+
+// N1 + N6: live replaced after the locked classification and before apply
+// (Codex refreshing it in that window) is caught by the write-time re-check:
+// the import is refused, nothing is written, and the error talks about the
+// live file rather than a profile.
+#[test]
+fn fu_n1_live_changed_after_classify_is_refused() {
+    let (_a, bundle) = bundle_of("fun1");
+    let newer_same = auth(
+        "work@example.com",
+        "acct-work",
+        "work-refreshed",
+        "2026-10-18T00:00:00Z",
+    );
+    let stranger = auth(
+        "stranger@example.com",
+        "acct-stranger",
+        "stranger",
+        "2026-10-18T00:00:00Z",
+    );
+    for (hooked, replace_live_hint) in [(newer_same, true), (stranger, false)] {
+        let b = machine_b_with_conflict("2026-10-01T00:00:00Z");
+        write(app(&b).join("current"), "work");
+        let local = read_json(&app(&b).join("profiles/work/auth.json"));
+        put_live(&b, &local);
+        // Sanity: without the hook this import replaces live.
+        let (out, v) = json_import(&b, &bundle, &["--strategy", "merge", "--dry-run"], PASS);
+        assert!(out.status.success(), "{}", text(&out));
+        assert_eq!(
+            item_of(&v, "profiles/work/auth.json")["replaces_live"],
+            true
+        );
+
+        let hook = b.join("hooked-live.json");
+        write(&hook, &serde_json::to_string_pretty(&hooked).unwrap());
+        let mut cmd = command(
+            &b,
+            &[
+                "import",
+                bundle.to_str().unwrap(),
+                "--passphrase-stdin",
+                "--strategy",
+                "merge",
+                "--yes",
+            ],
+        );
+        cmd.env("CODEX_SWITCH_TEST_IMPORT_LIVE_BEFORE_APPLY", &hook);
+        let out = run_with_stdin(cmd, &format!("{PASS}\n"));
+        let err = text(&out);
+        assert_eq!(out.status.code(), Some(1), "{err}");
+        assert_eq!(read_json(&b.join(".codex/auth.json")), hooked, "{err}");
+        assert_eq!(profile_refresh(&b, "work"), "refresh-work-b", "{err}");
+        assert!(!app(&b).join("profiles/personal").exists(), "{err}");
+        assert!(!app(&b).join("import-backups").exists(), "{err}");
+        assert!(
+            err.contains("refusing to replace the live auth.json"),
+            "{err}"
+        );
+        assert!(!err.contains("refusing to overwrite profile"), "{err}");
+        assert_eq!(err.contains("--replace-live"), replace_live_hint, "{err}");
+    }
+}
+
+fn auth_without_account_id(email: &str, tag: &str, last_refresh: &str) -> Value {
+    let claims = json!({
+        "email": email,
+        "https://api.openai.com/auth": { "chatgpt_plan_type": "plus" }
+    });
+    json!({
+        "tokens": {
+            "id_token": jwt(&claims),
+            "access_token": format!("access-{tag}"),
+            "refresh_token": format!("refresh-{tag}"),
+        },
+        "last_refresh": last_refresh,
+    })
+}
+
+// N7: import treats a live auth.json without an account_id as not provably the
+// same account (one email can own several workspaces): the profile is still
+// updated, live is left alone and the plan says why.
+#[test]
+fn fu_n7_live_without_account_id_is_not_replaced() {
+    let (_a, bundle) = bundle_of("fun7");
+    let b = machine_b_with_conflict("2026-10-01T00:00:00Z");
+    write(app(&b).join("current"), "work");
+    let live = auth_without_account_id("work@example.com", "live-noacct", "2026-10-01T00:00:00Z");
+    put_live(&b, &live);
+    let (out, v) = json_import(&b, &bundle, &["--strategy", "merge", "--yes"], PASS);
+    assert!(out.status.success(), "{}", text(&out));
+    let it = item_of(&v, "profiles/work/auth.json");
+    assert_eq!(it["action"], "overwrite", "{it}");
+    assert_eq!(it["replaces_live"], false, "{it}");
+    assert!(
+        it["reason"]
+            .as_str()
+            .unwrap()
+            .contains("lacks an account_id"),
+        "{it}"
+    );
+    assert_eq!(read_json(&b.join(".codex/auth.json")), live);
+    assert_eq!(profile_refresh(&b, "work"), "refresh-work-a");
 }
