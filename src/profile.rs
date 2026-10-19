@@ -998,8 +998,10 @@ fn ensure_live_not_older(
 /// store (`cmd_save`, `update_profile_from_live`, and login replacement) goes
 /// through here, so the two invariants cannot be bypassed by adding a caller:
 /// the credentials must belong to this profile's account, and they must not
-/// roll its single-use `refresh_token` backwards. Imports are create-only and
-/// never select an existing profile.
+/// roll its single-use `refresh_token` backwards. The auth.json import is
+/// create-only and never selects an existing profile; export-bundle import
+/// writes byte-exact files and checks the same two rules through
+/// [`guard_imported_credentials`].
 ///
 /// A profile that does not exist yet has nothing to protect, so this doubles as
 /// the create path; callers that require an existing profile check that first.
@@ -1013,6 +1015,48 @@ fn write_profile_credentials(alias: &str, incoming: &serde_json::Value) -> Resul
     }
     ensure_profile_parent(&dst)?;
     write_auth(&dst, incoming)?;
+    Ok(())
+}
+
+/// Whether `incoming` belongs to the same account as `existing`, by the strict
+/// rule credential replacement uses (email equal, account_id not conflicting).
+pub(crate) fn same_account_identity(
+    existing: &serde_json::Value,
+    incoming: &serde_json::Value,
+) -> bool {
+    ensure_same_account_identity("", existing, incoming).is_ok()
+}
+
+/// Whether replacing `existing` with `incoming` provably keeps the newest
+/// single-use `refresh_token`: the [`ensure_live_not_older`] rule (same
+/// refresh_token, or both stamps present and incoming strictly later).
+pub(crate) fn credentials_not_older(
+    existing: &serde_json::Value,
+    incoming: &serde_json::Value,
+) -> bool {
+    ensure_live_not_older("", existing, incoming).is_ok()
+}
+
+/// Write-time check for export-bundle import, run under the auth transaction
+/// right before `path` (a profile or the live auth.json) is replaced. The
+/// account must match whatever is there now; the newer-credentials rule may be
+/// waived only when the user explicitly chose to replace (`allow_older`).
+pub(crate) fn guard_imported_credentials(
+    label: &str,
+    path: &Path,
+    incoming: &serde_json::Value,
+    allow_older: bool,
+) -> Result<()> {
+    crate::auth::validate_managed_auth_value(incoming)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let existing = read_auth(path)
+        .with_context(|| format!("refusing to replace unreadable {}", path.display()))?;
+    ensure_same_account_identity(label, &existing, incoming)?;
+    if !allow_older {
+        ensure_live_not_older(label, &existing, incoming)?;
+    }
     Ok(())
 }
 

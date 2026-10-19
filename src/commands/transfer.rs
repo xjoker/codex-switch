@@ -166,6 +166,7 @@ pub(crate) struct ImportBundleArgs<'a> {
     pub yes: bool,
     pub activate: Option<Option<String>>,
     pub passphrase_stdin: bool,
+    pub replace_live: bool,
     pub json: bool,
 }
 
@@ -190,18 +191,35 @@ fn print_plan(plan: &plan::ImportPlan) {
         "KEY", "KIND", "ACTION", "TARGET"
     );
     for item in &plan.items {
+        let mut reason = item.reason.clone();
+        if let Some(url) = &item.base_url {
+            reason.push_str(&format!("; base_url {url}"));
+        }
+        if let Some(n) = item.codex_config_overrides.filter(|n| *n > 0) {
+            reason.push_str(&format!(
+                "; {n} codex_config override(s) passed to Codex on launch"
+            ));
+        }
         println!(
             "{:<44} {:<16} {:<10} {:<20} {}",
             item.key,
             item.kind,
             item.action.as_str(),
             item.target.as_deref().unwrap_or("-"),
-            item.reason
+            reason
         );
+        if item.replaces_live && item.action.writes() {
+            println!("{:<44} also replaces the live auth.json", "");
+        }
     }
     for notice in &plan.notices {
         warn(notice);
     }
+}
+
+fn live_is_untracked() -> Result<bool> {
+    let live = auth::codex_auth_path()?;
+    Ok(live.exists() && profile::find_matching_profile(&live).is_none())
 }
 
 pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
@@ -216,9 +234,12 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
     };
     let payload = transfer::open_payload(&bundle, passphrase.as_ref().map(|p| p.as_str()))?;
     drop(passphrase);
-    let preview = plan::classify(&payload, args.strategy)?;
+    let preview = plan::classify(&payload, args.strategy, args.replace_live)?;
 
     if args.dry_run {
+        if let Some(w) = transfer::apply::unfinished_import_warning() {
+            warn(&w);
+        }
         if args.json {
             print_json(&JsonImportBundle {
                 ok: true,
@@ -242,10 +263,20 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
     }
 
     transfer::apply::ensure_no_unfinished_import()?;
-    if preview.needs_confirmation() && !args.yes {
-        if args.json || !std::io::stdin().is_terminal() || args.passphrase_stdin {
+    let can_prompt = !args.json && std::io::stdin().is_terminal() && !args.passphrase_stdin;
+    // A plaintext bundle carries no authentication: whoever can write the
+    // file chooses its accounts, endpoints and Codex overrides. Importing one
+    // is confirmed exactly like writing one.
+    let unauthenticated = !encrypted && preview.has_writes();
+    if (preview.needs_confirmation() || unauthenticated) && !args.yes {
+        if !can_prompt {
+            if unauthenticated {
+                anyhow::bail!(
+                    "this bundle is NOT encrypted, so nothing proves who wrote it; review it with --dry-run and rerun with --yes"
+                );
+            }
             anyhow::bail!(
-                "this import would overwrite or merge existing data; review it with --dry-run and rerun with --yes"
+                "this import would overwrite or merge existing data, replace the live auth.json, or add Codex overrides; review it with --dry-run and rerun with --yes"
             );
         }
         print_plan(&preview);
@@ -253,10 +284,17 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
             return Err(crate::error::CsError::Aborted.into());
         }
     }
+    // --activate replaces the live auth.json; like `use`, it must not discard
+    // a login that belongs to no saved profile without asking.
+    if args.activate.is_some() && !can_prompt && live_is_untracked()? {
+        anyhow::bail!(
+            "the live auth.json belongs to no saved profile and --activate would overwrite it; import without --activate, then run `codex-switch use <alias>` interactively"
+        );
+    }
 
     let result = {
         let _transaction = profile::lock_auth_transaction()?;
-        let locked = plan::classify(&payload, args.strategy)?;
+        let locked = plan::classify(&payload, args.strategy, args.replace_live)?;
         if locked.decisions() != preview.decisions() {
             anyhow::bail!(
                 "the local store changed while the import was being prepared; rerun the import"
@@ -282,7 +320,16 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
             if !profile::profile_auth_path(&alias)?.exists() {
                 anyhow::bail!("cannot activate '{alias}': no such profile after import");
             }
-            profile::switch_profile(&alias)?;
+            profile::cmd_use(&alias, can_prompt).with_context(|| {
+                format!(
+                    "the import itself finished{}, but --activate {alias} did not",
+                    applied
+                        .backup_dir
+                        .as_ref()
+                        .map(|d| format!(" (backup {})", d.display()))
+                        .unwrap_or_default()
+                )
+            })?;
             Some(alias)
         }
     };
@@ -319,7 +366,7 @@ pub(crate) fn import_bundle_cmd(args: ImportBundleArgs<'_>) -> Result<()> {
             );
         }
         match (&activated, &final_plan.source_current_target) {
-            (Some(alias), _) => user_println(&format!("Switched to profile: {alias}")),
+            (Some(_), _) => {}
             (None, Some(target)) => println!(
                 "Source machine's current account: {} → run `codex-switch use {target}`",
                 final_plan.source_current.as_deref().unwrap_or(target)

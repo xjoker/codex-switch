@@ -21,7 +21,10 @@ pub(crate) const DEFAULT_T_COST: u32 = 3;
 pub(crate) const DEFAULT_P_COST: u32 = 1;
 
 const MIN_M_COST_KIB: u32 = 8 * 1024;
-const MAX_M_COST_KIB: u32 = 1024 * 1024;
+// Upper bounds are checked before deriving and before the passphrase is
+// known, so a hostile bundle can cost at most ~4x the default work.
+const MAX_M_COST_KIB: u32 = 256 * 1024;
+const MAX_T_COST: u32 = 6;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const KEY_CHECK_LEN: usize = 32;
@@ -161,10 +164,12 @@ pub(crate) fn check_bounds(enc: &Encryption) -> Result<()> {
         ))
         .into());
     }
-    if !(1..=10).contains(&k.t_cost) {
-        return Err(
-            CsError::UnsupportedEncryption(format!("t_cost {} outside 1..=10", k.t_cost)).into(),
-        );
+    if !(1..=MAX_T_COST).contains(&k.t_cost) {
+        return Err(CsError::UnsupportedEncryption(format!(
+            "t_cost {} outside 1..={MAX_T_COST}",
+            k.t_cost
+        ))
+        .into());
     }
     if !(1..=4).contains(&k.p_cost) {
         return Err(

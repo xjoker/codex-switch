@@ -159,8 +159,13 @@ pub async fn run_cli() {
 
 /// Report a bundle-only flag misuse the way clap reports a usage error
 /// (exit code 2), since it can only be detected after reading the file.
-fn bundle_usage_error(message: &str) -> ! {
+fn bundle_usage_error(message: &str, json: bool) -> ! {
     use clap::CommandFactory;
+    if json {
+        // `--json` promises exactly one JSON value on stdout, errors included.
+        crate::output::print_error_with_code(message, Some("usage"));
+        std::process::exit(2);
+    }
     crate::cli::Cli::command()
         .error(clap::error::ErrorKind::ArgumentConflict, message)
         .exit()
@@ -215,6 +220,13 @@ async fn dispatch(
         AuthCheckResult::NoChange
     };
     let auth_handled = !matches!(auth_check, AuthCheckResult::NoChange);
+    if matches!(
+        &cmd,
+        Commands::Use { .. } | Commands::Launch { .. } | Commands::Export { .. }
+    ) && let Some(warning) = crate::transfer::apply::unfinished_import_warning()
+    {
+        eprintln!("{}", color::warn(&format!("Warning: {warning}")));
+    }
 
     match cmd {
         Commands::Use {
@@ -236,6 +248,7 @@ async fn dispatch(
             yes,
             activate,
             passphrase_stdin,
+            replace_live,
         } => {
             let bundle_flags: Vec<&str> = [
                 (strategy.is_some(), "--strategy"),
@@ -243,6 +256,7 @@ async fn dispatch(
                 (yes, "--yes"),
                 (activate.is_some(), "--activate"),
                 (passphrase_stdin, "--passphrase-stdin"),
+                (replace_live, "--replace-live"),
             ]
             .into_iter()
             .filter_map(|(set, name)| set.then_some(name))
@@ -252,6 +266,7 @@ async fn dispatch(
                 if alias.is_some() {
                     bundle_usage_error(
                         "an alias cannot be given when importing an export bundle; aliases come from the bundle",
+                        json,
                     );
                 }
                 commands::import_bundle_cmd(commands::ImportBundleArgs {
@@ -261,14 +276,18 @@ async fn dispatch(
                     yes,
                     activate,
                     passphrase_stdin,
+                    replace_live,
                     json,
                 })?
             } else {
                 if !bundle_flags.is_empty() {
-                    bundle_usage_error(&format!(
-                        "{} can only be used with an export bundle, and '{path}' is not one",
-                        bundle_flags.join(", ")
-                    ));
+                    bundle_usage_error(
+                        &format!(
+                            "{} can only be used with an export bundle, and '{path}' is not one",
+                            bundle_flags.join(", ")
+                        ),
+                        json,
+                    );
                 }
                 commands::import_cmd(&path, alias.as_deref(), json).await?
             }

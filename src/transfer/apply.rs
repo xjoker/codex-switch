@@ -10,10 +10,21 @@ use super::LogicalKey;
 use super::plan::{ImportPlan, PlanItem};
 
 #[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BackupEntry {
+    /// Absolute path that was replaced.
+    pub path: String,
+    /// Its previous content, relative to the journal's directory.
+    pub backup: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Journal {
     pub state: String,
     /// Absolute paths replaced; their previous content is under `backup/`.
     pub replaced: Vec<String>,
+    /// `replaced` with the backup file of each, for manual recovery.
+    #[serde(default)]
+    pub backups: Vec<BackupEntry>,
     /// Absolute paths created by this import.
     pub created: Vec<String>,
     /// Directories created by this import (removed on rollback when empty).
@@ -24,13 +35,14 @@ pub(crate) fn backups_root() -> Result<PathBuf> {
     Ok(crate::auth::app_home()?.join("import-backups"))
 }
 
-/// Refuse to start while an earlier import never finished: its journal and
-/// backup are the only record of what to restore.
-pub(crate) fn ensure_no_unfinished_import() -> Result<()> {
+/// Journals of imports that never finished (killed or powered off between
+/// the first and the last write), with their directories.
+fn unfinished_imports() -> Result<Vec<(PathBuf, Journal)>> {
     let root = backups_root()?;
     let Ok(read) = std::fs::read_dir(&root) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
+    let mut out = Vec::new();
     for entry in read.flatten() {
         let journal_path = entry.path().join("journal.json");
         let Ok(raw) = std::fs::read(&journal_path) else {
@@ -40,17 +52,74 @@ pub(crate) fn ensure_no_unfinished_import() -> Result<()> {
             continue;
         };
         if journal.state == "in-progress" {
-            anyhow::bail!(
-                "an earlier import did not finish (journal {}).\nRestore it manually before \
-                 importing again:\n  1. copy each file under {} back to the path listed in \
-                 `replaced`\n  2. delete each path listed in `created`\n  3. set \"state\" in the \
-                 journal to \"rolled-back\"",
-                journal_path.display(),
-                entry.path().join("backup").display()
-            );
+            out.push((entry.path(), journal));
         }
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+fn recovery_steps(app: &Path, dir: &Path, journal: &Journal) -> String {
+    let pairs: Vec<(String, PathBuf)> = if journal.backups.is_empty() {
+        journal
+            .replaced
+            .iter()
+            .map(|p| {
+                (
+                    p.clone(),
+                    dir.join("backup").join(backup_relative(app, Path::new(p))),
+                )
+            })
+            .collect()
+    } else {
+        journal
+            .backups
+            .iter()
+            .map(|b| (b.path.clone(), dir.join(&b.backup)))
+            .collect()
+    };
+    let mut msg = format!(
+        "an earlier import did not finish (journal {}); some files may already hold \
+         imported data while others do not. Restore it manually before importing again:\n  \
+         1. copy each backup back over its original path:",
+        dir.join("journal.json").display()
+    );
+    if pairs.is_empty() {
+        msg.push_str("\n       (none: this import replaced no existing file)");
+    }
+    for (path, backup) in &pairs {
+        msg.push_str(&format!("\n       {} -> {}", backup.display(), path));
+    }
+    msg.push_str("\n  2. delete each file this import created:");
+    if journal.created.is_empty() {
+        msg.push_str("\n       (none)");
+    }
+    for path in &journal.created {
+        msg.push_str(&format!("\n       {path}"));
+    }
+    msg.push_str("\n  3. set \"state\" in the journal to \"rolled-back\"");
+    msg
+}
+
+/// Refuse to start while an earlier import never finished: its journal and
+/// backup are the only record of what to restore.
+pub(crate) fn ensure_no_unfinished_import() -> Result<()> {
+    let app = crate::auth::app_home()?;
+    if let Some((dir, journal)) = unfinished_imports()?.into_iter().next() {
+        anyhow::bail!("{}", recovery_steps(&app, &dir, &journal));
+    }
     Ok(())
+}
+
+/// A one-line warning for commands that do not block on an unfinished import
+/// (`import --dry-run`, `use`, `launch`, `export`), or `None`.
+pub(crate) fn unfinished_import_warning() -> Option<String> {
+    let found = unfinished_imports().ok()?;
+    let (dir, _) = found.first()?;
+    Some(format!(
+        "an earlier import did not finish (journal {}); profiles and the live auth.json may be inconsistent. Run `codex-switch import <bundle>` to see the recovery steps.",
+        dir.join("journal.json").display()
+    ))
 }
 
 fn ensure_private_dir_tracked(dir: &Path, created: &mut Vec<String>) -> Result<()> {
@@ -77,8 +146,27 @@ fn ensure_private_dir_tracked(dir: &Path, created: &mut Vec<String>) -> Result<(
     Ok(())
 }
 
+/// After a rename, flush the directory entry too so that, after a power
+/// loss, the journal and the files it describes are on disk in write order.
+fn sync_parent(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
+    crate::auth::atomic_write_private(path, bytes)?;
+    sync_parent(path);
+    Ok(())
+}
+
 fn write_journal(dir: &Path, journal: &Journal) -> Result<()> {
-    crate::auth::atomic_write_private(
+    write_durable(
         &dir.join("journal.json"),
         &serde_json::to_vec_pretty(journal)?,
     )
@@ -93,11 +181,17 @@ fn backup_relative(app: &Path, path: &Path) -> PathBuf {
 
 #[cfg(debug_assertions)]
 fn injected_failure(write_index: usize) -> Result<()> {
-    // Test hook (debug builds only): fail before the Nth write.
+    // Test hooks (debug builds only): fail, or kill the process without any
+    // cleanup, before the Nth write.
     if let Ok(n) = std::env::var("CODEX_SWITCH_TEST_IMPORT_FAIL_AT")
         && n.parse::<usize>().ok() == Some(write_index)
     {
         anyhow::bail!("injected import failure at write {write_index}");
+    }
+    if let Ok(n) = std::env::var("CODEX_SWITCH_TEST_IMPORT_ABORT_AT")
+        && n.parse::<usize>().ok() == Some(write_index)
+    {
+        std::process::abort();
     }
     Ok(())
 }
@@ -141,12 +235,35 @@ pub(crate) fn apply(plan: &ImportPlan) -> Result<ApplyResult> {
     let mut scratch = Vec::new();
     ensure_private_dir_tracked(&backup_dir, &mut scratch)?;
 
-    // Targets: each write, plus the live auth.json when a current profile changes.
+    // Targets: each write, plus the live auth.json when the plan says the
+    // current profile's live file is replaced too. Credentials are re-checked
+    // against what is on disk now (account identity, and the newer-token rule
+    // unless the user explicitly waived it) before anything is written.
     let live = crate::auth::codex_auth_path()?;
     let mut targets: Vec<(PathBuf, &str)> = Vec::new();
     for w in &writes {
-        targets.push((w.key.path_in(&app), w.text));
-        if w.item.updates_live {
+        let path = w.key.path_in(&app);
+        if matches!(w.key, LogicalKey::ProfileAuth(_)) {
+            let incoming: serde_json::Value =
+                serde_json::from_str(w.text.trim_start_matches('\u{feff}'))
+                    .context("parsing imported auth")?;
+            crate::profile::guard_imported_credentials(
+                &w.key.render(),
+                &path,
+                &incoming,
+                w.item.allow_older,
+            )?;
+            if w.item.replaces_live {
+                crate::profile::guard_imported_credentials(
+                    "live auth.json",
+                    &live,
+                    &incoming,
+                    w.item.allow_older_live,
+                )?;
+            }
+        }
+        targets.push((path, w.text));
+        if w.item.replaces_live {
             targets.push((live.clone(), w.text));
         }
     }
@@ -154,20 +271,28 @@ pub(crate) fn apply(plan: &ImportPlan) -> Result<ApplyResult> {
     let mut journal = Journal {
         state: "in-progress".into(),
         replaced: Vec::new(),
+        backups: Vec::new(),
         created: Vec::new(),
         created_dirs: Vec::new(),
     };
     for (path, _) in &targets {
         if path.exists() {
             let rel = backup_relative(&app, path);
-            let dst = backup_dir.join("backup").join(rel);
+            let dst = backup_dir.join("backup").join(&rel);
             let raw =
                 std::fs::read(path).with_context(|| format!("backing up {}", path.display()))?;
             if let Some(parent) = dst.parent() {
                 ensure_private_dir_tracked(parent, &mut scratch)?;
             }
-            crate::auth::atomic_write_private(&dst, &raw)?;
+            write_durable(&dst, &raw)?;
             journal.replaced.push(path.display().to_string());
+            journal.backups.push(BackupEntry {
+                path: path.display().to_string(),
+                backup: PathBuf::from("backup")
+                    .join(rel)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            });
         }
     }
     write_journal(&backup_dir, &journal)?;
@@ -183,7 +308,7 @@ pub(crate) fn apply(plan: &ImportPlan) -> Result<ApplyResult> {
                 journal.created.push(path.display().to_string());
                 write_journal(&backup_dir, &journal)?;
             }
-            crate::auth::atomic_write_private(path, text.as_bytes())?;
+            write_durable(path, text.as_bytes())?;
         }
         Ok(())
     })();

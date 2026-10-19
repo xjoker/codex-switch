@@ -216,7 +216,7 @@ pub enum Commands {
     },
     /// Import an auth.json file, a directory of JSON files, or an export bundle
     #[command(
-        after_help = "A file whose JSON has \"format\": \"codex-switch-export\" is imported as an export bundle (see `export --help`); anything else uses the auth.json import, which validates each token through the Usage API.\nBundle import is offline: tokens are not sent anywhere, but the managed workspace policy and identity checks still apply. Conflicts (same account or provider with different content, or a different config.toml) follow --strategy; a different account under a taken alias is always imported under a new alias. Replaced files are backed up under import-backups/.\nThe current account is never switched unless --activate is given.\n\nExamples:\n  codex-switch import ./auth.json work\n  codex-switch import backup.csbundle --dry-run\n  codex-switch import backup.csbundle --strategy merge --yes --activate"
+        after_help = "A file whose JSON has \"format\": \"codex-switch-export\" is imported as an export bundle (see `export --help`); anything else uses the auth.json import, which validates each token through the Usage API.\nBundle import is offline: tokens are not sent anywhere, but the managed workspace policy and identity checks still apply. Conflicts (same account or provider with different content, or a different config.toml) follow --strategy; a different account under a taken alias is always imported under a new alias. The live auth.json is replaced only for the current profile, only when it belongs to the same account, and only when it is provably older than the imported credentials (or with --replace-live). Replaced files are backed up under import-backups/. Unencrypted bundles, overwrites, merges and providers with codex_config overrides need --yes or interactive confirmation.\nThe current account is never switched unless --activate is given.\n\nExamples:\n  codex-switch import ./auth.json work\n  codex-switch import backup.csbundle --dry-run\n  codex-switch import backup.csbundle --strategy merge --yes --activate"
     )]
     Import {
         /// Path to an auth.json file, a directory containing JSON files, or a .csbundle export
@@ -238,6 +238,9 @@ pub enum Commands {
         /// [bundle] Read the passphrase from the first line of stdin
         #[arg(long)]
         passphrase_stdin: bool,
+        /// [bundle] With --strategy overwrite: also replace the current profile's live auth.json when it cannot be shown to be older than the imported credentials
+        #[arg(long)]
+        replace_live: bool,
     },
     /// Export all profiles, providers and config.toml into one passphrase-encrypted bundle
     #[command(

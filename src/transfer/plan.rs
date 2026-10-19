@@ -186,12 +186,24 @@ pub(crate) struct PlanItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     pub reason: String,
+    /// Whether this write also replaces the live Codex auth.json (the item is
+    /// the current profile and live provably belongs to the same account).
+    pub replaces_live: bool,
+    /// Providers: the endpoint the imported settings point at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Providers: how many raw `codex_config` overrides are passed to Codex.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_config_overrides: Option<usize>,
     /// Content to write when `action.writes()`. Never serialised.
     #[serde(skip)]
     pub write: Option<(LogicalKey, String)>,
-    /// Whether this write replaces the live Codex auth.json too.
+    /// The user explicitly accepted replacing credentials that cannot be shown
+    /// to be older (`--strategy overwrite`, and `--replace-live` for live).
     #[serde(skip)]
-    pub updates_live: bool,
+    pub allow_older: bool,
+    #[serde(skip)]
+    pub allow_older_live: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,19 +217,21 @@ pub(crate) struct ImportPlan {
 
 impl ImportPlan {
     pub(crate) fn needs_confirmation(&self) -> bool {
-        self.items
-            .iter()
-            .any(|i| matches!(i.action, Action::Overwrite | Action::Merge))
+        self.items.iter().any(|i| {
+            matches!(i.action, Action::Overwrite | Action::Merge)
+                || i.replaces_live
+                || (i.action.writes() && i.codex_config_overrides.is_some_and(|n| n > 0))
+        })
     }
     pub(crate) fn has_writes(&self) -> bool {
         self.items.iter().any(|i| i.action.writes())
     }
     /// A comparable fingerprint of the decisions, to detect that the store
     /// changed between the confirmation and taking the lock.
-    pub(crate) fn decisions(&self) -> Vec<(String, Action, Option<String>)> {
+    pub(crate) fn decisions(&self) -> Vec<(String, Action, Option<String>, bool)> {
         self.items
             .iter()
-            .map(|i| (i.key.clone(), i.action, i.target.clone()))
+            .map(|i| (i.key.clone(), i.action, i.target.clone(), i.replaces_live))
             .collect()
     }
 }
@@ -311,18 +325,114 @@ fn item(
         action,
         target,
         reason: reason.into(),
+        replaces_live: false,
+        base_url: None,
+        codex_config_overrides: None,
         write: None,
-        updates_live: false,
+        allow_older: false,
+        allow_older_live: false,
     }
+}
+
+/// What the live Codex auth.json is, relative to a current profile.
+enum LiveState {
+    /// The profile is not the current one; live is not touched.
+    NotCurrent,
+    /// No live auth.json.
+    Absent,
+    /// Live belongs to the imported account.
+    Same(serde_json::Value),
+    /// Live is another account (e.g. an untracked `codex login`) or unreadable.
+    Foreign,
+}
+
+fn strictly_newer(existing: &serde_json::Value, incoming: &serde_json::Value) -> bool {
+    matches!(
+        (profile::parse_last_refresh(incoming), profile::parse_last_refresh(existing)),
+        (Some(i), Some(l)) if i > l
+    )
+}
+
+struct BundleProfile<'a> {
+    key: &'a LogicalKey,
+    alias: &'a String,
+    entry: &'a Entry,
+    value: serde_json::Value,
+    identity: profile::AccountIdentity,
+}
+
+/// Several aliases in one bundle may carry the same account. Writing each of
+/// them would hit the same local target (last write wins) or create two
+/// profiles for one account, so each account is written at most once: the
+/// entry whose credentials are provably newest wins; with no provable winner
+/// none is written. Returns, per bundle alias, `Some(winner alias)` for losers
+/// and an `Err(reason)` for unresolvable groups.
+fn bundle_duplicates(profiles: &[BundleProfile<'_>]) -> BTreeMap<String, Result<String, String>> {
+    let mut groups: BTreeMap<(Option<String>, Option<String>), Vec<usize>> = BTreeMap::new();
+    for (idx, p) in profiles.iter().enumerate() {
+        groups
+            .entry((p.identity.account_id.clone(), p.identity.email.clone()))
+            .or_default()
+            .push(idx);
+    }
+    let mut out = BTreeMap::new();
+    for members in groups.values().filter(|m| m.len() > 1) {
+        let identical = members
+            .iter()
+            .all(|&i| profiles[i].value == profiles[members[0]].value);
+        let winner = if identical {
+            Some(members[0])
+        } else {
+            members.iter().copied().find(|&w| {
+                members
+                    .iter()
+                    .all(|&o| o == w || strictly_newer(&profiles[o].value, &profiles[w].value))
+            })
+        };
+        let keys = members
+            .iter()
+            .map(|&i| profiles[i].entry.key.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for &i in members {
+            match winner {
+                Some(w) if w == i => {}
+                Some(w) => {
+                    out.insert(profiles[i].alias.clone(), Ok(profiles[w].alias.clone()));
+                }
+                None => {
+                    out.insert(
+                        profiles[i].alias.clone(),
+                        Err(format!(
+                            "the same account appears {} times in this bundle ({keys}) and none \
+                             is provably newest (last_refresh); skipped",
+                            members.len()
+                        )),
+                    );
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Validate the whole payload and decide what happens to each entry. Any
 /// validation failure aborts the import before anything is written.
-pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPlan> {
+pub(crate) fn classify(
+    payload: &Payload,
+    strategy: Strategy,
+    replace_live: bool,
+) -> Result<ImportPlan> {
     let app = crate::auth::app_home()?;
     let mut taken = local_taken()?;
     let locals = local_profiles()?;
     let local_current = profile::read_current();
+    let live_path = crate::auth::codex_auth_path()?;
+    let live_value = if live_path.exists() {
+        Some(crate::auth::read_auth(&live_path).ok())
+    } else {
+        None
+    };
     let mut notices = Vec::new();
 
     // Parse and validate every key first, and reject duplicates.
@@ -367,7 +477,8 @@ pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPl
     let mut renames: BTreeMap<String, String> = BTreeMap::new();
     let mut provider_targets: BTreeMap<String, (Action, String)> = BTreeMap::new();
 
-    // Profiles.
+    // Profiles: validate every entry before deciding anything.
+    let mut bundle_profiles = Vec::new();
     for (key, entry) in &keyed {
         let LogicalKey::ProfileAuth(alias) = key else {
             continue;
@@ -383,12 +494,54 @@ pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPl
         }
         crate::auth::validate_managed_auth_value(&value)
             .with_context(|| format!("{} is not allowed by the managed policy", entry.key))?;
-
-        let exact = locals.iter().find(|l| {
-            l.identity.account_id == identity.account_id
-                && l.identity.email.is_some()
-                && l.identity.email == identity.email
+        bundle_profiles.push(BundleProfile {
+            key,
+            alias,
+            entry,
+            value,
+            identity,
         });
+    }
+    let duplicates = bundle_duplicates(&bundle_profiles);
+    let mut duplicate_of: Vec<(String, String)> = Vec::new();
+
+    for bp in &bundle_profiles {
+        let BundleProfile {
+            key,
+            alias,
+            entry,
+            value,
+            identity,
+        } = bp;
+        let (key, alias, value) = (*key, *alias, value);
+        match duplicates.get(alias.as_str()) {
+            Some(Ok(winner)) => {
+                items.push(item(
+                    key,
+                    Action::Skip,
+                    None,
+                    format!(
+                        "same account as profiles/{winner}/auth.json in this bundle, which is newer; skipped"
+                    ),
+                ));
+                duplicate_of.push((alias.clone(), winner.clone()));
+                continue;
+            }
+            Some(Err(reason)) => {
+                items.push(item(key, Action::Ambiguous, None, reason.clone()));
+                continue;
+            }
+            None => {}
+        }
+
+        let exact: Vec<&LocalProfile> = locals
+            .iter()
+            .filter(|l| {
+                l.identity.account_id == identity.account_id
+                    && l.identity.email.is_some()
+                    && l.identity.email == identity.email
+            })
+            .collect();
         let email_only: Vec<&LocalProfile> = locals
             .iter()
             .filter(|l| {
@@ -398,8 +551,24 @@ pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPl
             })
             .collect();
 
-        if let Some(local) = exact {
-            if local.value == value {
+        if exact.len() > 1 {
+            items.push(item(
+                key,
+                Action::Ambiguous,
+                None,
+                format!(
+                    "same account as several local profiles ({}); skipped",
+                    exact
+                        .iter()
+                        .map(|l| l.alias.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+            continue;
+        }
+        if let Some(local) = exact.first() {
+            if local.value == *value {
                 items.push(item(
                     key,
                     Action::Unchanged,
@@ -409,33 +578,100 @@ pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPl
                 renames.insert(alias.clone(), local.alias.clone());
                 continue;
             }
-            let imported_ts = profile::parse_last_refresh(&value);
-            let local_ts = profile::parse_last_refresh(&local.value);
+            let live = if local_current != local.alias {
+                LiveState::NotCurrent
+            } else {
+                match &live_value {
+                    None => LiveState::Absent,
+                    Some(Some(v)) if profile::same_account_identity(v, value) => {
+                        LiveState::Same(v.clone())
+                    }
+                    Some(_) => LiveState::Foreign,
+                }
+            };
+            let use_hint = format!(
+                "live auth.json is another account or unreadable and is left untouched; run `codex-switch use {}` to switch",
+                local.alias
+            );
+            let mut replaces_live = false;
+            let mut allow_older = false;
+            let mut allow_older_live = false;
             let (action, reason) = match strategy {
                 Strategy::Skip => (
                     Action::Skip,
                     "same account with different credentials; local kept (use --strategy)"
                         .to_string(),
                 ),
+                Strategy::Merge => {
+                    if !strictly_newer(&local.value, value) {
+                        (
+                            Action::Skip,
+                            "same account; local credentials are newer or not comparable"
+                                .to_string(),
+                        )
+                    } else {
+                        match &live {
+                            LiveState::Same(v) if !strictly_newer(v, value) => (
+                                Action::Skip,
+                                "same account; the live auth.json of this current profile is newer or not comparable; local kept"
+                                    .to_string(),
+                            ),
+                            LiveState::Same(_) => {
+                                replaces_live = true;
+                                (
+                                    Action::Overwrite,
+                                    "same account; imported credentials are newer than the profile and the live auth.json (last_refresh)".to_string(),
+                                )
+                            }
+                            LiveState::Foreign => (
+                                Action::Overwrite,
+                                format!(
+                                    "same account; imported credentials are newer (last_refresh); {use_hint}"
+                                ),
+                            ),
+                            LiveState::Absent | LiveState::NotCurrent => (
+                                Action::Overwrite,
+                                "same account; imported credentials are newer (last_refresh)"
+                                    .to_string(),
+                            ),
+                        }
+                    }
+                }
                 Strategy::Overwrite => {
+                    allow_older = true;
                     let mut reason = "same account; imported credentials replace local".to_string();
-                    if matches!((imported_ts, local_ts), (Some(i), Some(l)) if i < l) {
+                    if !profile::credentials_not_older(&local.value, value) {
                         reason.push_str(
-                            " (warning: imported last_refresh is older and may hold an already-rotated refresh token)",
+                            " (warning: imported credentials cannot be shown to be newer (last_refresh) and the local refresh token may already be the only valid one; it is kept in the backup)",
                         );
                     }
-                    (Action::Overwrite, reason)
+                    match &live {
+                        LiveState::Same(v) if profile::credentials_not_older(v, value) => {
+                            replaces_live = true;
+                            reason.push_str("; also replaces the live auth.json");
+                            (Action::Overwrite, reason)
+                        }
+                        LiveState::Same(_) if replace_live => {
+                            replaces_live = true;
+                            allow_older_live = true;
+                            reason.push_str(
+                                "; also replaces the live auth.json although it cannot be shown to be older (--replace-live; kept in the backup)",
+                            );
+                            (Action::Overwrite, reason)
+                        }
+                        LiveState::Same(_) => (
+                            Action::Skip,
+                            "warning: same account, but the live auth.json of this current profile cannot be shown to be older than the imported credentials; local kept (rerun with --replace-live to replace it anyway)"
+                                .to_string(),
+                        ),
+                        LiveState::Foreign => {
+                            reason.push_str("; ");
+                            reason.push_str(&use_hint);
+                            (Action::Overwrite, reason)
+                        }
+                        LiveState::Absent | LiveState::NotCurrent => (Action::Overwrite, reason),
+                    }
                 }
-                Strategy::Merge => match (imported_ts, local_ts) {
-                    (Some(i), Some(l)) if i > l => (
-                        Action::Overwrite,
-                        "same account; imported credentials are newer (last_refresh)".to_string(),
-                    ),
-                    _ => (
-                        Action::Skip,
-                        "same account; local credentials are newer or not comparable".to_string(),
-                    ),
-                },
             };
             let mut it = item(key, action, Some(local.alias.clone()), reason);
             if action.writes() {
@@ -443,7 +679,9 @@ pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPl
                     LogicalKey::ProfileAuth(local.alias.clone()),
                     entry.text.clone(),
                 ));
-                it.updates_live = local_current == local.alias;
+                it.replaces_live = replaces_live;
+                it.allow_older = allow_older;
+                it.allow_older_live = allow_older_live;
             }
             renames.insert(alias.clone(), local.alias.clone());
             items.push(it);
@@ -482,6 +720,11 @@ pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPl
         it.write = Some((LogicalKey::ProfileAuth(target), entry.text.clone()));
         items.push(it);
     }
+    for (loser, winner) in duplicate_of {
+        if let Some(target) = renames.get(&winner).cloned() {
+            renames.insert(loser, target);
+        }
+    }
 
     // Providers.
     for (key, entry) in &keyed {
@@ -517,6 +760,8 @@ pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPl
                     }
                 };
                 let mut it = item(key, action, Some(alias.clone()), reason);
+                it.base_url = Some(imported.base_url.clone());
+                it.codex_config_overrides = Some(imported.codex_config.len());
                 if action.writes() {
                     it.write = Some((key.clone(), entry.text.clone()));
                 }
@@ -546,6 +791,8 @@ pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPl
                     };
                 taken.insert(target.to_ascii_lowercase());
                 let mut it = item(key, action, Some(target.clone()), reason);
+                it.base_url = Some(imported.base_url.clone());
+                it.codex_config_overrides = Some(imported.codex_config.len());
                 it.write = Some((LogicalKey::Provider(target.clone()), text));
                 provider_targets.insert(alias.clone(), (action, target));
                 items.push(it);
@@ -655,6 +902,20 @@ pub(crate) fn classify(payload: &Payload, strategy: Strategy) -> Result<ImportPl
             it.write = Some((LogicalKey::AppConfig, text));
         }
         items.push(it);
+    }
+
+    // Defence in depth: no two writes may land on the same file.
+    let mut write_targets = BTreeSet::new();
+    for it in items.iter().filter(|i| i.action.writes()) {
+        if let Some((target, _)) = &it.write
+            && !write_targets.insert(target.render().to_ascii_lowercase())
+        {
+            return Err(CsError::InvalidBundle(format!(
+                "two entries would both write {}",
+                target.render()
+            ))
+            .into());
+        }
     }
 
     let source_current_target = payload

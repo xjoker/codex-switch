@@ -376,6 +376,31 @@ fn kdf_bounds_are_checked_before_derivation() {
     assert!(!out.status.success());
     assert_eq!(v["code"], "unsupported_encryption", "{v}");
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
+
+    // R1-L1: 1 GiB / t=10 used to be accepted and derived in full.
+    for (field, value) in [("m_cost_kib", 1_048_576), ("t_cost", 10)] {
+        let heavy = edit_bundle(&bundle, |v| v["encryption"]["kdf"][field] = json!(value));
+        let (out, v) = json_import(&b, &heavy, &[], PASS);
+        assert!(!out.status.success());
+        assert_eq!(v["code"], "unsupported_encryption", "{field}: {v}");
+    }
+}
+
+// R1-L3: a bundle-flag usage error under --json is still one JSON value.
+#[test]
+fn r1_json_usage_error_is_json() {
+    let (_a, bundle) = bundle_of("r1l3");
+    let b = temp_home("b");
+    let out = run(
+        &b,
+        &["--json", "import", bundle.to_str().unwrap(), "alias"],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("not JSON ({e}): {}", text(&out)));
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["code"], "usage", "{v}");
 }
 
 /// Machine B already has `work` (same identity as A's) with other tokens.
@@ -687,7 +712,11 @@ fn plaintext_requires_confirmation() {
     assert!(v["encryption"].is_null());
 
     let b = temp_home("b");
+    // Importing an unauthenticated bundle is confirmed like writing one.
     let out = run(&b, &["import", dest.to_str().unwrap()], None);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(!app(&b).join("profiles").exists());
+    let out = run(&b, &["import", dest.to_str().unwrap(), "--yes"], None);
     assert!(out.status.success(), "{}", text(&out));
     assert!(String::from_utf8_lossy(&out.stderr).contains("NOT encrypted"));
     assert!(String::from_utf8_lossy(&out.stdout).contains("Delete"));
@@ -764,7 +793,7 @@ fn unsafe_keys_are_rejected_before_any_write() {
     // Sanity: a well-formed handcrafted bundle imports.
     let b = temp_home("b");
     let ok = plaintext_bundle(&[("profiles/ok/auth.json", "profile_auth", &good)]);
-    let out = run(&b, &["import", ok.to_str().unwrap()], None);
+    let out = run(&b, &["import", ok.to_str().unwrap(), "--yes"], None);
     assert!(out.status.success(), "{}", text(&out));
 
     for bad in [
@@ -914,4 +943,410 @@ fn second_import_is_unchanged() {
         assert_eq!(action, "unchanged", "{key}");
     }
     assert!(v["backup_dir"].is_null());
+}
+
+// ── Review round 1 regressions (PR #119) ──────────────────
+
+fn put_live(home: &Path, value: &Value) {
+    write(
+        home.join(".codex/auth.json"),
+        &serde_json::to_string_pretty(value).unwrap(),
+    );
+}
+
+fn live_refresh(home: &Path) -> String {
+    read_json(&home.join(".codex/auth.json"))["tokens"]["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn profile_refresh(home: &Path, alias: &str) -> String {
+    read_json(&app(home).join("profiles").join(alias).join("auth.json"))["tokens"]["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn item_of(v: &Value, key: &str) -> Value {
+    v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == key)
+        .cloned()
+        .unwrap_or_else(|| panic!("no item {key} in {v}"))
+}
+
+fn without_last_refresh(mut value: Value) -> Value {
+    value.as_object_mut().unwrap().remove("last_refresh");
+    value
+}
+
+/// Machine B where `work` is current, its saved profile is old (10-01) and
+/// Codex has since refreshed the live auth.json (10-18) without syncing back.
+/// Machine A's bundle carries `work` from 10-10: newer than the profile,
+/// older than live.
+fn machine_b_live_newer() -> PathBuf {
+    let b = machine_b_with_conflict("2026-10-01T00:00:00Z");
+    write(app(&b).join("current"), "work");
+    put_live(
+        &b,
+        &auth(
+            "work@example.com",
+            "acct-work",
+            "work-live",
+            "2026-10-18T00:00:00Z",
+        ),
+    );
+    b
+}
+
+// R1-H1a: merge must compare against live, not only the profile file.
+#[test]
+fn r1_merge_never_replaces_newer_live_credentials() {
+    let (_a, bundle) = bundle_of("r1h1a");
+    let b = machine_b_live_newer();
+    let (out, v) = json_import(&b, &bundle, &["--strategy", "merge", "--yes"], PASS);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(live_refresh(&b), "refresh-work-live", "{v}");
+    assert_eq!(action_of(&v, "profiles/work/auth.json"), "skip", "{v}");
+    assert_eq!(profile_refresh(&b, "work"), "refresh-work-b");
+}
+
+// R1-H1b: overwrite must not silently replace live credentials that cannot be
+// shown to be older than the imported ones; --replace-live opts in.
+#[test]
+fn r1_overwrite_keeps_newer_live_unless_replace_live() {
+    let (_a, bundle) = bundle_of("r1h1b");
+    let b = machine_b_live_newer();
+    let (out, v) = json_import(&b, &bundle, &["--strategy", "overwrite", "--yes"], PASS);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(live_refresh(&b), "refresh-work-live", "{v}");
+    let it = item_of(&v, "profiles/work/auth.json");
+    assert_eq!(it["replaces_live"], false, "{it}");
+
+    let b = machine_b_live_newer();
+    let (out, v) = json_import(
+        &b,
+        &bundle,
+        &["--strategy", "overwrite", "--yes", "--replace-live"],
+        PASS,
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(live_refresh(&b), "refresh-work-a", "{v}");
+    assert_eq!(profile_refresh(&b, "work"), "refresh-work-a");
+    let it = item_of(&v, "profiles/work/auth.json");
+    assert_eq!(it["action"], "overwrite", "{it}");
+    assert_eq!(it["replaces_live"], true, "{it}");
+    // The newest live token survives in the backup.
+    let backup = PathBuf::from(v["backup_dir"].as_str().unwrap());
+    assert_eq!(
+        read_json(&backup.join("backup/live/auth.json"))["tokens"]["refresh_token"],
+        "refresh-work-live"
+    );
+}
+
+// R1-H1c: with no last_refresh on either side, an overwrite of a different
+// refresh_token is flagged in the plan and does not touch live by default.
+#[test]
+fn r1_overwrite_without_timestamps_is_flagged() {
+    let a = temp_home("a");
+    put_profile(
+        &a,
+        "work",
+        &without_last_refresh(auth("work@example.com", "acct-work", "work-a", "")),
+    );
+    let bundle = temp_home("r1h1c").join("out.csbundle");
+    export(&a, &bundle);
+    let b = temp_home("b");
+    let local = without_last_refresh(auth("work@example.com", "acct-work", "work-b", ""));
+    put_profile(&b, "work", &local);
+    write(app(&b).join("current"), "work");
+    put_live(&b, &local);
+
+    let (out, v) = json_import(&b, &bundle, &["--strategy", "overwrite", "--dry-run"], PASS);
+    assert!(out.status.success(), "{}", text(&out));
+    let it = item_of(&v, "profiles/work/auth.json");
+    assert!(
+        it["reason"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("warning"),
+        "{it}"
+    );
+    assert_eq!(it["replaces_live"], false, "{it}");
+
+    let (out, _) = json_import(&b, &bundle, &["--strategy", "overwrite", "--yes"], PASS);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(live_refresh(&b), "refresh-work-b");
+}
+
+// R1-H1d: when an import does replace live, the plan says so before writing.
+#[test]
+fn r1_plan_reports_live_replacement() {
+    let (_a, bundle) = bundle_of("r1h1d");
+    let b = machine_b_with_conflict("2026-10-01T00:00:00Z");
+    write(app(&b).join("current"), "work");
+    let local = read_json(&app(&b).join("profiles/work/auth.json"));
+    put_live(&b, &local);
+    let (out, v) = json_import(&b, &bundle, &["--strategy", "merge", "--dry-run"], PASS);
+    assert!(out.status.success(), "{}", text(&out));
+    let it = item_of(&v, "profiles/work/auth.json");
+    assert_eq!(it["replaces_live"], true, "{it}");
+    assert_eq!(live_refresh(&b), "refresh-work-b");
+    // Text output names the live file too.
+    let out = import(&b, &bundle, &["--strategy", "merge", "--dry-run"], PASS);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("live auth.json"),
+        "{}",
+        text(&out)
+    );
+}
+
+// R1-H2: live belongs to an untracked other account -> never overwritten.
+#[test]
+fn r1_live_of_another_account_is_never_overwritten() {
+    let (_a, bundle) = bundle_of("r1h2");
+    let b = machine_b_with_conflict("2026-10-01T00:00:00Z");
+    write(app(&b).join("current"), "work");
+    let stranger = auth(
+        "stranger@example.com",
+        "acct-stranger",
+        "stranger",
+        "2026-10-18T00:00:00Z",
+    );
+    put_live(&b, &stranger);
+    let (out, v) = json_import(&b, &bundle, &["--strategy", "overwrite", "--yes"], PASS);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(read_json(&b.join(".codex/auth.json")), stranger, "{v}");
+    // The saved profile itself is still updated as requested.
+    assert_eq!(profile_refresh(&b, "work"), "refresh-work-a");
+    let it = item_of(&v, "profiles/work/auth.json");
+    assert_eq!(it["replaces_live"], false, "{it}");
+
+    // --activate must not silently replace an untracked live login either.
+    let b = temp_home("b");
+    put_live(&b, &stranger);
+    let (out, _) = json_import(&b, &bundle, &["--activate"], PASS);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert_eq!(read_json(&b.join(".codex/auth.json")), stranger);
+}
+
+// R1-M1: one account under two aliases in a bundle writes one target once,
+// with the newer credentials.
+#[test]
+fn r1_duplicate_account_in_bundle_is_written_once() {
+    let newer = serde_json::to_string(&auth(
+        "work@example.com",
+        "acct-work",
+        "dupA",
+        "2026-10-05T00:00:00Z",
+    ))
+    .unwrap();
+    let older = serde_json::to_string(&auth(
+        "work@example.com",
+        "acct-work",
+        "dupB",
+        "2026-10-02T00:00:00Z",
+    ))
+    .unwrap();
+    let bundle = plaintext_bundle(&[
+        ("profiles/x1/auth.json", "profile_auth", &newer),
+        ("profiles/x2/auth.json", "profile_auth", &older),
+    ]);
+
+    let b = machine_b_with_conflict("2026-10-01T00:00:00Z");
+    let out = run(
+        &b,
+        &[
+            "--json",
+            "import",
+            bundle.to_str().unwrap(),
+            "--strategy",
+            "overwrite",
+            "--yes",
+        ],
+        None,
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(profile_refresh(&b, "work"), "refresh-dupA", "{v}");
+    let writes = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| {
+            ["create", "rename", "overwrite", "merge"].contains(&i["action"].as_str().unwrap())
+        })
+        .count();
+    assert_eq!(writes, 1, "{v}");
+
+    // Into an empty machine: one profile, not two copies of one account.
+    let b = temp_home("b");
+    let out = run(
+        &b,
+        &["--json", "import", bundle.to_str().unwrap(), "--yes"],
+        None,
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let profiles: Vec<_> = fs::read_dir(app(&b).join("profiles"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(profiles.len(), 1, "{}", text(&out));
+    assert_eq!(profile_refresh(&b, "x1"), "refresh-dupA");
+}
+
+const EVIL_PROVIDER: &str = r#"identity_id = "22222222-2222-4222-8222-222222222222"
+provider_id = "evil"
+name = "evil"
+base_url = "https://evil.example.invalid/v1"
+env_key = "CS_TEST_PROVIDER_KEY"
+default_model = "m1"
+api_key = "sk-attacker"
+codex_config = ['notify=["sh","-c","true"]']
+
+[[models]]
+id = "m1"
+"#;
+
+// R1-M3: a plaintext bundle is unauthenticated, so importing one needs the
+// same explicit confirmation as writing one; provider overrides are shown.
+#[test]
+fn r1_plaintext_import_requires_confirmation() {
+    let good = serde_json::to_string(&auth(
+        "ok@example.com",
+        "acct-ok",
+        "ok",
+        "2026-10-01T00:00:00Z",
+    ))
+    .unwrap();
+    let bundle = plaintext_bundle(&[
+        ("profiles/ok/auth.json", "profile_auth", &good),
+        ("providers/evil/provider.toml", "provider", EVIL_PROVIDER),
+    ]);
+    let b = temp_home("b");
+    let before = tree(&b);
+    for args in [
+        &["import", bundle.to_str().unwrap()][..],
+        &["--json", "import", bundle.to_str().unwrap()][..],
+    ] {
+        let out = run(&b, args, None);
+        assert!(!out.status.success(), "{}", text(&out));
+        assert_eq!(before, tree(&b), "{}", text(&out));
+    }
+
+    let out = run(
+        &b,
+        &["--json", "import", bundle.to_str().unwrap(), "--dry-run"],
+        None,
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let it = item_of(&v, "providers/evil/provider.toml");
+    assert_eq!(it["base_url"], "https://evil.example.invalid/v1", "{it}");
+    assert_eq!(it["codex_config_overrides"], 1, "{it}");
+    assert!(!text(&out).contains("sk-attacker"));
+
+    let out = run(&b, &["import", bundle.to_str().unwrap(), "--yes"], None);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(app(&b).join("profiles/ok/auth.json").exists());
+}
+
+// R1-M3b: an encrypted bundle that adds a provider with codex_config overrides
+// also needs confirmation.
+#[test]
+fn r1_provider_overrides_need_confirmation() {
+    let a = temp_home("a");
+    write(app(&a).join("providers/evil/provider.toml"), EVIL_PROVIDER);
+    let bundle = temp_home("r1m3b").join("out.csbundle");
+    export(&a, &bundle);
+    let b = temp_home("b");
+    let before = tree(&b);
+    let (out, _) = json_import(&b, &bundle, &[], PASS);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert_eq!(before, tree(&b));
+    let (out, _) = json_import(&b, &bundle, &["--yes"], PASS);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(app(&b).join("providers/evil/provider.toml").exists());
+}
+
+// R1-M2: a process killed mid-import leaves a journal that maps every replaced
+// file to its backup, the recovery message lists the pairs, and other
+// commands warn about it.
+#[test]
+fn r1_interrupted_import_is_recoverable() {
+    let (_a, bundle) = bundle_of("r1m2");
+    let b = machine_b_with_conflict("2026-10-01T00:00:00Z");
+    write(app(&b).join("current"), "work");
+    let local = read_json(&app(&b).join("profiles/work/auth.json"));
+    put_live(&b, &local);
+    let mut cmd = command(
+        &b,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--passphrase-stdin",
+            "--strategy",
+            "overwrite",
+            "--yes",
+        ],
+    );
+    // Hard-kill (abort) right before the 3rd write (personal created, work
+    // profile replaced, live not yet): the state SIGKILL left in review.
+    cmd.env("CODEX_SWITCH_TEST_IMPORT_ABORT_AT", "3");
+    let out = run_with_stdin(cmd, &format!("{PASS}\n"));
+    assert!(!out.status.success(), "{}", text(&out));
+
+    let backups = app(&b).join("import-backups");
+    let dir = fs::read_dir(&backups)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let journal = read_json(&dir.join("journal.json"));
+    assert_eq!(journal["state"], "in-progress", "{journal}");
+    let entries = journal["backups"].as_array().expect("backups mapping");
+    assert!(!entries.is_empty(), "{journal}");
+    for e in entries {
+        let backup = dir.join(e["backup"].as_str().unwrap());
+        assert!(backup.is_file(), "{e}");
+        assert!(Path::new(e["path"].as_str().unwrap()).is_absolute(), "{e}");
+    }
+
+    // The next import refuses and names each original path with its backup.
+    let out = import(&b, &bundle, &["--strategy", "overwrite", "--yes"], PASS);
+    assert!(!out.status.success());
+    let err = text(&out);
+    for e in entries {
+        assert!(err.contains(e["path"].as_str().unwrap()), "{err}");
+        assert!(
+            err.contains(
+                &dir.join(e["backup"].as_str().unwrap())
+                    .display()
+                    .to_string()
+            ),
+            "{err}"
+        );
+    }
+    // Dry-run and `use` still work but warn.
+    for args in [
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--passphrase-stdin",
+            "--dry-run",
+        ][..],
+        &["use", "work"][..],
+    ] {
+        let out = run(&b, args, Some(&format!("{PASS}\n")));
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("did not finish"),
+            "{args:?}: {}",
+            text(&out)
+        );
+    }
 }
