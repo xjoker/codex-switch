@@ -1,10 +1,14 @@
 # codex-switch
 
+English | [简体中文](README_CN.md)
+
 **A multi-account manager for [OpenAI Codex](https://github.com/openai/codex), including file-backed desktop logins.** Save local Codex logins, monitor quota, and select the best account before the next session.
 
-[中文说明](README_CN.md) · [**Documentation (Wiki)**](https://github.com/xjoker/codex-switch/wiki) · [Releases](https://github.com/xjoker/codex-switch/releases)
+[**Documentation (Wiki)**](https://github.com/xjoker/codex-switch/wiki) · [Releases](https://github.com/xjoker/codex-switch/releases)
 
 ![codex-switch account dashboard showing quota, reset times, credits, Daybreak access and subscription expiry](docs/tui.png)
+
+> `codex-switch` is an unofficial tool. It is not affiliated with or endorsed by OpenAI.
 
 > `codex-switch` manages local authentication files. Never publish profiles, `auth.json`, tokens, proxy credentials, or unredacted debug output.
 
@@ -43,7 +47,7 @@ codex-switch launch       # start Codex with the best account
 
 Login, account management, quota/subscription/Daybreak queries and the TUI work without installing either the CLI or the desktop app. Only `launch` needs a Codex engine. On macOS, it also discovers the engine bundled with ChatGPT or Codex in the user's or system Applications folder when no PATH CLI is available. Set `CODEX_SWITCH_CODEX` to an executable path for another installation or to select a specific engine. `launch` starts that engine in the terminal; it does not open the desktop GUI.
 
-Run `codex-switch doctor` to inspect engine selection; `--desktop-codex <path>` also checks a specific bundled engine. The support minimum remains 0.159.2; versions newer than the 0.162.1 alignment baseline are accepted but not fully verified. ChatGPT account management requires `cli_auth_credentials_store = "file"`; keyring, auto and ephemeral stores are unsupported. After switching, reconnect or restart existing desktop sessions and confirm the account shown there. A successful file update or managed daemon restart does not prove that an already-open desktop session changed accounts.
+Run `codex-switch doctor` to inspect engine selection; `--desktop-codex <path>` also checks a specific bundled engine. `codex-switch launch` requires Codex `0.159.2` or newer (the support minimum); versions newer than the `0.162.1` alignment baseline are accepted but not fully verified. ChatGPT account management requires `cli_auth_credentials_store = "file"`; keyring, auto and ephemeral stores are unsupported. After switching, reconnect or restart existing desktop sessions and confirm the account shown there. A successful file update or managed daemon restart does not prove that an already-open desktop session changed accounts.
 
 ## What it does
 

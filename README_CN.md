@@ -1,10 +1,16 @@
 # codex-switch
 
+[English](README.md) | 简体中文
+
+> 本文是英文 README 的中文译本，内容以英文版为准。
+
 **[OpenAI Codex](https://github.com/openai/codex) 多账号管理工具，支持文件凭据的桌面环境** — 保存本机 Codex 登录、监控配额，并在下一次会话前选出最佳账号。
 
-[English README](README.md) · [**完整文档（Wiki）**](https://github.com/xjoker/codex-switch/wiki) · [中文指南](https://github.com/xjoker/codex-switch/wiki/Chinese-Guide) · [Releases](https://github.com/xjoker/codex-switch/releases)
+[**完整文档（Wiki）**](https://github.com/xjoker/codex-switch/wiki) · [中文指南](https://github.com/xjoker/codex-switch/wiki/Chinese-Guide) · [Releases](https://github.com/xjoker/codex-switch/releases)
 
 ![codex-switch 账号面板：额度、重置时间、Credits、Daybreak 资格和订阅有效期](docs/tui.png)
+
+> `codex-switch` 是非官方工具，与 OpenAI 无关联，也未获 OpenAI 认可。
 
 > `codex-switch` 会在本机保存账号凭据。请勿分享 profile、`auth.json`、Token、代理凭据或未脱敏的 debug 输出。
 
@@ -43,7 +49,7 @@ codex-switch launch       # 用最佳账号启动 Codex
 
 即使桌面版和 CLI 都未安装，登录、账号管理、额度／订阅／Daybreak 查询和 TUI 仍可独立运行。只有 `launch` 需要 Codex 引擎。macOS 上 PATH 没有 `codex` 时，会发现用户或系统 Applications 中 ChatGPT／Codex 应用的内置引擎。非标准安装位置、其他平台或希望固定某个引擎时，可将 `CODEX_SWITCH_CODEX` 设为可执行文件路径。`launch` 在终端启动该引擎，不会打开桌面 GUI。
 
-用 `codex-switch doctor` 检查引擎选择；`--desktop-codex <路径>` 可额外检查指定的桌面引擎。最低支持版本仍为 `0.159.2`，当前对齐基线为 `0.162.1`。ChatGPT 账号管理需要 `cli_auth_credentials_store = "file"`，不支持 keyring、auto 和 ephemeral 存储。切换后需重新连接或重启已有桌面会话，并确认其中的账号；文件写入或 managed daemon 重启成功不代表已打开的桌面会话即时切号。
+用 `codex-switch doctor` 检查引擎选择；`--desktop-codex <路径>` 可额外检查指定的桌面引擎。`codex-switch launch` 需要 Codex `0.159.2` 或更新版本（最低支持版本）；高于当前对齐基线 `0.162.1` 的版本可以使用，但未经完整验证。ChatGPT 账号管理需要 `cli_auth_credentials_store = "file"`，不支持 keyring、auto 和 ephemeral 存储。切换后需重新连接或重启已有桌面会话，并确认其中的账号；文件写入或 managed daemon 重启成功不代表已打开的桌面会话即时切号。
 
 ## 功能一览
 
@@ -78,6 +84,18 @@ codex-switch launch       # 用最佳账号启动 Codex
 中文读者建议从 **[中文指南](https://github.com/xjoker/codex-switch/wiki/Chinese-Guide)** 入手：内含 ChatGPT 日常命令、自定义提供方 CLI、TUI 两页快捷键与表单操作摘要。行为细节与边界条件仍以英文 Wiki 为准。
 
 维护者文档：[发布流程](docs/RELEASE.md) · [更新日志](docs/CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)。
+
+## 开发
+
+需要 Rust 1.88 或更新版本：
+
+```bash
+cargo build
+cargo test --all
+cargo clippy --all-targets -- -D warnings
+```
+
+修改认证、存储、选号或更新逻辑前，请先阅读 Wiki 中的[开发者入门（Developer Onboarding）](https://github.com/xjoker/codex-switch/wiki/Developer-Onboarding)和[架构概览（Architecture Overview）](https://github.com/xjoker/codex-switch/wiki/Architecture-Overview)。
 
 ## 许可证
 
