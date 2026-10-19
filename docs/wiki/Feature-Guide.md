@@ -23,6 +23,24 @@ codex-switch import ~/auth-backups
 
 Interactive login deduplicates local profiles by `account_id` first and falls back to email when safe. Import is deliberately create-only and never updates an existing profile: Usage API validation proves that the bearer can access a workspace, but a Team workspace ID can be shared by several users and cannot authorize overwriting another saved credential. For the same reason, import will not write a *second* profile for an account you already have: when the incoming file is byte-identical to a saved profile, or carries the same `account_id` **and** email, the import is skipped before validation so its single-use refresh token is never spent. Use `login <alias>` to refresh an existing profile.
 
+### Move to another machine
+
+`export` packs every saved profile, custom provider (API key and model catalog included) and `config.toml` into one passphrase-encrypted bundle; `import` restores it on the other machine:
+
+```bash
+# machine A
+codex-switch export ~/codex-switch.csbundle
+# machine B
+codex-switch import ~/codex-switch.csbundle --dry-run
+codex-switch import ~/codex-switch.csbundle --strategy merge --yes --activate
+```
+
+The bundle is AES-256-GCM encrypted under an Argon2id key and written with mode `0600`. A wrong passphrase, a modified file and a bundle from a newer codex-switch fail with distinct errors before anything is written. Import is offline — tokens are not sent to the Usage API — but the managed workspace policy and identity checks still run, and one invalid entry aborts the whole import.
+
+Conflicts follow `--strategy`: `skip` (default) keeps the local copy, `overwrite` replaces it after a backup to `import-backups/`, and `merge` keeps the credential with the newer `last_refresh` and adds only missing `config.toml` keys (providers are kept as with `skip`). A different account under a taken alias is always imported under a new alias, never over the other account. The dry-run flags `[proxy]` as machine-specific. The current account is switched only with `--activate`.
+
+Refresh tokens are single-use. Export does not retire the accounts on the source machine; if both machines keep using the same account, one of them will fail with `refresh_token_reused` and need `codex-switch login <alias>`.
+
 Profile deletion is recoverable. An inactive profile is moved under `deleted-profiles/` after confirmation; the active profile cannot be deleted. See [recovery instructions](Troubleshooting#recover-a-deleted-profile).
 
 ## External login detection

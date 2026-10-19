@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Export / import to another machine.** `codex-switch export [FILE]` writes all profiles, providers (with API keys and model catalogs) and `config.toml` into one `.csbundle`, encrypted with AES-256-GCM under an Argon2id key (64 MiB, t=3, p=1) and written `0600`; `--plaintext` requires confirmation. `codex-switch import <bundle>` detects bundles by content, imports offline (managed policy and identity checks still apply), offers `--dry-run`, `--strategy skip|overwrite|merge`, `--activate`, backs up replaced files to `import-backups/` and rolls back on error. Existing `auth.json` imports are unchanged. Refresh tokens are single-use: both commands warn that using one account on two machines forces a re-login.
+
 ## v20261015.2.0 — 2026-10-15
 
 - TUI 主面板和账号菜单隐藏已确认无 Daybreak Blue／Red 资格的详情行；未知状态、查询失败和已有资格仍保留展示。

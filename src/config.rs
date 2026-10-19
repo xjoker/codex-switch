@@ -181,7 +181,7 @@ fn deprecated_key_warnings(raw: &str) -> Vec<String> {
     warnings
 }
 
-fn load_from_str_with_warnings(
+pub(crate) fn load_from_str_with_warnings(
     raw: &str,
 ) -> std::result::Result<(AppConfig, Vec<String>), toml::de::Error> {
     let config = toml::from_str::<AppConfig>(raw)?;

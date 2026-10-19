@@ -48,6 +48,7 @@ Run `codex-switch doctor` to inspect engine selection; `--desktop-codex <path>` 
 ## What it does
 
 - Saves, imports, renames, switches, and recoverably deletes Codex profiles.
+- Moves everything to another machine: `codex-switch export` writes all profiles, providers and `config.toml` into one passphrase-encrypted bundle, and `codex-switch import <bundle>` restores it offline with a dry-run preview and `skip` / `overwrite` / `merge` conflict strategies. Refresh tokens are single-use, so use each account on one machine only.
 - **Beta — custom API providers:** save a Responses-compatible endpoint and API key, configure multiple models with per-model reasoning and `web_search`, fetch the gateway's model catalog, and launch Codex through native per-run profiles. Compatibility depends on the gateway and model. Providers do not show ChatGPT quota or participate in ChatGPT automatic account selection:
 
   ```bash

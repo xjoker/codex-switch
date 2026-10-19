@@ -142,12 +142,12 @@ pub fn lock_reset_card_consume(profile_path: &Path) -> Result<File> {
     )
 }
 
-struct AuthTransaction {
+pub(crate) struct AuthTransaction {
     _launch: File,
     _auth: File,
 }
 
-fn lock_auth_transaction() -> Result<AuthTransaction> {
+pub(crate) fn lock_auth_transaction() -> Result<AuthTransaction> {
     lock_auth_transaction_after_launch(|| {})
 }
 
@@ -900,7 +900,9 @@ pub fn detect_auth_change() -> AuthChange {
 
 /// `last_refresh` as written by `auth::apply_tokens` and `login`: an RFC3339
 /// string at the auth.json root. Absent or malformed values yield `None`.
-fn parse_last_refresh(val: &serde_json::Value) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+pub(crate) fn parse_last_refresh(
+    val: &serde_json::Value,
+) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     let raw = val.get("last_refresh")?.as_str()?;
     chrono::DateTime::parse_from_rfc3339(raw).ok()
 }

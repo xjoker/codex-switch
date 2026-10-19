@@ -48,6 +48,7 @@ codex-switch launch       # 用最佳账号启动 Codex
 ## 功能一览
 
 - 保存、导入、重命名、切换和可恢复地删除 Codex 账号。
+- 整体迁移到另一台机器：`codex-switch export` 把全部账号、提供方和 `config.toml` 打包成一个用口令加密的文件，`codex-switch import <导出包>` 离线导入，支持 `--dry-run` 预览和 `skip` / `overwrite` / `merge` 冲突策略。refresh token 只能使用一次，同一账号请只在一台机器上使用。
 - **Beta：自定义 API 提供方。** 保存兼容 Responses 协议的端点和 API 密钥，为每个端点配置多个模型及各自的思考等级、`web_search`，获取网关模型目录并启动 Codex。兼容性取决于网关和具体模型；提供方不展示 ChatGPT 额度，也不参与自动选号。TUI Providers 页可用同一张表单新增/编辑（`a` / `e`），按 `Enter` / `o` 启动 Codex；启动使用 Codex 原生的每次运行独立 profile（`$CODEX_HOME` 中的 `cs-*.config.toml`），共享认证与 ChatGPT 配置保持不变：
 
   ```bash

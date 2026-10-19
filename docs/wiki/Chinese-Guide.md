@@ -45,6 +45,30 @@ ChatGPT 文件登录需要 `cli_auth_credentials_store = "file"`。登录、导�
 codex-switch import ~/auth-backups
 ```
 
+### 迁移到另一台机器（导出 / 导入）
+
+```bash
+# 机器 A：导出全部账号、提供方（含 API 密钥和模型目录）与 config.toml
+codex-switch export ~/codex-switch.csbundle          # 交互输入两次口令
+codex-switch export out.csbundle --no-config         # 不带 config.toml
+codex-switch export out.csbundle --no-providers      # 不带提供方
+
+# 机器 B：先预览，再导入
+codex-switch import ~/codex-switch.csbundle --dry-run
+codex-switch import ~/codex-switch.csbundle                      # 默认 --strategy skip
+codex-switch import ~/codex-switch.csbundle --strategy merge --yes --activate
+```
+
+- 导出包默认用 Argon2id（64 MiB、t=3、p=1）派生密钥，AES-256-GCM 加密，整个文件头参与认证；文件权限 0600，已存在的目标文件需 `--force` 才会覆盖。脚本中可用 `--passphrase-stdin` 从标准输入第一行读取口令，口令不接受命令行参数或环境变量。
+- `--plaintext` 写出未加密的导出包，需要交互确认或 `--yes`；文件里是可直接使用的 token 和 API 密钥，导入后请立即删除。
+- **refresh token 只能使用一次。** 导出不会让源机器上的账号失效；两台机器同时使用同一账号时，先刷新的一方会让另一方报 `refresh_token_reused`，需要重新 `codex-switch login <别名>`。
+- 导入离线进行，不调用 Usage API，但仍执行管理员工作区策略和身份检查；任何条目校验失败都会在写入前整体中止。口令错误、文件被改动、版本过新分别给出不同错误（`--json` 下的 `code` 为 `wrong_passphrase`、`bundle_tampered`、`unsupported_bundle_version`）。
+- 冲突策略：`skip`（默认，保留本地）、`overwrite`（用导入内容替换，旧文件备份到 `import-backups/`）、`merge`（账号保留 `last_refresh` 更新的一份；`config.toml` 只补充本地缺少的键；提供方暂按 `skip` 处理）。别名被其他账号或提供方占用时（大小写不敏感）总是改名导入为 `<别名>_2`，绝不覆盖其他账号。`overwrite` / `merge` 需要确认，非交互或 `--json` 时需要 `--yes`。
+- `--dry-run` 会把 `config.toml` 中的 `[proxy]` 标为“machine-specific, review”，代理通常与机器相关，导入后请检查。
+- 导入默认不切换当前账号，只提示源机器当前账号；加 `--activate[=别名]` 才会切换。
+- 写入中途出错会按日志反向回滚；进程崩溃留下 `in-progress` 日志时，下次导入会拒绝执行并打印手动恢复步骤。
+- 缓存、日志、已删除账号、`recovery/` 和 Codex 自身文件不导出。
+
 ## 日常操作（ChatGPT 账号）
 
 | 目的 | 命令 / 操作 |

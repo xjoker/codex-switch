@@ -98,6 +98,7 @@ If periodic refresh or warmup is desired, a user-managed cron, systemd user time
 | `$CODEX_SWITCH_HOME/providers/<alias>/models.json` | Generated Codex model catalog for `/model` |
 | `$CODEX_SWITCH_HOME/current` | Current alias marker |
 | `$CODEX_SWITCH_HOME/deleted-profiles/` | Recoverable profile archives |
+| `$CODEX_SWITCH_HOME/import-backups/<timestamp>/` | Bundle-import backups of replaced files plus `journal.json` (contains secrets; `0700`/`0600`) |
 | `$CODEX_SWITCH_HOME/cache.json` | Usage, workspace metadata, and rejected-credential cache |
 | `$CODEX_SWITCH_HOME/config.toml` | Application configuration |
 | `$CODEX_SWITCH_HOME/logs/` | Rotated diagnostic logs |

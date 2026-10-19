@@ -145,13 +145,25 @@ pub async fn run_cli() {
         if should_report_error(&e) {
             tracing::error!(target: REPORTED_ERROR_TARGET, error = %format!("{e:#}"), "command failed");
             if use_json {
-                print_error(&format!("{e:#}"));
+                let code = e
+                    .downcast_ref::<crate::error::CsError>()
+                    .and_then(|err| err.code());
+                crate::output::print_error_with_code(&format!("{e:#}"), code);
             } else {
                 eprintln!("{}", color::error(&format!("Error: {e:#}")));
             }
         }
         std::process::exit(1);
     }
+}
+
+/// Report a bundle-only flag misuse the way clap reports a usage error
+/// (exit code 2), since it can only be detected after reading the file.
+fn bundle_usage_error(message: &str) -> ! {
+    use clap::CommandFactory;
+    crate::cli::Cli::command()
+        .error(clap::error::ErrorKind::ArgumentConflict, message)
+        .exit()
 }
 
 fn command_name(cmd: &Commands) -> &'static str {
@@ -163,6 +175,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Delete { .. } => "delete",
         Commands::Login { .. } => "login",
         Commands::Import { .. } => "import",
+        Commands::Export { .. } => "export",
         Commands::SelfUpdate { .. } => "self-update",
         Commands::Doctor { .. } => "doctor",
         Commands::Warmup { .. } => "warmup",
@@ -215,9 +228,69 @@ async fn dispatch(
         Commands::Login { alias, device } => {
             commands::login_cmd(alias.as_deref(), device, json).await?
         }
-        Commands::Import { path, alias } => {
-            commands::import_cmd(&path, alias.as_deref(), json).await?
+        Commands::Import {
+            path,
+            alias,
+            strategy,
+            dry_run,
+            yes,
+            activate,
+            passphrase_stdin,
+        } => {
+            let bundle_flags: Vec<&str> = [
+                (strategy.is_some(), "--strategy"),
+                (dry_run, "--dry-run"),
+                (yes, "--yes"),
+                (activate.is_some(), "--activate"),
+                (passphrase_stdin, "--passphrase-stdin"),
+            ]
+            .into_iter()
+            .filter_map(|(set, name)| set.then_some(name))
+            .collect();
+            let is_bundle = crate::transfer::looks_like_bundle(std::path::Path::new(&path));
+            if is_bundle {
+                if alias.is_some() {
+                    bundle_usage_error(
+                        "an alias cannot be given when importing an export bundle; aliases come from the bundle",
+                    );
+                }
+                commands::import_bundle_cmd(commands::ImportBundleArgs {
+                    path: std::path::Path::new(&path),
+                    strategy: strategy.unwrap_or_default(),
+                    dry_run,
+                    yes,
+                    activate,
+                    passphrase_stdin,
+                    json,
+                })?
+            } else {
+                if !bundle_flags.is_empty() {
+                    bundle_usage_error(&format!(
+                        "{} can only be used with an export bundle, and '{path}' is not one",
+                        bundle_flags.join(", ")
+                    ));
+                }
+                commands::import_cmd(&path, alias.as_deref(), json).await?
+            }
         }
+        Commands::Export {
+            file,
+            plaintext,
+            yes,
+            force,
+            passphrase_stdin,
+            no_providers,
+            no_config,
+        } => commands::export_cmd(
+            file.as_deref(),
+            plaintext,
+            yes,
+            force,
+            passphrase_stdin,
+            no_providers,
+            no_config,
+            json,
+        )?,
         Commands::SelfUpdate {
             check,
             version,

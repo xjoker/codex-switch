@@ -1,0 +1,22 @@
+{
+  "format": "codex-switch-export",
+  "schema_version": 1,
+  "app_version": "20261015.2.0",
+  "platform": {
+    "os": "linux",
+    "arch": "x86_64"
+  },
+  "created_at": "2026-10-19T07:59:53Z",
+  "encryption": {
+    "scheme": "argon2id-aes256gcm",
+    "kdf": {
+      "m_cost_kib": 65536,
+      "t_cost": 3,
+      "p_cost": 1,
+      "salt": "xepkL/82KDRgEuE8nd/yMA=="
+    },
+    "nonce": "uknim6BgKobpYEZh",
+    "key_check": "Jxn4AAPQgEbDrR5cqL132eFFMengCZX93Ypu0cTUkPo="
+  },
+  "ciphertext": "HzZTulyvX8IgH2mBnZ1EFXlAYl2IdO8guuHKNYHCNdLGFa6+z5t1gCZCg4MRAcEqkCfW5ZlJI++eAofJpQtiB0kn7aHhqp7rzW3GiY1QqEEpgyuImpzamPFCQ9fMxrCnamkEehS8Ltq40S2wdrZ9xmUSUJeg70Rd6Rng4pEINP8/djgizts9VhF1w1okCGVxcTyQOZwWi2qYTEgV3F9v5oMTpDFVJuVfy/HaYx34byIj128ysiYvb7T2s0IbQrVRDj7qsM4gEKXnu27LbTdYSTV2U9xJ5645HmRnV5dLJzmLCXHA3dVRvzQUPxZZSNi5JLgeYJJSnkAJ5q132slQMh7hL9COE50M4T14zHd1lDVyjg/Lvs2K8fPKX1WgrhdFXB/iN7Udm53aeyMyFuyKVc9HCDibUKmT1g0k63IQEQPYofV7g0bgTk8svyt9+DkmXb1E3xrQN4P5QKJFyBl07BvL4BLmrWrCn3IjwQ8wztPgWZBg5LHJhjr8PIYMgfAj05KKfkDNg6eL/fTcPXzMX7SyLNzx4udUYO6HFku5cVLHcFTjPPmUtgHFSCdM2WVjkNDu5S88ekRLbxJHq6bp+A3m8IhPbARPVKI3Q3XM5Mf8cFk3AMEqDGLb4hYu27QyubGFfgfOOSN9VvmSajHtUMt4ta6xuVnsz2OEp9gPCocXav0bSgsUBs950OBgaIJ3MJOO/nHvtLgarp6cd6TP+lpyU0A0IkL9rISjPfLk3Zo="
+}
