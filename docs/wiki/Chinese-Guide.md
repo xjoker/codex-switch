@@ -66,7 +66,10 @@ codex-switch import ~/codex-switch.csbundle --strategy merge --yes --activate
 - 冲突策略：`skip`（默认，保留本地）、`overwrite`（用导入内容替换，旧文件备份到 `import-backups/`）、`merge`（账号保留 `last_refresh` 更新的一份；`config.toml` 只补充本地缺少的键；提供方暂按 `skip` 处理）。别名被其他账号或提供方占用时（大小写不敏感）总是改名导入为 `<别名>_2`，绝不覆盖其他账号。同一导出包中同一账号出现多次时只写入 `last_refresh` 可证明最新的一份，无法判断时整组跳过；本地有多个同账号 profile 时标为 `ambiguous`。`overwrite` / `merge`、替换 live `auth.json`、新增带 `codex_config` 覆盖项的提供方，以及未加密导出包的任何写入都需要确认，非交互或 `--json` 时需要 `--yes`；预览中会列出提供方的 `base_url` 和覆盖项数量。
 - live `~/.codex/auth.json` 和 profile 同等对待：导入更新当前账号时，只有 live 属于同一账号、且可证明比导入内容旧（`refresh_token` 相同，或 `last_refresh` 更早）才会替换。Codex 刚刷新过、更新或无法比较时，`merge` 跳过该账号，`overwrite` 需要再加 `--replace-live`；live 属于其他账号时绝不改动。`--json` 每项都有 `replaces_live`。
 - `--dry-run` 会把 `config.toml` 中的 `[proxy]` 标为“machine-specific, review”，代理通常与机器相关，导入后请检查。
-- 导入默认不切换当前账号，只提示源机器当前账号；加 `--activate[=别名]` 才会切换。与 `use` 一样，live `auth.json` 不属于任何已保存账号时，未经交互确认不会被覆盖。
+- 导入默认不切换当前账号，只提示源机器当前账号；加 `--activate[=别名]` 才会切换。与 `use` 一样，live `auth.json` 不属于任何已保存账号时，未经交互确认不会被覆盖；如果这份 live 和要激活的 profile 是同一账号、又不能证明比它旧（Codex 刷新过还没同步回来），`--activate` 在终端上也直接拒绝，不再询问，并且在写入任何文件之前就拒绝。
+- 判断 live 是否同一账号时，要求两边都有相同的 `account_id` 和 email；缺 `account_id` 的 live 不会被替换。
+- 退出码：所有条目都已写入或与本地相同时为 0；只要有条目是 `skip` 或 `ambiguous`（内容只剩导出包里有）就是 1，`--json` 输出 `ok:false`，`code` 为 `nothing_imported`（一条都没写入）或 `partial_import`（其余已写入并保留），另有 `written`、`not_imported` 计数；此时不会提示删除导出包，而是提示保留。包内同一账号的完全相同副本只算一份。
+- 非交互（没有终端或 `--json`）时，未加密导出包的任何写入、带 `codex_config` 覆盖项的提供方都必须加 `--yes`，否则在写入前以 exit 1 拒绝。
 - 写入中途出错会按日志反向回滚；进程崩溃留下 `in-progress` 日志时，日志里记录了每个被替换文件对应的备份，下次导入会拒绝执行并逐条列出“备份 -> 原路径”的恢复步骤；`import --dry-run`、`use`、`launch`、`export` 会提示存在未完成的导入。
 - 缓存、日志、已删除账号、`recovery/` 和 Codex 自身文件不导出。
 

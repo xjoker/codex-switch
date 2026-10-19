@@ -1018,8 +1018,10 @@ fn write_profile_credentials(alias: &str, incoming: &serde_json::Value) -> Resul
     Ok(())
 }
 
-/// Whether `incoming` belongs to the same account as `existing`, by the strict
-/// rule credential replacement uses (email equal, account_id not conflicting).
+/// Whether `incoming` could belong to the same account as `existing`, by the
+/// rule credential replacement outside import uses (email equal, account_id
+/// not conflicting). Import decisions use [`same_account_identity_strict`];
+/// this looser rule is only used where matching more means refusing more.
 pub(crate) fn same_account_identity(
     existing: &serde_json::Value,
     incoming: &serde_json::Value,
@@ -1037,12 +1039,48 @@ pub(crate) fn credentials_not_older(
     ensure_live_not_older("", existing, incoming).is_ok()
 }
 
-/// Write-time check for export-bundle import, run under the auth transaction
-/// right before `path` (a profile or the live auth.json) is replaced. The
-/// account must match whatever is there now; the newer-credentials rule may be
-/// waived only when the user explicitly chose to replace (`allow_older`).
-pub(crate) fn guard_imported_credentials(
+/// Import-only identity rule: both sides must carry the same `account_id`
+/// *and* the same email. The general rule ([`ensure_same_account_identity`])
+/// treats a missing `account_id` as "no contradiction", but one email can own
+/// several workspaces, so an import that cannot prove the workspace must not
+/// replace anything.
+fn ensure_same_account_identity_strict(
     label: &str,
+    existing: &serde_json::Value,
+    incoming: &serde_json::Value,
+) -> Result<()> {
+    if same_account_identity_strict(existing, incoming) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "authenticated account does not match profile '{label}' (import requires the same \
+         account_id and email on both sides)"
+    )
+}
+
+/// Whether both sides carry the same non-empty `account_id` and the same email.
+pub(crate) fn same_account_identity_strict(
+    existing: &serde_json::Value,
+    incoming: &serde_json::Value,
+) -> bool {
+    let existing = extract_identity(existing);
+    let incoming = extract_identity(incoming);
+    matches!(
+        (&existing.account_id, &incoming.account_id),
+        (Some(e), Some(i)) if !e.is_empty() && e == i
+    ) && matches!(
+        (&existing.email, &incoming.email),
+        (Some(e), Some(i)) if e == i
+    )
+}
+
+/// Write-time check for export-bundle import, run under the auth transaction
+/// right before profile `alias` is replaced. The account must match whatever
+/// is there now (strictly: same account_id and email); the newer-credentials
+/// rule may be waived only when the user explicitly chose to replace
+/// (`allow_older`).
+pub(crate) fn guard_imported_credentials(
+    alias: &str,
     path: &Path,
     incoming: &serde_json::Value,
     allow_older: bool,
@@ -1053,11 +1091,94 @@ pub(crate) fn guard_imported_credentials(
     }
     let existing = read_auth(path)
         .with_context(|| format!("refusing to replace unreadable {}", path.display()))?;
-    ensure_same_account_identity(label, &existing, incoming)?;
+    ensure_same_account_identity_strict(alias, &existing, incoming)?;
     if !allow_older {
-        ensure_live_not_older(label, &existing, incoming)?;
+        ensure_live_not_older(alias, &existing, incoming)?;
     }
     Ok(())
+}
+
+/// The live auth.json changed between planning an import and writing it, in a
+/// way that makes replacing it unsafe. Separate from [`StaleLiveAuth`], whose
+/// wording and recovery hint are about a saved profile.
+#[derive(Debug)]
+pub struct LiveChangedDuringImport {
+    pub path: String,
+    pub detail: String,
+    /// Whether `--strategy overwrite --replace-live` would be a way through.
+    pub stale: bool,
+}
+
+impl std::fmt::Display for LiveChangedDuringImport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "refusing to replace the live auth.json ({}): {}. It changed after this import was \
+             planned (for example Codex refreshed it, or another login replaced it), so \
+             replacing it could discard working credentials. No file was changed. Rerun the \
+             import to plan against the current live file (review it with --dry-run)",
+            self.path, self.detail
+        )?;
+        if self.stale {
+            write!(
+                f,
+                "; to replace it anyway, use --strategy overwrite --replace-live (the current \
+                 live file is kept in the import backup)"
+            )?;
+        }
+        write!(f, ".")
+    }
+}
+
+impl std::error::Error for LiveChangedDuringImport {}
+
+/// Write-time check for export-bundle import before the live auth.json is
+/// replaced; same rules as [`guard_imported_credentials`], live wording.
+pub(crate) fn guard_imported_live(
+    path: &Path,
+    incoming: &serde_json::Value,
+    allow_older: bool,
+) -> Result<()> {
+    crate::auth::validate_managed_auth_value(incoming)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let changed = |detail: String, stale: bool| -> anyhow::Error {
+        LiveChangedDuringImport {
+            path: path.display().to_string(),
+            detail,
+            stale,
+        }
+        .into()
+    };
+    let Ok(existing) = read_auth(path) else {
+        return Err(changed("it is no longer readable".to_string(), false));
+    };
+    if !same_account_identity_strict(&existing, incoming) {
+        return Err(changed(
+            "it now holds a different account than the imported credentials (or lacks the \
+             account_id needed to prove it is the same one)"
+                .to_string(),
+            false,
+        ));
+    }
+    if !allow_older && !credentials_not_older(&existing, incoming) {
+        return Err(changed(
+            format!(
+                "it now holds a different refresh_token and the imported credentials cannot be \
+                 shown to be newer (live: {}; imported: {})",
+                describe_last_refresh(&existing),
+                describe_last_refresh(incoming)
+            ),
+            true,
+        ));
+    }
+    Ok(())
+}
+
+/// `last_refresh` of an auth.json as shown in refusals.
+pub(crate) fn describe_refresh_state(val: &serde_json::Value) -> String {
+    describe_last_refresh(val)
 }
 
 /// The profile these credentials provably belong to, if there is exactly one.

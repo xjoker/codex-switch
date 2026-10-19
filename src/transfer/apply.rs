@@ -134,6 +134,9 @@ fn ensure_private_dir_tracked(dir: &Path, created: &mut Vec<String>) -> Result<(
     }
     for d in missing.into_iter().rev() {
         std::fs::create_dir(&d).with_context(|| format!("creating {}", d.display()))?;
+        // Make the new directory entry itself durable, so that after a power
+        // loss a file renamed into it (or the journal) is not orphaned.
+        sync_parent(&d);
         created.push(d.display().to_string());
         #[cfg(unix)]
         {
@@ -146,8 +149,9 @@ fn ensure_private_dir_tracked(dir: &Path, created: &mut Vec<String>) -> Result<(
     Ok(())
 }
 
-/// After a rename, flush the directory entry too so that, after a power
-/// loss, the journal and the files it describes are on disk in write order.
+/// After a rename or a `create_dir`, flush the parent directory too so that,
+/// after a power loss, the journal and the files it describes are on disk in
+/// write order. A no-op on Windows, which has no directory fsync.
 fn sync_parent(path: &Path) {
     #[cfg(unix)]
     if let Some(parent) = path.parent()
@@ -200,6 +204,23 @@ fn injected_failure(_write_index: usize) -> Result<()> {
     Ok(())
 }
 
+/// Test hook (debug builds only): after the import was classified under the
+/// lock and before `apply` runs, replace the live auth.json with the file
+/// named by `CODEX_SWITCH_TEST_IMPORT_LIVE_BEFORE_APPLY`, standing in for
+/// Codex refreshing it in that window.
+#[cfg(debug_assertions)]
+pub(crate) fn test_hook_before_apply() -> Result<()> {
+    if let Ok(src) = std::env::var("CODEX_SWITCH_TEST_IMPORT_LIVE_BEFORE_APPLY") {
+        let raw = std::fs::read(&src).with_context(|| format!("test hook: reading {src}"))?;
+        std::fs::write(crate::auth::codex_auth_path()?, raw)?;
+    }
+    Ok(())
+}
+#[cfg(not(debug_assertions))]
+pub(crate) fn test_hook_before_apply() -> Result<()> {
+    Ok(())
+}
+
 pub(crate) struct ApplyResult {
     pub backup_dir: Option<PathBuf>,
 }
@@ -229,37 +250,28 @@ pub(crate) fn apply(plan: &ImportPlan) -> Result<ApplyResult> {
     }
 
     let app = crate::auth::app_home()?;
-    let root = backups_root()?;
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
-    let backup_dir = root.join(stamp);
-    let mut scratch = Vec::new();
-    ensure_private_dir_tracked(&backup_dir, &mut scratch)?;
 
     // Targets: each write, plus the live auth.json when the plan says the
     // current profile's live file is replaced too. Credentials are re-checked
     // against what is on disk now (account identity, and the newer-token rule
-    // unless the user explicitly waived it) before anything is written.
+    // unless the user explicitly waived it) before anything is written, the
+    // backup directory included.
     let live = crate::auth::codex_auth_path()?;
     let mut targets: Vec<(PathBuf, &str)> = Vec::new();
     for w in &writes {
         let path = w.key.path_in(&app);
-        if matches!(w.key, LogicalKey::ProfileAuth(_)) {
+        if let LogicalKey::ProfileAuth(alias) = w.key {
             let incoming: serde_json::Value =
                 serde_json::from_str(w.text.trim_start_matches('\u{feff}'))
                     .context("parsing imported auth")?;
             crate::profile::guard_imported_credentials(
-                &w.key.render(),
+                alias,
                 &path,
                 &incoming,
                 w.item.allow_older,
             )?;
             if w.item.replaces_live {
-                crate::profile::guard_imported_credentials(
-                    "live auth.json",
-                    &live,
-                    &incoming,
-                    w.item.allow_older_live,
-                )?;
+                crate::profile::guard_imported_live(&live, &incoming, w.item.allow_older_live)?;
             }
         }
         targets.push((path, w.text));
@@ -267,6 +279,12 @@ pub(crate) fn apply(plan: &ImportPlan) -> Result<ApplyResult> {
             targets.push((live.clone(), w.text));
         }
     }
+
+    let root = backups_root()?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
+    let backup_dir = root.join(stamp);
+    let mut scratch = Vec::new();
+    ensure_private_dir_tracked(&backup_dir, &mut scratch)?;
 
     let mut journal = Journal {
         state: "in-progress".into(),
