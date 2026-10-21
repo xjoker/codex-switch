@@ -67,7 +67,7 @@ rpassword = "7"
 # Export bundles: AES-256-GCM/HMAC/CSPRNG from ring (already in the lockfile via
 # rustls) plus Argon2id for the passphrase KDF.
 ring = "0.17"
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
