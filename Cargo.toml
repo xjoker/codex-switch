@@ -61,7 +61,7 @@ chrono = { version = "0.4", features = ["clock"] }
 supports-color = "3"
 owo-colors = "4"
 tar = "0.4"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 libc = "0.2"
 rpassword = "7"
 
