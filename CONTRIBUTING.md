@@ -9,7 +9,7 @@ Thank you for improving `codex-switch`. Contributions should be small enough to 
 3. Base normal work on `dev`; `master` tracks stable releases.
 4. For a substantial feature or architecture change, open an issue before implementation so the boundary can be agreed first.
 
-Security vulnerabilities should not be posted with live credentials or exploit data in a public issue. Share only the minimum redacted reproduction material needed to assess the problem.
+Follow the [security policy](SECURITY.md) to report vulnerabilities privately.
 
 ## Make the change
 
@@ -26,8 +26,8 @@ Run the full local quality gate:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all --locked
 cargo audit
 bash -n scripts/install.sh
 ```
