@@ -34,7 +34,7 @@ jobs:
         run: |
           RAW_TAG="${GITHUB_REF#refs/tags/}"
           BASE=$(cat VERSION)
-          MANIFEST_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          MANIFEST_VERSION=$(grep -A 1 '\[package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)".*/\1/')
           if [[ ! "$BASE" =~ ^[1-9][0-9]*\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "VERSION must contain a SemVer-compatible numeric base" >&2
             exit 1
