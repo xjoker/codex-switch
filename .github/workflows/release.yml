@@ -39,6 +39,8 @@ jobs:
             echo "VERSION must contain a SemVer-compatible numeric base" >&2
             exit 1
           fi
+          echo "MANIFEST_VERSION: '$MANIFEST_VERSION'"
+          echo "BASE: '$BASE'"
           if [[ "$MANIFEST_VERSION" != "$BASE" ]]; then
             echo "Cargo.toml version must match VERSION" >&2
             exit 1
