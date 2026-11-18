@@ -142,6 +142,9 @@ pub async fn run_cli() {
     let result = dispatch(cli.command, use_json, launch_passthrough).await;
 
     if let Err(e) = result {
+        if let Some(error) = e.downcast_ref::<BundleUsageError>() {
+            bundle_usage_exit(error, use_json);
+        }
         if should_report_error(&e) {
             tracing::error!(target: REPORTED_ERROR_TARGET, error = %format!("{e:#}"), "command failed");
             if use_json {
@@ -157,17 +160,19 @@ pub async fn run_cli() {
     }
 }
 
-/// Report a bundle-only flag misuse the way clap reports a usage error
-/// (exit code 2), since it can only be detected after reading the file.
-fn bundle_usage_error(message: &str, json: bool) -> ! {
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct BundleUsageError(String);
+
+// Rebuilding clap's usage formatter inside dispatch can exhaust the Windows stack.
+fn bundle_usage_exit(error: &BundleUsageError, json: bool) -> ! {
     use clap::CommandFactory;
     if json {
-        // `--json` promises exactly one JSON value on stdout, errors included.
-        crate::output::print_error_with_code(message, Some("usage"));
+        crate::output::print_error_with_code(&error.0, Some("usage"));
         std::process::exit(2);
     }
     crate::cli::Cli::command()
-        .error(clap::error::ErrorKind::ArgumentConflict, message)
+        .error(clap::error::ErrorKind::ArgumentConflict, error)
         .exit()
 }
 
@@ -264,10 +269,9 @@ async fn dispatch(
             let is_bundle = crate::transfer::looks_like_bundle(std::path::Path::new(&path));
             if is_bundle {
                 if alias.is_some() {
-                    bundle_usage_error(
-                        "an alias cannot be given when importing an export bundle; aliases come from the bundle",
-                        json,
-                    );
+                    return Err(BundleUsageError(
+                        "an alias cannot be given when importing an export bundle; aliases come from the bundle".into(),
+                    ).into());
                 }
                 commands::import_bundle_cmd(commands::ImportBundleArgs {
                     path: std::path::Path::new(&path),
@@ -281,13 +285,11 @@ async fn dispatch(
                 })?
             } else {
                 if !bundle_flags.is_empty() {
-                    bundle_usage_error(
-                        &format!(
-                            "{} can only be used with an export bundle, and '{path}' is not one",
-                            bundle_flags.join(", ")
-                        ),
-                        json,
-                    );
+                    return Err(BundleUsageError(format!(
+                        "{} can only be used with an export bundle, and '{path}' is not one",
+                        bundle_flags.join(", ")
+                    ))
+                    .into());
                 }
                 commands::import_cmd(&path, alias.as_deref(), json).await?
             }
