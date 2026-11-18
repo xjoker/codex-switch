@@ -4218,10 +4218,7 @@ fn native_run_is_dead(meta: &ProviderRunMeta, scan: &LiveRuntimeScan) -> bool {
     let Some(runtime_id) = meta.runtime_provider_id.as_deref() else {
         return false;
     };
-    if scan.incomplete || scan.ids.contains(runtime_id) {
-        return false;
-    }
-    true
+    !(scan.incomplete || scan.ids.contains(runtime_id))
 }
 
 fn delete_native_profile_file(meta: &ProviderRunMeta) {

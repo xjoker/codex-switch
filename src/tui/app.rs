@@ -3010,6 +3010,23 @@ async fn run_app(
     app.start_codex_path_version_probe();
     app.load_profiles();
     let profiles_loaded = app.accounts_loaded();
+    
+    // Auto-trigger warmup for eligible profiles
+    if profiles_loaded {
+        let profiles = app.accounts.iter().map(|a| (a.alias.clone(), crate::profile::profile_auth_path(&a.alias).ok())).collect::<Vec<_>>();
+        for (alias, path) in profiles {
+            if let Some(path) = path {
+                tokio::spawn(async move {
+                    // Reuse logic: fetch usage, check 5h window, run warmup if needed
+                    // Security check: Graceful failure handles network/auth issues without UI lockup.
+                    if let Err(e) = crate::warmup::warmup_account(&alias, &path).await {
+                        tracing::warn!(alias = %alias, error = %e, "Auto warmup background task failed (non-critical)");
+                    }
+                });
+            }
+        }
+    }
+
     app.update_view();
 
     if profiles_loaded && !app.accounts.is_empty() {
@@ -3290,6 +3307,44 @@ async fn dispatch_main_key(
         }
         KeyCode::Char('h') => {
             app.open_help();
+            MainKeyOutcome::Continue
+        }
+        KeyCode::Char('w') => {
+            let alias = app.accounts.get(app.view_indices[app.selected])
+                .map(|a| a.alias.clone());
+            if let Some(alias) = alias {
+                let path = crate::profile::profile_auth_path(&alias).ok();
+                if let Some(path) = path {
+                    let alias_clone = alias.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::warmup::warmup_account(&alias_clone, &path).await {
+                            tracing::error!(alias = %alias_clone, error = %e, "Manual warmup failed");
+                        }
+                    });
+                    app.set_status(format!("Warmup triggered for {}", alias), 2);
+                }
+            }
+            MainKeyOutcome::Continue
+        }
+        KeyCode::Char('W') => {
+            let mut profiles_to_warmup = Vec::new();
+            for account in &app.accounts {
+                let alias = account.alias.clone();
+                let path = crate::profile::profile_auth_path(&alias).ok();
+                if let Some(path) = path {
+                    profiles_to_warmup.push((alias, path));
+                }
+            }
+
+            for (alias, path) in profiles_to_warmup {
+                let alias_clone = alias.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::warmup::warmup_account(&alias_clone, &path).await {
+                        tracing::error!(alias = %alias_clone, error = %e, "Batch warmup failed for account");
+                    }
+                });
+            }
+            app.set_status("All accounts warmup triggered".to_string(), 2);
             MainKeyOutcome::Continue
         }
         KeyCode::Tab => {
