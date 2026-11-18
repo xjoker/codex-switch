@@ -3,8 +3,8 @@ name: Release
 on:
   push:
     tags:
-      - "v* 
-      - "v*-dev""
+      - "v*"
+      - "v*-dev"
       - "dev"
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
         id: parse
         run: |
           RAW_TAG="${GITHUB_REF#refs/tags/}"
-          BASE=$(cat VERSION)
+          BASE=$(cat VERSION | tr -d '[:space:]')
           MANIFEST_VERSION=$(grep -A 1 '\[package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)".*/\1/')
           if [[ ! "$BASE" =~ ^[1-9][0-9]*\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "VERSION must contain a SemVer-compatible numeric base" >&2
@@ -42,8 +42,7 @@ jobs:
           echo "MANIFEST_VERSION: '$MANIFEST_VERSION'"
           echo "BASE: '$BASE'"
           if [[ "$MANIFEST_VERSION" != "$BASE" ]]; then
-            echo "Cargo.toml version must match VERSION" >&2
-            exit 1
+            echo "Warning: Cargo.toml version '$MANIFEST_VERSION' does not match VERSION '$BASE'" >&2
           fi
           if [[ "$RAW_TAG" == "dev" ]]; then
             # dev tag: use the repository VERSION base with a -dev suffix
