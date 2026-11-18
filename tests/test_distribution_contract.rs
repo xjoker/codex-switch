@@ -77,7 +77,6 @@ fn assert_markdown_anchor_exists(path: &Path, anchor: &str) {
 fn version_file_is_the_release_source_of_truth() {
     let version = repo_file("VERSION").trim().to_string();
     let manifest = repo_file("Cargo.toml");
-    let release = repo_file(".github/workflows/release.yml");
 
     // Pin the documented YYYYMMDD.N.0 shape rather than one literal version, which
     // every release had to edit. This also catches the two forms RELEASE.md warns
@@ -102,8 +101,6 @@ fn version_file_is_the_release_source_of_truth() {
     );
     assert_eq!(patch, "0", "the third component is always 0 for SemVer");
     assert!(manifest.contains(&format!("version = \"{version}\"")));
-    assert!(release.contains("BASE=$(cat VERSION)"));
-    assert!(!release.contains("BASE=$(grep '^version' Cargo.toml"));
 }
 
 #[test]
@@ -175,6 +172,7 @@ fn ci_runs_build_test_lint_format_audit_and_script_parsers() {
         "cargo fmt --check",
         "cargo audit",
         "bash -n scripts/install.sh",
+        "scripts/inject-release-version.py --check-base",
     ] {
         assert!(
             workflow.contains(command),
@@ -327,12 +325,10 @@ fn wiki_links_resolve_to_reviewed_pages_and_sources() {
 }
 
 #[test]
-fn release_rejects_shell_metacharacters_in_tags_and_uses_env_in_scripts() {
+fn release_validates_the_ref_and_uses_env_in_scripts() {
     let workflow = repo_file(".github/workflows/release.yml");
 
-    assert!(workflow.contains("TAG_PATTERN="));
-    assert!(workflow.contains("BASE_PATTERN=\"${BASE//./\\\\.}\""));
-    assert!(workflow.contains("[[ ! \"$TAG\" =~ $TAG_PATTERN ]]"));
+    assert!(workflow.contains("scripts/inject-release-version.py --ref \"$GITHUB_REF\""));
     assert!(!workflow.contains("VERSION=\"${{ needs.meta.outputs.version }}\""));
     assert!(!workflow.contains("${{ github.ref }}` at ${{ github.sha }}"));
     assert!(workflow.contains("RELEASE_VERSION: ${{ needs.meta.outputs.version }}"));
@@ -1000,15 +996,6 @@ fn prepublish_metadata_builder_checks_fixed_archive_hashes() {
             "prepublish metadata helper must enforce `{required}`"
         );
     }
-}
-
-#[test]
-fn dev_release_uses_the_short_calendar_prerelease_version() {
-    let workflow = repo_file(".github/workflows/release.yml");
-
-    assert!(workflow.contains("version=${BASE}-dev"));
-    assert!(!workflow.contains("TIMESTAMP"));
-    assert!(!workflow.contains("-dev.${TIMESTAMP}"));
 }
 
 #[test]

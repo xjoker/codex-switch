@@ -53,6 +53,7 @@ checksum = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 def write_fixture(root: Path, *, lock_version: str = OLD_VERSION) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    (root / "VERSION").write_text(f"{OLD_VERSION}\n", encoding="ascii")
     (root / "Cargo.toml").write_bytes(MANIFEST)
     (root / "Cargo.lock").write_bytes(LOCKFILE.replace(OLD_VERSION.encode(), lock_version.encode(), 1))
 
@@ -65,6 +66,73 @@ def run_inject(root: Path, version: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+class ReleaseRefTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        write_fixture(self.root)
+
+    def resolve(self, ref: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--ref", ref, "--root", str(self.root)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_resolves_release_channels_without_modifying_package_files(self) -> None:
+        for tag, version, prerelease, is_dev in (
+            ("dev", f"{OLD_VERSION}-dev", "true", "true"),
+            (f"v{OLD_VERSION}-dev", f"{OLD_VERSION}-dev", "true", "false"),
+            (f"v{OLD_VERSION}-rc.1", f"{OLD_VERSION}-rc.1", "true", "false"),
+            (f"v{OLD_VERSION}", OLD_VERSION, "false", "false"),
+        ):
+            with self.subTest(tag=tag):
+                result = self.resolve(f"refs/tags/{tag}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(dict(line.split("=", 1) for line in result.stdout.splitlines()), {
+                    "version": version, "prerelease": prerelease, "is_dev": is_dev,
+                })
+        self.assertEqual((self.root / "Cargo.toml").read_bytes(), MANIFEST)
+        self.assertEqual((self.root / "Cargo.lock").read_bytes(), LOCKFILE)
+
+    def test_rejects_refs_that_cannot_be_published(self) -> None:
+        for ref in (
+            "refs/heads/dev",
+            f"refs/tags/{OLD_VERSION}",
+            "refs/tags/v20261003.2.0",
+            f"refs/tags/v{OLD_VERSION}-rc.01",
+            f"refs/tags/v{OLD_VERSION}-rc;1",
+        ):
+            with self.subTest(ref=ref):
+                result = self.resolve(ref)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("tag", result.stderr)
+
+    def test_rejects_prerelease_suffix_in_repository_version(self) -> None:
+        (self.root / "VERSION").write_text(f"{OLD_VERSION}-dev\n", encoding="ascii")
+
+        result = self.resolve("refs/tags/dev")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("YYYYMMDD.N.0", result.stderr)
+
+    def test_rejects_repository_versions_that_disagree(self) -> None:
+        for filename, contents in (("Cargo.toml", MANIFEST), ("Cargo.lock", LOCKFILE)):
+            with self.subTest(filename=filename):
+                path = self.root / filename
+                path.write_bytes(contents.replace(OLD_VERSION.encode(), b"20261003.2.0", 1))
+                result = self.resolve("refs/tags/dev")
+                path.write_bytes(contents)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(filename, result.stderr)
 
 
 class InjectReleaseVersionTests(unittest.TestCase):

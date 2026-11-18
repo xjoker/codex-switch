@@ -817,7 +817,6 @@ pub(crate) async fn run_warmup(
     warmup_additional_models(client, access_token, account_id, is_fedramp, &models[1..]).await
 }
 
-
 async fn warmup_additional_models(
     client: &reqwest::Client,
     access_token: &str,

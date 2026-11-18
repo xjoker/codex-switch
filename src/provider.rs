@@ -3654,7 +3654,8 @@ fn same_path(left: &Path, right: &Path) -> bool {
     left == right || {
         #[cfg(windows)]
         {
-            left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy())
+            left.to_string_lossy()
+                .eq_ignore_ascii_case(&right.to_string_lossy())
         }
         #[cfg(not(windows))]
         {

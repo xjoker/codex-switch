@@ -1,6 +1,6 @@
 # Release process
 
-The daily quality gate is defined by `.github/workflows/ci.yml`. Pushes to `dev` and pull requests targeting `dev` or `master` run tests, Clippy, and a build on Linux, macOS, and Windows. The Linux quality job also runs formatting, `cargo audit`, and installer syntax checks. Release builds are defined by `.github/workflows/release.yml` and run only for `v*` and `dev` tag events.
+The daily quality gate is defined by `.github/workflows/ci.yml`. Pushes to `dev` and pull requests targeting `dev` or `master` run tests, Clippy, and a build on Linux, macOS, and Windows. The Linux quality job also checks the base version, formatting, dependencies, and installer syntax. The Release workflow accepts `v*` and `dev` tag pushes. For a manual run, select an existing release tag.
 
 This document is for maintainers. Users should follow the installation and update instructions in the README and do not need to manage Git tags.
 
@@ -46,7 +46,7 @@ Base versions use the SemVer-compatible `YYYYMMDD.N.0` format:
 | `vYYYYMMDD.N.0-<suffix>` (permanent prerelease) | `YYYYMMDD.N.0-<suffix>` | Same as tag | Unavailable to the hardcoded `dev` channel | No |
 | `vYYYYMMDD.N.0` (stable) | `YYYYMMDD.N.0` | Same as tag | Default channel | Yes |
 
-> The root `VERSION` file is the release source of truth. The `version` field in `Cargo.toml` mirrors it and never includes `-dev`; CI validates the match and adds the suffix during version injection.
+> The root `VERSION` file is the release source of truth. The package versions in `Cargo.toml` and `Cargo.lock` mirror it. Branch CI checks all three files. The Release workflow derives any prerelease suffix from the tag.
 > The final dev and stable builds come from the same commit. The Release workflow adds `-dev` for the rolling `dev` tag and leaves the manifest base unchanged for the stable tag; this version display difference does not require a source edit.
 >
 > The `--dev` path in `src/update.rs` calls `fetch_release(Some("dev"))`, so self-update cannot discover an independently named prerelease tag.
@@ -143,7 +143,7 @@ A stable promotion may happen on a later calendar date. Do not bump or edit `VER
 
 Before publishing the final dev candidate:
 
-- Run `date` to obtain the real local date, then bump `VERSION` and the synchronized `Cargo.toml` to that day's `YYYYMMDD.N.0`.
+- Run `date` to obtain the real local date, then set `VERSION` to that day's `YYYYMMDD.N.0`. From the repository root, run `python3 scripts/inject-release-version.py --version "$(cat VERSION)"` to sync `Cargo.toml` and `Cargo.lock`.
 - Add the matching `## vYYYYMMDD.N.0 — YYYY-MM-DD` section at the top of `docs/CHANGELOG.md`.
 
 ## Troubleshooting

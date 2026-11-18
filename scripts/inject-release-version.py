@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inject a release version into the two local package-version records."""
+"""Validate release metadata or inject a version into the local package records."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+BASE_VERSION = re.compile(rb"[1-9][0-9]{7}\.[1-9][0-9]*\.0")
 SEMVER = re.compile(
     rb"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     rb"(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -79,6 +80,35 @@ def _replace(data: bytes, span: tuple[int, int], value: bytes) -> bytes:
     return data[:start] + value + data[end:]
 
 
+def check_base(root: Path) -> bytes:
+    base = (root / "VERSION").read_bytes().strip()
+    if BASE_VERSION.fullmatch(base) is None:
+        raise ValueError(f"VERSION must use YYYYMMDD.N.0 with N starting at 1, got {base!r}")
+
+    for filename, read_version in (("Cargo.toml", _manifest_version), ("Cargo.lock", _lock_version)):
+        actual, _ = read_version((root / filename).read_bytes())
+        if actual != base:
+            raise ValueError(f"{filename} package version {actual!r} must match VERSION {base!r}")
+    return base
+
+
+def resolve_ref(ref: str, base: bytes) -> tuple[bytes, bool]:
+    if not ref.startswith("refs/tags/"):
+        raise ValueError(f"release requires a tag ref, got {ref!r}")
+    tag = ref.removeprefix("refs/tags/")
+    if tag == "dev":
+        return base + b"-dev", True
+
+    if tag.startswith("v") and tag.isascii():
+        version = tag[1:].encode("ascii")
+        if SEMVER.fullmatch(version) and version.split(b"-", 1)[0] == base:
+            return version, False
+
+    raise ValueError(
+        f"release tag {tag!r} must match v{base.decode('ascii')} with an optional SemVer prerelease"
+    )
+
+
 def inject(root: Path, version: str) -> None:
     try:
         target = version.encode("ascii")
@@ -115,14 +145,26 @@ def inject(root: Path, version: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", required=True, help="release SemVer to inject")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--version", help="release SemVer to inject")
+    mode.add_argument("--ref", help="Git tag ref to resolve to GitHub Actions outputs")
+    mode.add_argument("--check-base", action="store_true", help="check repository version records")
     parser.add_argument("--root", type=Path, default=SCRIPT_ROOT, help="repository root")
     args = parser.parse_args()
     try:
-        inject(args.root, args.version)
-    except ValueError as error:
+        if args.version is not None:
+            inject(args.root, args.version)
+            print(f"Injected release version {args.version} into Cargo.toml and Cargo.lock")
+            return
+
+        base = check_base(args.root)
+        if args.ref is not None:
+            version, is_dev = resolve_ref(args.ref, base)
+            print(f"version={version.decode('ascii')}")
+            print(f"prerelease={str(version != base).lower()}")
+            print(f"is_dev={str(is_dev).lower()}")
+    except (OSError, ValueError) as error:
         parser.error(str(error))
-    print(f"Injected release version {args.version} into Cargo.toml and Cargo.lock")
 
 
 if __name__ == "__main__":
