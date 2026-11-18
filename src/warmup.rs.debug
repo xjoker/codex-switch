@@ -1,0 +1,6 @@
+// Testing root cause of Agent initialization failures
+// The system has been injecting 'THINKING_LEVEL_XHIGH' into requests 
+// for models that do not support it. 
+// Root Cause: The Antigravity CLI/Agent interaction layer is 
+// adding reasoning parameters to subagent calls that the selected 
+// backend model doesn't recognize as valid arguments.

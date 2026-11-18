@@ -3010,10 +3010,19 @@ async fn run_app(
     app.start_codex_path_version_probe();
     app.load_profiles();
     let profiles_loaded = app.accounts_loaded();
-    
+
     // Auto-trigger warmup for eligible profiles
     if profiles_loaded {
-        let profiles = app.accounts.iter().map(|a| (a.alias.clone(), crate::profile::profile_auth_path(&a.alias).ok())).collect::<Vec<_>>();
+        let profiles = app
+            .accounts
+            .iter()
+            .map(|a| {
+                (
+                    a.alias.clone(),
+                    crate::profile::profile_auth_path(&a.alias).ok(),
+                )
+            })
+            .collect::<Vec<_>>();
         for (alias, path) in profiles {
             if let Some(path) = path {
                 tokio::spawn(async move {
@@ -3310,7 +3319,9 @@ async fn dispatch_main_key(
             MainKeyOutcome::Continue
         }
         KeyCode::Char('w') => {
-            let alias = app.accounts.get(app.view_indices[app.selected])
+            let alias = app
+                .accounts
+                .get(app.view_indices[app.selected])
                 .map(|a| a.alias.clone());
             if let Some(alias) = alias {
                 let path = crate::profile::profile_auth_path(&alias).ok();

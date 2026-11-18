@@ -798,6 +798,26 @@ fn warmup_failure_explanation(
 /// Takes the models already resolved for this warmup rather than fetching the
 /// list again: both halves come from the same `/models` answer, and
 /// `select_warmup_models` already excludes the main-pool model from this slice.
+pub(crate) async fn run_warmup(
+    client: &reqwest::Client,
+    access_token: &str,
+    account_id: Option<&str>,
+    is_fedramp: bool,
+    models: &[String],
+) -> Result<()> {
+    let body = build_body(&models[0]);
+    let resp = make_request(client, access_token, account_id, is_fedramp, &body)
+        .send()
+        .await
+        .map_err(|e| crate::auth::format_reqwest_error("warmup request failed", &e))?;
+    if !resp.status().is_success() {
+        bail!("warmup request failed: {}", resp.status());
+    }
+    await_warmup_completion(resp).await?;
+    warmup_additional_models(client, access_token, account_id, is_fedramp, &models[1..]).await
+}
+
+
 async fn warmup_additional_models(
     client: &reqwest::Client,
     access_token: &str,
