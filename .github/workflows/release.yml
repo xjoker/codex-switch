@@ -22,6 +22,9 @@ env:
 jobs:
   meta:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     outputs:
       version: ${{ steps.parse.outputs.version }}
       prerelease: ${{ steps.parse.outputs.prerelease }}
@@ -33,6 +36,10 @@ jobs:
       - name: Parse tag
         id: parse
         run: python3 scripts/inject-release-version.py --ref "$GITHUB_REF" >> "$GITHUB_OUTPUT"
+      - name: Require successful dev CI for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/ci/check-release-ci.py "$GITHUB_SHA" "$GITHUB_REPOSITORY"
 
   build:
     needs: meta

@@ -14,7 +14,7 @@ All of the following must be true before any release push:
 - The local quality gate and a real CLI smoke test pass.
 - `git push` has explicit authorization and the commit to publish is recorded.
 
-A development release has two gates: push the branch and wait for all three CI hosts to pass, then move the `dev` tag to trigger the Release workflow. Never move the tag while branch CI is failing.
+A development release requires successful branch CI for the exact candidate commit. The preflight checks it before moving the `dev` tag. The Release workflow repeats the check before building.
 
 The final development release before a stable release has an additional acceptance gate:
 
@@ -63,36 +63,27 @@ or operate on the wrong ref.
 
 ## Publish a development release
 
-Prerequisite: `dev` contains every intended commit and the local worktree is clean.
+Run this from a clean local `dev` checkout after the PR lands and branch CI finishes. The preflight stops at the first failed check.
 
 ```bash
-# 1) Run the local gate. This is a preflight, not the source of release artifacts.
-cargo fmt --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --all --locked
-cargo audit
-bash -n scripts/install.sh
-
-# 2) Push the dev branch with a full refspec.
-git push origin refs/heads/dev:refs/heads/dev
-
-# 3) Wait for branch CI and confirm the remote branch points to this commit.
-gh run list --branch dev --workflow CI --limit 1
-git rev-parse refs/remotes/origin/dev
-
-# 4) Delete the old remote dev tag before moving it.
-git push origin :refs/tags/dev
-
-# 5) Recreate the local dev tag at HEAD.
-git tag -d dev && git tag dev
-
-# 6) Push the tag to build six targets and replace the dev GitHub Release.
-git push origin refs/tags/dev:refs/tags/dev
+# Sync dev before testing the release candidate.
+git pull --ff-only origin refs/heads/dev &&
+  cargo fmt --check &&
+  cargo clippy --all-targets --locked -- -D warnings &&
+  cargo test --all --locked &&
+  cargo audit &&
+  bash -n scripts/install.sh &&
+  candidate=$(git rev-parse refs/heads/dev) &&
+  git fetch origin refs/heads/dev &&
+  test "$candidate" = "$(git rev-parse FETCH_HEAD)" &&
+  python3 scripts/ci/check-release-ci.py "$candidate" xjoker/codex-switch &&
+  remote_tag=$(git ls-remote --refs origin refs/tags/dev) &&
+  old_tag=${remote_tag%%[[:space:]]*} &&
+  git push --force-with-lease="refs/tags/dev:$old_tag" origin "$candidate:refs/tags/dev" &&
+  git update-ref refs/tags/dev "$candidate"
 ```
 
-> Step 6 **must not use `git push origin dev`** because the branch and tag names are ambiguous. Use `refs/tags/dev:refs/tags/dev`.
->
-> Step 2 likewise requires `refs/heads/dev:refs/heads/dev`.
+The lease aborts the tag update if another maintainer moves it after the preflight.
 
 GitHub Actions Release builds are the only distribution source of truth; do not publish from local `target/release`. The `attest` job verifies every archive against its `.sha256`, then uses GitHub artifact attestations to generate a Sigstore bundle; the upgrade gate and the GitHub Release both use that bundle. Artifacts are:
 
@@ -152,7 +143,7 @@ Before publishing the final dev candidate:
 Use `refs/heads/dev:refs/heads/dev` for the branch or `refs/tags/dev:refs/tags/dev` for the tag.
 
 **The `dev` branch push started Wiki but not CI**
-Wiki sync only runs when `docs/wiki/**` or `.github/workflows/wiki.yml` changes. Branch quality is the `CI` workflow. Before moving the `dev` tag, confirm `gh run list --commit <sha> --workflow CI` lists Format and audit plus Test on linux, macos, and windows for that commit. An empty commit retriggers `CI` but not Wiki. If GitHub Actions is in an outage, the `push` event may create no workflow run; wait until Actions is operational, then push a new commit or use `workflow_dispatch`. Do not move the tag while that list is empty or failing.
+Wiki sync runs when `docs/wiki/**` or `.github/workflows/wiki.yml` changes. Branch quality runs in the `CI` workflow. If a branch push did not create a run, dispatch `CI` on the `dev` branch after Actions recovers. Run the preflight again after the new run completes.
 
 **The dev tag was pushed but CI did not run**
 Check whether the Release workflow was triggered and whether `on.push.tags` still includes `"dev"`.
