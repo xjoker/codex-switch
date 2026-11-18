@@ -384,7 +384,7 @@ checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
 name = "codex-switch"
-version = "20261118.1.0"
+version = "20261118.2.0"
 dependencies = [
  "anyhow",
  "argon2",
