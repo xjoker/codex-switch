@@ -53,7 +53,7 @@ jobs:
         run: cargo fmt --check
       # Prebuilt binary instead of compiling cargo-audit on every run.
       - name: Install cargo-audit
-        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-audit
       - name: Audit dependencies
